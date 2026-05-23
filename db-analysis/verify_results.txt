@@ -1,0 +1,1534 @@
+﻿==== Q04 marketDataRepository.findLatestCompletedBySymbolAndInterval (expects idx_market_data_symbol_interval_end_time)
+                                                                                       QUERY PLAN                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1651.31..1651.31 rows=1 width=106) (actual time=71.128..71.272 rows=1 loops=1)
+   Buffers: shared hit=4887 read=284
+   ->  Sort  (cost=1651.31..1773.86 rows=49018 width=106) (actual time=71.126..71.269 rows=1 loops=1)
+         Sort Key: market_data.end_time DESC
+         Sort Method: top-N heapsort  Memory: 25kB
+         Buffers: shared hit=4887 read=284
+         ->  Append  (cost=6.42..1406.22 rows=49018 width=107) (actual time=0.092..68.395 rows=17502 loops=1)
+               Buffers: shared hit=4884 read=284
+               ->  Bitmap Heap Scan on _hyper_4_1_chunk  (cost=6.42..123.30 rows=168 width=106) (actual time=0.092..0.162 rows=168 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text) AND (end_time < '2026-05-22 17:00:00'::timestamp without time zone))
+                     Heap Blocks: exact=45
+                     Buffers: shared hit=45 read=3
+                     ->  Bitmap Index Scan on _hyper_4_1_chunk_idx_market_data_symbol_interval_end_time  (cost=0.00..6.38 rows=168 width=0) (actual time=0.073..0.074 rows=168 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text) AND (end_time < '2026-05-22 17:00:00'::timestamp without time zone))
+                           Buffers: shared read=3
+               ->  Custom Scan (ColumnarScan) on _hyper_4_2_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.784..0.802 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_1415_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_3_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.574..0.591 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_463_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_4_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=1.127..1.148 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_465_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.009..0.015 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_5_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.517..0.534 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_467_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Bitmap Heap Scan on _hyper_4_6_chunk  (cost=6.42..128.94 rows=168 width=106) (actual time=0.066..0.081 rows=168 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text) AND (end_time < '2026-05-22 17:00:00'::timestamp without time zone))
+                     Heap Blocks: exact=5
+                     Buffers: shared hit=5 read=3
+                     ->  Bitmap Index Scan on _hyper_4_6_chunk_idx_market_data_symbol_interval_end_time  (cost=0.00..6.38 rows=168 width=0) (actual time=0.058..0.059 rows=168 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text) AND (end_time < '2026-05-22 17:00:00'::timestamp without time zone))
+                           Buffers: shared read=3
+               ->  Bitmap Heap Scan on _hyper_4_7_chunk  (cost=6.42..123.30 rows=168 width=106) (actual time=0.054..0.069 rows=168 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text) AND (end_time < '2026-05-22 17:00:00'::timestamp without time zone))
+                     Heap Blocks: exact=5
+                     Buffers: shared hit=5 read=3
+                     ->  Bitmap Index Scan on _hyper_4_7_chunk_idx_market_data_symbol_interval_end_time  (cost=0.00..6.38 rows=168 width=0) (actual time=0.046..0.046 rows=168 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text) AND (end_time < '2026-05-22 17:00:00'::timestamp without time zone))
+                           Buffers: shared read=3
+               ->  Custom Scan (ColumnarScan) on _hyper_4_8_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.726..0.747 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_468_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.011 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_9_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.799..0.820 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_470_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.016..0.019 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_10_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.657..0.677 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_472_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.017 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_11_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.917..0.938 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_473_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_33_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.556..0.573 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_516_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.020..0.022 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_34_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.932..0.954 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=4
+                     ->  Seq Scan on compress_hyper_9_518_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_35_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.626..0.660 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=4
+                     ->  Seq Scan on compress_hyper_9_520_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.023..0.029 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_36_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.882..0.906 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_522_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.024..0.029 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_37_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.708..0.729 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_525_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.018..0.021 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_38_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.623..0.640 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_527_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.017 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_39_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.295..0.313 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_529_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.014 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_40_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.733..0.750 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_532_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.016..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_41_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.492..0.512 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_534_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_42_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.337..0.357 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_536_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.017 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_43_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.386..0.402 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_538_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_44_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.354..0.371 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_541_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_45_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.362..0.379 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_542_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.008..0.010 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_46_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.274..0.290 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_544_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.012..0.014 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_47_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.671..0.692 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_546_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_48_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.622..0.643 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_548_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.015 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_49_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=1.166..1.184 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_550_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.013..0.017 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_50_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.341..0.358 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_553_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.017..0.019 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_51_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.787..0.808 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_555_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.016 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_52_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.699..0.719 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_558_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.014 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_53_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.364..0.383 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_560_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.022..0.025 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_54_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.608..0.635 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_562_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.017..0.020 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_55_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=1.050..1.068 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_565_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.017..0.021 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_56_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.636..0.654 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_567_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.017 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_57_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.402..0.419 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=3
+                     ->  Seq Scan on compress_hyper_9_569_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.025..0.028 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_58_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.393..0.411 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=3
+                     ->  Seq Scan on compress_hyper_9_571_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.013..0.015 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_59_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.501..0.517 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=49 read=2
+                     ->  Seq Scan on compress_hyper_9_574_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_60_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.365..0.391 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_576_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.009..0.012 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_61_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.553..0.575 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_578_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.017..0.021 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_62_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.514..0.540 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_580_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.015..0.019 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_63_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.816..0.838 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_582_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.015..0.019 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_64_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.534..0.556 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_584_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.016..0.019 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_65_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.794..0.813 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_587_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.012..0.015 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_66_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.607..0.631 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_589_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_67_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.669..0.689 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_591_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_68_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=1.142..1.160 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_592_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_69_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.805..0.828 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_594_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_70_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.576..0.600 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_596_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.015..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_71_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.633..0.655 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_597_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_72_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.907..0.926 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_599_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.015..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_73_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.857..0.879 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_600_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.015..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_74_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.853..0.873 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_602_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.019 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_75_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.565..0.591 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_603_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.018..0.022 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_76_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.818..0.839 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_605_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.016..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_77_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.866..0.885 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_606_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.014 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_78_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.932..0.949 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_608_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.015..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_79_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.752..0.769 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_609_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.013..0.015 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_80_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=1.283..1.315 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_611_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.017..0.021 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_81_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.507..0.551 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_613_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.016..0.020 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_82_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.446..0.472 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_614_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.015..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_83_chunk  (cost=6.01..6.01 rows=483 width=109) (actual time=0.419..0.438 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_616_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.012..0.015 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_84_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.324..0.343 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_617_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.012..0.015 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_85_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.399..0.417 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_619_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_86_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.313..0.331 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_620_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.012 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_87_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.658..0.680 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_622_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.014 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_88_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.697..0.717 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_623_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.016 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_89_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.666..0.689 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_625_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.014 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_90_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.528..0.545 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_627_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_91_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.336..0.352 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_628_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.012 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_92_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.427..0.443 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_630_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.008..0.010 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_93_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.793..0.817 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_631_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.023..0.025 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_94_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.363..0.380 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_633_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_95_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.505..0.527 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=49 read=1
+                     ->  Seq Scan on compress_hyper_9_634_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_96_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.757..0.780 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_636_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.013..0.016 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_97_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=1.051..1.072 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_637_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.019..0.022 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_98_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.456..0.477 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_639_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.013..0.016 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_99_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=1.093..1.110 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_640_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.013..0.016 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_100_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.597..0.615 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_642_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.012..0.015 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_101_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.394..0.410 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=49 read=2
+                     ->  Seq Scan on compress_hyper_9_643_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.013..0.016 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_102_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.307..0.325 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=49 read=2
+                     ->  Seq Scan on compress_hyper_9_645_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.015..0.017 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_103_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.785..0.804 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_647_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.032..0.035 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_104_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.766..0.789 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=49 read=1
+                     ->  Seq Scan on compress_hyper_9_648_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.020 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_105_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.940..0.963 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_650_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.019..0.023 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_106_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.509..0.531 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_651_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_107_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.332..0.349 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_653_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.018..0.021 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_108_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.412..0.430 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_654_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.009..0.011 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_109_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.322..0.340 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=49 read=2
+                     ->  Seq Scan on compress_hyper_9_656_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.016..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_110_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.322..0.339 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_658_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.012 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_111_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=1.005..1.029 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_659_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.012..0.015 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_112_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.711..0.745 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_661_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.015..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_113_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.469..0.516 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_662_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.018..0.021 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_114_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.569..0.588 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_664_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_115_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.279..0.296 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_666_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.008..0.010 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_116_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.511..0.527 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_667_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.009..0.011 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_117_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.493..0.510 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_669_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.009..0.011 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_118_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.506..0.523 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_670_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_119_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.389..0.415 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_672_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.008..0.021 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_120_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.981..1.000 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_674_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.010..0.014 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_121_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.490..0.511 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=46 read=4
+                     ->  Seq Scan on compress_hyper_9_675_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.016..0.020 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_122_chunk  (cost=6.01..6.01 rows=483 width=109) (actual time=0.915..0.937 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_677_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.018 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_123_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.340..0.357 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=48 read=2
+                     ->  Seq Scan on compress_hyper_9_678_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.017 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_124_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.796..0.818 rows=168 loops=1)
+                     Vectorized Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Buffers: shared hit=47 read=3
+                     ->  Seq Scan on compress_hyper_9_680_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.014..0.017 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Bitmap Heap Scan on _hyper_4_231_chunk  (cost=10.17..131.94 rows=184 width=108) (actual time=1.116..1.371 rows=168 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                     Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Heap Blocks: exact=73
+                     Buffers: shared hit=73 read=3
+                     ->  Bitmap Index Scan on "231_231_market_data_pkey"  (cost=0.00..10.12 rows=184 width=0) (actual time=1.093..1.093 rows=168 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Buffers: shared read=3
+               ->  Bitmap Heap Scan on _hyper_4_1375_chunk  (cost=4.58..52.66 rows=30 width=106) (actual time=0.506..0.567 rows=30 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                     Filter: (end_time < '2026-05-22 17:00:00'::timestamp without time zone)
+                     Heap Blocks: exact=18
+                     Buffers: shared hit=18 read=2
+                     ->  Bitmap Index Scan on "1375_718_market_data_pkey"  (cost=0.00..4.58 rows=30 width=0) (actual time=0.493..0.493 rows=30 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Buffers: shared read=2
+ Planning:
+   Buffers: shared hit=46926 read=106
+ Planning Time: 60.365 ms
+ Execution Time: 74.830 ms
+(749 rows)
+
+==== Q07 marketDataRepository.findLatestBySymbol (expects idx_market_data_symbol_interval_end_time)
+                                                                                        QUERY PLAN                                                                                         
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1648.26..1648.26 rows=1 width=106) (actual time=12.380..12.454 rows=1 loops=1)
+   Buffers: shared hit=2655 read=5
+   ->  Sort  (cost=1648.26..1770.80 rows=49018 width=106) (actual time=12.379..12.452 rows=1 loops=1)
+         Sort Key: market_data.end_time DESC
+         Sort Method: top-N heapsort  Memory: 25kB
+         Buffers: shared hit=2655 read=5
+         ->  Append  (cost=6.00..1403.17 rows=49018 width=107) (actual time=0.065..10.108 rows=17502 loops=1)
+               Buffers: shared hit=2655 read=5
+               ->  Bitmap Heap Scan on _hyper_4_1_chunk  (cost=6.00..122.46 rows=168 width=106) (actual time=0.065..0.122 rows=168 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                     Heap Blocks: exact=45
+                     Buffers: shared hit=48
+                     ->  Bitmap Index Scan on _hyper_4_1_chunk_idx_market_data_symbol_interval_end_time  (cost=0.00..5.96 rows=168 width=0) (actual time=0.057..0.057 rows=168 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Buffers: shared hit=3
+               ->  Custom Scan (ColumnarScan) on _hyper_4_2_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.063..0.079 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_1415_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_3_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.099..0.116 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_463_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_4_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.059..0.075 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_465_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_5_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.059..0.074 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_467_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Bitmap Heap Scan on _hyper_4_6_chunk  (cost=6.00..128.10 rows=168 width=106) (actual time=0.054..0.071 rows=168 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                     Heap Blocks: exact=5
+                     Buffers: shared hit=8
+                     ->  Bitmap Index Scan on _hyper_4_6_chunk_idx_market_data_symbol_interval_end_time  (cost=0.00..5.96 rows=168 width=0) (actual time=0.051..0.051 rows=168 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Buffers: shared hit=3
+               ->  Bitmap Heap Scan on _hyper_4_7_chunk  (cost=6.00..122.46 rows=168 width=106) (actual time=0.028..0.045 rows=168 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                     Heap Blocks: exact=5
+                     Buffers: shared hit=8
+                     ->  Bitmap Index Scan on _hyper_4_7_chunk_idx_market_data_symbol_interval_end_time  (cost=0.00..5.96 rows=168 width=0) (actual time=0.024..0.024 rows=168 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Buffers: shared hit=3
+               ->  Custom Scan (ColumnarScan) on _hyper_4_8_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.115..0.132 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_468_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.014 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_9_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.089..0.105 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_470_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_10_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.057..0.073 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_472_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_11_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.054..0.070 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_473_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_33_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.089..0.105 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_516_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_34_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.066..0.082 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_518_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_35_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.075..0.090 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_520_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_36_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.076..0.091 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_522_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.003..0.005 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_37_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.054..0.069 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_525_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.004..0.006 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_38_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.074..0.089 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_527_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.003..0.005 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_39_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.057..0.072 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_529_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.004..0.006 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_40_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.043..0.058 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_532_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.003..0.005 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_41_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.066..0.083 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_534_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.003..0.006 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_42_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.050..0.065 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_536_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.004..0.006 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_43_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.038..0.054 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_538_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.003..0.004 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_44_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.070..0.086 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_541_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.003..0.004 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_45_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.044..0.059 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_542_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.004..0.006 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_46_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.048..0.063 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_544_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.004..0.006 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_47_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.087..0.104 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_546_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_48_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.056..0.071 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_548_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_49_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.049..0.065 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_550_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_50_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.088..0.103 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_553_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_51_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.051..0.067 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_555_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_52_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.057..0.072 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_558_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_53_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.097..0.113 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_560_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_54_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.063..0.079 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_562_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_55_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.093..0.109 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_565_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_56_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.069..0.085 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_567_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_57_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.074..0.091 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_569_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_58_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.094..0.109 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_571_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_59_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.071..0.091 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_574_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_60_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.060..0.076 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_576_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_61_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.097..0.113 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_578_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.004..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_62_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.072..0.088 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_580_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_63_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.059..0.074 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_582_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_64_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.124..0.144 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_584_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_65_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.067..0.083 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_587_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.009..0.011 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_66_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.071..0.088 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_589_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.012..0.014 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_67_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.094..0.110 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_591_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_68_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.062..0.078 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_592_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_69_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.096..0.112 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_594_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_70_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.067..0.082 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_596_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_71_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.061..0.077 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_597_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_72_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.110..0.126 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_599_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_73_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.085..0.101 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_600_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_74_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.070..0.086 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_602_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_75_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.092..0.108 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_603_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_76_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.069..0.087 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_605_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_77_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.090..0.107 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_606_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_78_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.069..0.084 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_608_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_79_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.065..0.080 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_609_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_80_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.094..0.111 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_611_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_81_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.073..0.089 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_613_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_82_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.057..0.073 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_614_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_83_chunk  (cost=6.01..6.01 rows=483 width=109) (actual time=0.055..0.071 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_616_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_84_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.065..0.081 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_617_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_85_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.098..0.114 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_619_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_86_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.068..0.083 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_620_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_87_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.058..0.075 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_622_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_88_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.062..0.078 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_623_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_89_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.061..0.077 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_625_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_90_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.053..0.069 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_627_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_91_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.054..0.069 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_628_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_92_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.060..0.076 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_630_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_93_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.090..0.106 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_631_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_94_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.060..0.075 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_633_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_95_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.063..0.078 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_634_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_96_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.071..0.087 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_636_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_97_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.064..0.083 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_637_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_98_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.064..0.080 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_639_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_99_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.093..0.109 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_640_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_100_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.059..0.076 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_642_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_101_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.061..0.076 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_643_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.005..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_102_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.054..0.071 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_645_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_103_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.059..0.076 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_647_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_104_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.066..0.083 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_648_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.008..0.010 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_105_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.070..0.087 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_650_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_106_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.106..0.122 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_651_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_107_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.063..0.079 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_653_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_108_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.065..0.081 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_654_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_109_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.102..0.119 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_656_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_110_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.097..0.121 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_658_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.010 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_111_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.105..0.121 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_659_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.011..0.013 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_112_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.084..0.100 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_661_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_113_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.112..0.129 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_662_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_114_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.064..0.083 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_664_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_115_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.056..0.077 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_666_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_116_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.061..0.077 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_667_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_117_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.065..0.081 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_669_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_118_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.059..0.074 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_670_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.008 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_119_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.093..0.109 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_672_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_120_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.068..0.084 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_674_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.007..0.009 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_121_chunk  (cost=6.01..6.01 rows=483 width=108) (actual time=0.059..0.074 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_675_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+docker : psql:/tmp/verify_explain.sql:16: WARNING:  SET LOCAL can only be used in transaction blocks
+At line:1 char:98
++ ... xplain.sql; docker exec blackheart-postgres psql -U postgres -d tradi ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (psql:/tmp/verif...nsaction blocks:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+psql:/tmp/verify_explain.sql:27: WARNING:  SET LOCAL can only be used in transaction blocks
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_122_chunk  (cost=6.01..6.01 rows=483 width=109) (actual time=0.072..0.087 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_677_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.006..0.007 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_123_chunk  (cost=6.01..6.01 rows=483 width=106) (actual time=0.085..0.100 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_678_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.004..0.005 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Custom Scan (ColumnarScan) on _hyper_4_124_chunk  (cost=6.01..6.01 rows=483 width=107) (actual time=0.056..0.071 rows=168 loops=1)
+                     Buffers: shared hit=25
+                     ->  Seq Scan on compress_hyper_9_680_chunk  (cost=0.00..1.18 rows=1 width=415) (actual time=0.003..0.005 rows=1 loops=1)
+                           Filter: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Rows Removed by Filter: 11
+                           Buffers: shared hit=1
+               ->  Bitmap Heap Scan on _hyper_4_231_chunk  (cost=10.17..131.48 rows=184 width=108) (actual time=0.103..0.160 rows=168 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                     Heap Blocks: exact=73
+                     Buffers: shared hit=73 read=3
+                     ->  Bitmap Index Scan on _hyper_4_231_chunk_idx_market_data_symbol_interval_end_time  (cost=0.00..10.12 rows=184 width=0) (actual time=0.096..0.096 rows=168 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Buffers: shared read=3
+               ->  Bitmap Heap Scan on _hyper_4_1375_chunk  (cost=4.58..52.58 rows=30 width=106) (actual time=0.054..0.070 rows=30 loops=1)
+                     Recheck Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                     Heap Blocks: exact=18
+                     Buffers: shared hit=18 read=2
+                     ->  Bitmap Index Scan on _hyper_4_1375_chunk_idx_market_data_symbol_interval_end_time  (cost=0.00..4.58 rows=30 width=0) (actual time=0.051..0.051 rows=30 loops=1)
+                           Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+                           Buffers: shared read=2
+ Planning:
+   Buffers: shared hit=2578
+ Planning Time: 12.190 ms
+ Execution Time: 15.135 ms
+(647 rows)
+
+==== Q13 tradesRepository.findAllActiveTrades (forcing index — table 4 rows)
+SET
+                                                                                                                                            QUERY PLAN                                                                                                                                             
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=1.10..1.10 rows=1 width=1037) (actual time=0.009..0.010 rows=0 loops=1)
+   Sort Key: entry_time DESC
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=1
+   ->  Seq Scan on trades t  (cost=0.00..1.09 rows=1 width=1037) (actual time=0.007..0.007 rows=0 loops=1)
+         Filter: (((status)::text = ANY ('{OPEN,PARTIALLY_CLOSED}'::text[])) AND (account_id = '76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2'::uuid) AND (account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid) AND ((asset)::text = 'BTCUSDT'::text) AND (("interval")::text = '1h'::text))
+         Rows Removed by Filter: 4
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=373
+ Planning Time: 0.719 ms
+ Execution Time: 0.021 ms
+(12 rows)
+
+RESET
+==== Q15 tradesRepository.findByAccountIdsAndStatus (forcing index)
+SET
+                                                        QUERY PLAN                                                         
+---------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1.10..1.11 rows=4 width=1037) (actual time=0.006..0.007 rows=4 loops=1)
+   Buffers: shared hit=1
+   ->  Sort  (cost=1.10..1.11 rows=4 width=1037) (actual time=0.006..0.006 rows=4 loops=1)
+         Sort Key: entry_time DESC
+         Sort Method: quicksort  Memory: 27kB
+         Buffers: shared hit=1
+         ->  Seq Scan on trades t  (cost=0.00..1.06 rows=4 width=1037) (actual time=0.002..0.003 rows=4 loops=1)
+               Filter: ((account_id = '76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2'::uuid) AND ((status)::text = 'CLOSED'::text))
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=7
+ Planning Time: 0.089 ms
+ Execution Time: 0.014 ms
+(13 rows)
+
+psql:/tmp/verify_explain.sql:36: WARNING:  SET LOCAL can only be used in transaction blocks
+psql:/tmp/verify_explain.sql:43: WARNING:  SET LOCAL can only be used in transaction blocks
+psql:/tmp/verify_explain.sql:50: WARNING:  SET LOCAL can only be used in transaction blocks
+psql:/tmp/verify_explain.sql:59: WARNING:  SET LOCAL can only be used in transaction blocks
+RESET
+==== Q18 tradesRepository.findAllClosedSince (forcing index)
+SET
+                                                        QUERY PLAN                                                         
+---------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=1.07..1.07 rows=1 width=1037) (actual time=0.005..0.005 rows=0 loops=1)
+   Sort Key: exit_time DESC
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=1
+   ->  Seq Scan on trades t  (cost=0.00..1.06 rows=1 width=1037) (actual time=0.004..0.004 rows=0 loops=1)
+         Filter: ((exit_time >= '2026-05-22 00:00:00'::timestamp without time zone) AND ((status)::text = 'CLOSED'::text))
+         Rows Removed by Filter: 4
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=10
+ Planning Time: 0.114 ms
+ Execution Time: 0.011 ms
+(12 rows)
+
+RESET
+==== Q19 tradesRepository.findAllOpen (forcing index)
+SET
+                                                QUERY PLAN                                                 
+-----------------------------------------------------------------------------------------------------------
+ Sort  (cost=1.06..1.06 rows=1 width=1037) (actual time=0.005..0.006 rows=0 loops=1)
+   Sort Key: entry_time DESC
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=1
+   ->  Seq Scan on trades t  (cost=0.00..1.05 rows=1 width=1037) (actual time=0.004..0.004 rows=0 loops=1)
+         Filter: ((status)::text = ANY ('{OPEN,PARTIALLY_CLOSED}'::text[]))
+         Rows Removed by Filter: 4
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=7
+ Planning Time: 0.119 ms
+ Execution Time: 0.014 ms
+(12 rows)
+
+RESET
+==== Q21 tradesRepository.findClosedByAccountStrategyIdSince (forcing index)
+SET
+                                                                                                           QUERY PLAN                                                                                                           
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=1.09..1.10 rows=3 width=1037) (actual time=0.007..0.007 rows=3 loops=1)
+   Sort Key: exit_time
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=1
+   ->  Seq Scan on trades t  (cost=0.00..1.07 rows=3 width=1037) (actual time=0.004..0.005 rows=3 loops=1)
+         Filter: ((exit_time IS NOT NULL) AND (exit_time >= '2026-04-01 00:00:00'::timestamp without time zone) AND (account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid) AND ((status)::text = 'CLOSED'::text))
+         Rows Removed by Filter: 1
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=7
+ Planning Time: 0.120 ms
+ Execution Time: 0.014 ms
+(12 rows)
+
+RESET
+==== Q23 tradesRepository.findRecentWithIntent (forcing index)
+SET
+                                                                           QUERY PLAN                                                                            
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1.09..1.10 rows=4 width=1037) (actual time=0.010..0.011 rows=4 loops=1)
+   Buffers: shared hit=1
+   ->  Sort  (cost=1.09..1.10 rows=4 width=1037) (actual time=0.010..0.010 rows=4 loops=1)
+         Sort Key: entry_time DESC
+         Sort Method: quicksort  Memory: 27kB
+         Buffers: shared hit=1
+         ->  Seq Scan on trades t  (cost=0.00..1.05 rows=4 width=1037) (actual time=0.004..0.006 rows=4 loops=1)
+               Filter: ((intended_entry_price IS NOT NULL) AND (avg_entry_price IS NOT NULL) AND (entry_time IS NOT NULL) AND ((asset)::text = 'BTCUSDT'::text))
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=7
+ Planning Time: 0.112 ms
+ Execution Time: 0.027 ms
+(13 rows)
+
+RESET

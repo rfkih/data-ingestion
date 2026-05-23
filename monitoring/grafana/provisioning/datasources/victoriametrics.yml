@@ -1,0 +1,26 @@
+apiVersion: 1
+
+datasources:
+  - name: VictoriaMetrics
+    type: prometheus
+    access: proxy
+    url: http://victoriametrics:8428
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+
+  # Loki — log aggregation. Same compose network, reached by service name.
+  # Use the "Logs" tab in Explore (compass icon) and select Loki to query
+  # streams like {env="prod", container="blackheart-app"} |~ "(?i)error".
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true
+    jsonData:
+      # Link from log lines to the matching metric range in VictoriaMetrics.
+      # When you find a noisy timeframe in logs, one click jumps to metrics.
+      derivedFields: []
+      maxLines: 1000

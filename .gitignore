@@ -1,0 +1,56 @@
+# Sibling repos — they're their own git repos, not part of this workspace
+blackheart-trading-engine/
+blackridge-frontend/
+blackheart-exchange-gateway/
+blackheart-inference/
+blackheart-ingest/
+blackheart-train/
+blackheart-research-orchestrator/
+research-orchestrator/
+superpowers/
+
+# Build / runtime artifacts
+logs/
+tmp/
+docs/
+**/.next/
+**/node_modules/
+**/build/
+**/.gradle/
+
+# Secrets — these MUST never be committed
+.env
+*.env
+*.env.local
+*.env.production*
+sshkey*.pem
+*.key
+**/etc/blackheart/
+
+# Large data dumps
+*.dump
+*.sql
+*_db_schema*
+
+# Log files
+*.log
+*.err
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/
+
+# Compose project-name state (created by docker compose)
+.docker-compose-name
+
+# Local docker recovery artefact — 3.4 GB VHDX, way over GH's per-file cap.
+# If you need this, keep it backed up out-of-band.
+.docker-recovery/
+*.vhdx
+
+# Large analysis outputs — optional. Comment if you actually want them tracked.
+# (kept tracked for now since they're plain text and audit-useful)
+# db-analysis/

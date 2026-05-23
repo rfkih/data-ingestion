@@ -1,0 +1,24 @@
+# Tell Grafana to load every .json dashboard from
+# /var/lib/grafana/dashboards/ on startup AND poll it every 30s so new
+# dashboards land without restarting Grafana. Mount is set in compose to
+# ./monitoring/grafana/dashboards so they live in the repo alongside this
+# provider config.
+#
+# foldersFromFilesStructure: subdirectories inside dashboards/ become
+# folders in the Grafana UI — keeps the navigation tidy when more
+# dashboards land later (e.g. dashboards/blackheart/, dashboards/community/).
+
+apiVersion: 1
+
+providers:
+  - name: 'default'
+    orgId: 1
+    folder: ''
+    folderUid: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

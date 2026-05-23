@@ -1,0 +1,29 @@
+﻿== 1/8 idx_market_data_symbol_interval_end_time (covers Q04 + Q07)
+CREATE INDEX
+== 2/8 idx_trades_active_lookup (covers Q13 + Q14 + Q16)
+CREATE INDEX
+== 3/8 idx_trades_account_status_entry (covers Q15)
+CREATE INDEX
+== 4/8 idx_trades_closed_exit_time partial (covers Q17 + Q20)
+CREATE INDEX
+== 5/8 idx_trades_status_exit_time partial (covers Q18)
+CREATE INDEX
+== 6/8 idx_trades_open_entry_time partial (covers Q19)
+CREATE INDEX
+== 7/8 idx_trades_strategy_closed_exit partial (covers Q21)
+CREATE INDEX
+== 8/8 idx_trades_asset_intent_entry partial (covers Q23)
+CREATE INDEX
+== Verify created indexes
+                indexname                 |    size    |                                                                                                indexdef                                                                                                 
+------------------------------------------+------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ idx_market_data_symbol_interval_end_time | 8192 bytes | CREATE INDEX idx_market_data_symbol_interval_end_time ON public.market_data USING btree (symbol, "interval", end_time DESC)
+ idx_trades_account_status_entry          | 16 kB      | CREATE INDEX idx_trades_account_status_entry ON public.trades USING btree (account_id, status, entry_time DESC)
+ idx_trades_active_lookup                 | 16 kB      | CREATE INDEX idx_trades_active_lookup ON public.trades USING btree (account_strategy_id, status, entry_time DESC)
+ idx_trades_asset_intent_entry            | 16 kB      | CREATE INDEX idx_trades_asset_intent_entry ON public.trades USING btree (asset, entry_time DESC) WHERE (intended_entry_price IS NOT NULL)
+ idx_trades_closed_exit_time              | 16 kB      | CREATE INDEX idx_trades_closed_exit_time ON public.trades USING btree (account_id, exit_time DESC) WHERE ((status)::text = 'CLOSED'::text)
+ idx_trades_open_entry_time               | 8192 bytes | CREATE INDEX idx_trades_open_entry_time ON public.trades USING btree (entry_time DESC) WHERE ((status)::text = ANY ((ARRAY['OPEN'::character varying, 'PARTIALLY_CLOSED'::character varying])::text[]))
+ idx_trades_status_exit_time              | 16 kB      | CREATE INDEX idx_trades_status_exit_time ON public.trades USING btree (exit_time DESC) WHERE ((status)::text = 'CLOSED'::text)
+ idx_trades_strategy_closed_exit          | 16 kB      | CREATE INDEX idx_trades_strategy_closed_exit ON public.trades USING btree (account_strategy_id, exit_time) WHERE ((status)::text = 'CLOSED'::text)
+(8 rows)
+

@@ -1,0 +1,58 @@
+# Promtail — discovers all containers in the `blackheart` compose project
+# via the docker socket, ships their stdout/stderr (json-file driver) to
+# Loki at http://loki:3100.
+#
+# Labels attached to every log stream:
+#   env       = prod   (this file is the (home copy; VPS uses promtail.prod.yml))
+#   host      = vps-middleware
+#   container = blackheart-app | blackheart-research | …
+#   service   = trading | research | gateway | frontend | …  (compose service name)
+#   stream    = stdout | stderr
+#
+# Position file persisted to /tmp so a Promtail restart picks up where it
+# left off. The named volume `promtail-positions` survives container
+# recreation.
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /tmp/positions/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    external_labels:
+      env: dev
+      host: home-a8
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        # Only ship logs from containers in the `blackheart` compose
+        # project — skips any unrelated docker workloads.
+        filters:
+          - name: label
+            values: ["com.docker.compose.project=blackheart"]
+    relabel_configs:
+      # Container name without the leading `/`.
+      - source_labels: [__meta_docker_container_name]
+        regex: '/(.*)'
+        target_label: container
+      # Compose service name (the short key in docker-compose.yml).
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      # Stream — stdout vs stderr.
+      - source_labels: [__meta_docker_container_log_stream]
+        target_label: stream
+      # Drop noisy / unhelpful Docker labels.
+      - regex: __meta_docker_.*
+        action: labeldrop
+    pipeline_stages:
+      # docker_sd_configs writes JSON-wrapped lines (the json-file
+      # driver's format). The `docker` stage unwraps to the actual log
+      # line. Without this, every Loki entry would be a JSON blob.
+      - docker: {}

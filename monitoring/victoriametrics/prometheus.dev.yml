@@ -1,0 +1,72 @@
+# VictoriaMetrics scrape config — shared between VPS prod stack and home dev
+# stack via the docker-compose mount. The compose service passes
+# MONITORING_ENV (prod / dev) and HOSTNAME into the env, and the external
+# labels below pick them up so every metric is tagged with its origin. That
+# lets a single Grafana visualise both environments without metric collision.
+#
+# Targets are reached through the docker network — `host.docker.internal` for
+# anything running on the host (orchestrator, optional inference), or compose
+# service names for sibling containers (postgres-exporter, victoriametrics).
+#
+# Scrape interval: 15s. Bumping below 10s creates duplicate samples per
+# Spring's typical Micrometer publish cadence; above 30s smooths spikes out
+# of fast-moving panels (signal latency, GC pauses).
+
+global:
+  scrape_interval: 15s
+  external_labels:
+    env: dev
+    host: home-a8
+
+scrape_configs:
+  # ───── JVMs (trading + research) ─────
+  # Service names from the HOME compose (/c/Project/docker-compose.yml).
+  # `blackheart` is trading, `blackheart-research` is research. Use compose
+  # DNS rather than host.docker.internal so the scrape works regardless of
+  # how the JVM port is bound on the host.
+  - job_name: blackheart-trading
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['blackheart:8080']
+        labels:
+          jvm: trading
+
+  - job_name: blackheart-research
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['blackheart-research:8081']
+        labels:
+          jvm: research
+
+  # ───── Python orchestrator (FastAPI) ─────
+  # Only present on home — the orchestrator runs on the dev box, not VPS.
+  # The scrape will fail on VPS (where 8082 is empty) and VM marks the target
+  # `up=0`. That's the signal, not noise — it tells you when the home box is
+  # offline from the VPS's vantage.
+  - job_name: orchestrator
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:8082']
+        labels:
+          service: orchestrator
+
+  # ───── Postgres ─────
+  # postgres-exporter sits next to the postgres container, reads pg_stat_*
+  # views, exposes them on :9187. We get connection pool stats, lock counts,
+  # bgwriter rates, table sizes (huge for TimescaleDB hypertable growth
+  # tracking). Dashboard ID 9628.
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels:
+          service: postgres
+
+  # ───── VictoriaMetrics self-monitoring ─────
+  # VM exposes its own metrics — useful when chasing "is the monitoring stack
+  # itself the bottleneck?" Catch high vm_rows_inserted_total spikes,
+  # ingestion errors, slow queries. Dashboard ID 17175.
+  - job_name: victoriametrics
+    static_configs:
+      - targets: ['victoriametrics:8428']
+        labels:
+          service: vm
