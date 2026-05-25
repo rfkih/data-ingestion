@@ -64,6 +64,16 @@ ORCH_BASE=http://127.0.0.1:8082          # orchestrator (research-side)
 JVM_BASE=http://127.0.0.1:8080           # trading JVM (live + inbox writes)
 RESEARCH_JVM_BASE=http://127.0.0.1:8081  # research JVM (backtest reads)
 
+# Hard guard: every iteration-scoped var below must be set from the spawning
+# payload. If any is empty, STOP and report BLOCKED -- don't silently emit
+# bogus curls with empty paths.
+: "${ITERATION_ID:?missing iteration_id from spawning payload}"
+: "${SYMBOL:?missing symbol}"
+: "${STRATEGY_CODE:?missing strategy_code}"
+: "${INTERVAL:?missing interval}"
+: "${BACKTEST_RUN_ID:?missing backtest_run_id}"
+: "${WALK_FORWARD_RUN_ID:?missing walk_forward_run_id}"
+
 /c/Project/blackheart-research-orchestrator/scripts/orch.sh GET /agent/playbook
 /c/Project/blackheart-research-orchestrator/scripts/orch.sh GET /readyz
 ```
@@ -229,9 +239,20 @@ Body shape (field names must match the `CreatePendingApprovalRequest` DTO exactl
   "interval":        "<INTERVAL>",
   "iterationId":     "<ITERATION_ID>",
   "backtestRunId":   "<BACKTEST_RUN_ID>",
-  "verdict":         "PROMOTE or HOLD",
-  "concerns":        [...],    // on PROMOTE: pass [] (empty array, NOT omit -- DTO @NotNull)
-                               // on HOLD: array of {source, severity, message} entries
+  "verdict":         "<PROMOTE or HOLD>",  // substitute ONE literal -- never the word "or"
+                                           // NEVER "REJECT" -- the pending_approval CHECK
+                                           // constraint allows only PROMOTE/HOLD; on REJECT
+                                           // Steps 5 and 7 are skipped entirely (no body sent)
+  "concerns":        [         // on PROMOTE: pass [] (empty array, NOT omit -- DTO @NotNull)
+    {                          // on HOLD: array of entries shaped as below
+      "source":   "<quant-skeptic | quant-portfolio-manager | quant-ml-judge | quant-capacity-judge>",
+      "severity": "<CONCERN>", // pinned literal: only "CONCERN" is currently valid.
+                               // Hard REJECT verdicts surface upstream as Lens-D
+                               // HARD-FAIL (curator emits REJECT, no row written).
+                               // Do NOT invent "WARNING", "CRITICAL", "HIGH", etc.
+      "message":  "<one-sentence ≤ 200 chars>"
+    }
+  ],
   "gateCheck":       {
     "cagr":    {"threshold": <t>, "actual": <a>, "passed": <bool>, "gap": <float>},
     "capital": {"threshold": <t>, "actual": <a>, "passed": <bool>, "gap": <float>},
@@ -357,7 +378,15 @@ Expected: always 201 CREATED (the controller always returns 201 regardless of in
 - Any 4xx → do NOT retry; capture the error code and include it in the digest's `inbox` field; proceed to Step 8.
 - Any 5xx → retry once after 30s. If still 5xx, halt Step 7 with error captured in digest; proceed to Step 8.
 
-Idempotency: the Idempotency-Key on `$ITERATION_ID` means a retry is safe — same body, same key, same upsert result.
+**Idempotency note (PR #1 reality):** the trading JVM's `/admin/pending-approvals`
+controller does NOT have an idempotency-header interceptor — the
+`Idempotency-Key: curator-inbox-<iteration_id>` header sent above is a
+no-op decoration. Retries are safe because the DB enforces a UNIQUE
+constraint on `(symbol, strategy_code, iteration_id)`: a duplicate POST
+updates the existing PENDING row in place (status stays PENDING), or
+returns 409 `PendingApprovalConflictException` if the existing row is no
+longer PENDING (admin already acted). Either outcome is what the curator
+wants.
 
 ### 8. Return the verdict to /run-pending-specialists
 
@@ -381,6 +410,44 @@ REASONING: <one short paragraph, ≤ 400 chars, the load-bearing argument for th
 (Substitute HOLD or REJECT as appropriate.) The `/run-pending-specialists` slash command parses `VERDICT:` via the regex `^[\s>*_`-]*VERDICT[\s:*_`-]+([A-Z_]{3,20})\b` and posts the result to `/specialist-review/complete`. If this line is absent or malformed, the harness logs a parse error and skips the row — always emit it.
 
 The two lines `VERDICT: <literal>` and `REASONING: <paragraph>` MUST be the last content in your response — no text, no markdown, no afterthoughts after them. The slash command's parser uses a relaxed regex but greedy line slurp may capture the wrong content if anything follows.
+
+---
+
+## Troubleshooting / known failure modes
+
+**`AuthRateLimitFilter` returns 429.** The trading JVM rate-limits admin auth
+endpoints. The curator's Step 2 fires 3 back-to-back `curl` calls (thresholds
++ existing approvals + V102 list). On rapid re-invocation (e.g. operator
+running `/run-pending-specialists` in a loop), the third or fourth call may
+429. Backoff: wait 30-60s and retry. Do NOT batch multiple iterations into
+one invocation -- one iteration per spawn is the contract.
+
+**Trading JVM returns 401 on POST.** Either `$TRADING_JVM_TOKEN` expired
+(JWTs have an expiry window) or the bearer doesn't carry ROLE_ADMIN. Re-run
+the auth bootstrap (Step 0.5) and verify the admin user's role.
+
+**Research JVM returns 404 on backtest_run fetch.** Either the
+`$BACKTEST_RUN_ID` is wrong (typo in the spawning payload) or the row was
+purged. Confirm via `psql -c "SELECT backtest_run_id, status FROM
+backtest_run WHERE backtest_run_id = '<id>';"`. If purged, the iteration is
+not eligible for inbox surfacing -- return REJECT with reason "backtest_run
+purged, evidence unavailable".
+
+**Walk-forward returns 404.** Same as above for the `walk_forward_id`. If
+purged, Lens B has no evidence -- return REJECT with reason "walk_forward_run
+purged".
+
+**`/specialist-review/complete` returns 400 `invalid_specialist_verdict`.**
+The VERDICT literal you emitted doesn't match the orchestrator's
+`VERDICT_LITERALS["quant-curator"] = {"PROMOTE", "HOLD", "REJECT"}` set. Check
+the regex match (the slash command logs the captured literal); make sure
+you emitted exactly one of those three, uppercase, on its own line.
+
+**Trading JVM POST returns 422 GATE_FAILED.** The V102 ApprovalGateService
+(re-run server-side on admin Approve, not on your curator-write) failed.
+This shouldn't fire on your POST — your POST writes to `pending_approval`,
+not `symbol_strategy_approval`. If you see 422 from `/admin/pending-
+approvals`, the controller has a bug; surface immediately.
 
 ---
 
