@@ -178,6 +178,36 @@ Next: researcher's next fire will read /agent/state.recent_specialist_verdicts
       and either resume at step 9 (no vetos) or pivot back to step 1 (any veto).
 ```
 
+### Counter walk example (for the summary report)
+
+For each pending row drained, parse the verdict and bucket by specialist:
+
+```
+# Pseudocode
+for verdict_row in completed_verdicts:
+    s = verdict_row.specialist_name
+    v = verdict_row.verdict
+    is_v = verdict_row.is_veto
+
+    if s == "quant-skeptic":
+        n_concur += (v == "CONCUR"); n_concern += (v == "CONCERN")
+        n_skeptic_veto += (v == "OVERRIDE_REJECT")
+    elif s == "quant-portfolio-manager":
+        n_add += (v == "ADD"); n_concern_pf += (v == "CONCERN")
+        n_pf_veto += (v == "REJECT")
+    elif s == "quant-ml-judge":
+        n_ml_concur += (v == "CONCUR"); n_ml_concern += (v == "CONCERN")
+        n_ml_veto += (v == "OVERRIDE_REJECT")
+    elif s == "quant-curator":
+        # Curator has no researcher-blocking veto -- is_v is always False.
+        # Count by literal only; do NOT track a separate "veto" counter.
+        n_promote += (v == "PROMOTE"); n_hold += (v == "HOLD")
+        n_curator_reject += (v == "REJECT")
+```
+
+The summary report renders the buckets — curator's line reads:
+`curator    × <n_promote> PROMOTE, <n_hold> HOLD, <n_curator_reject> REJECT  (no researcher veto)`
+
 ## Failure modes
 
 **Sub-agent refuses to produce a VERDICT line** — Log `parse_error` to `/agent-decisions/log`, surface to operator. Likely cause: sub-agent's system prompt has drifted from the verdict literal set; check `.claude/agents/<name>.md`.
