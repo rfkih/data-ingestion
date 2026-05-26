@@ -197,6 +197,7 @@ services:
       # Falls back to direct Binance if the override is missing, so dev
       # against a non-blocked network still works.
       BINANCE_BASE_URL: ${BINANCE_BASE_URL:-http://100.112.13.126:8088}
+      DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY:?set in /c/Project/.env}
       # ResearchProxyController defaults to 127.0.0.1:8081 (correct when both
       # JVMs run natively on the same host). Inside docker, 127.0.0.1 is the
       # container itself — must point at the research service by compose DNS.
@@ -204,6 +205,9 @@ services:
       # Research orchestrator (FastAPI :8082) stays on the host machine —
       # reach it via the docker host-gateway alias declared in extra_hosts.
       RESEARCH_ORCH_BASE_URL: http://host.docker.internal:8082
+      # Shared secret for the server-side X-Orch-Token header. Must match
+      # ORCH_AUTH_TOKEN in blackheart-research-orchestrator/.env.
+      RESEARCH_ORCH_TOKEN: ${RESEARCH_ORCH_TOKEN:?set in /c/Project/.env}
       # Browser origins allowed to hit the API. localhost:3000 covers the
       # host-machine browser; the Tailscale Funnel URL covers external access
       # via the VPS proxy (https://middleware.tailbf9662.ts.net:8443 → Caddy
@@ -256,6 +260,7 @@ services:
       # network and the host port mapping. Override to bind all interfaces.
       RESEARCH_BIND_ADDRESS: "0.0.0.0"
       RESEARCH_ORCH_BASE_URL: http://host.docker.internal:8082
+      DB_ENCRYPTION_KEY: ${DB_ENCRYPTION_KEY:?set in /c/Project/.env}
       CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,http://100.112.13.126:3000
     extra_hosts:
       # Reach inference/ingest/train running natively on the host.
@@ -312,6 +317,46 @@ services:
       NEXT_PUBLIC_WS_URL: ${FRONTEND_WS_URL:-ws://100.112.13.126:8080/ws}
     ports:
       - "3000:3000"
+
+  # Read-only WAL streaming replica of the VPS prod Postgres. Receives
+  # changes over Tailscale from 100.112.13.126:5432 via the replication
+  # slot `home_standby_slot`. Recovery mode is enabled automatically by
+  # the standby.signal file that pg_basebackup -R wrote into the volume.
+  #
+  # Bound to port 5433 (not 5432) so the existing dev postgres (which
+  # the home trading/research JVMs write to) stays untouched. Connect
+  # for ad-hoc read queries:
+  #   psql -h localhost -p 5433 -U postgres -d trading_db
+  #
+  # POSTGRES_PASSWORD is NOT validated here — the data dir was bootstrapped
+  # via pg_basebackup, which preserves the primary's pg_authid. The
+  # primary's POSTGRES_PASSWORD is what works against this standby.
+  postgres-standby:
+    image: timescale/timescaledb-ha:pg16
+    container_name: blackheart-postgres-standby
+    restart: unless-stopped
+    # Recovery-only: skip POSTGRES_PASSWORD / POSTGRES_DB env (the entrypoint
+    # would re-init otherwise). Set POSTGRES_INITDB_SKIP=true alternative
+    # would also work, but the simplest tell is: data dir is pre-populated,
+    # entrypoint detects this and skips init.
+    environment:
+      # Required so pg_isready / entrypoint doesn't try to init.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    volumes:
+      # The pgdata_standby volume was filled by pg_basebackup from the
+      # primary. The standby.signal file in there puts postgres into
+      # recovery / streaming mode on start.
+      - pgdata_standby:/home/postgres/pgdata/data
+    ports:
+      # 5433 is taken on this host by cashier-postgres; use 5434.
+      - "127.0.0.1:5434:5432"
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    mem_limit: 1500m
 
   # ─────────────────────────────────────────────────────────────────────
   # Observability stack (Stage 1a of live monitoring)
@@ -434,3 +479,9 @@ volumes:
   grafanadata:
   lokidata:
   promtail-positions:
+  # Streaming replica of VPS prod — created out-of-band by pg_basebackup,
+  # then mounted into postgres-standby. `external: true` so docker
+  # compose doesn't try to recreate it on every up; the volume name
+  # `pgdata_standby` must match what pg_basebackup wrote to.
+  pgdata_standby:
+    external: true
