@@ -13,6 +13,11 @@ superpowers/
 logs/
 tmp/
 docs/
+.research_run_state.json
+
+# Agent scratch files (quant-researcher working files at project root)
+tmp_*
+.tmp_*
 **/.next/
 **/node_modules/
 **/build/

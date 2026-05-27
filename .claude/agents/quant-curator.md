@@ -187,7 +187,7 @@ If any check fails → HARD-FAIL. This should not happen for a graduated iterati
 
 Anything else (MARGINAL, FAIL, absent) → HARD-FAIL.
 
-**Lens C — V102 gate checks.** For each threshold check (cagr, capital, window, trades), compute:
+**Lens C — V102 gate checks.** For each threshold check (cagr, window, trades), compute:
 
 ```
 gap = (threshold - actual) / threshold
@@ -255,7 +255,6 @@ Body shape (field names must match the `CreatePendingApprovalRequest` DTO exactl
   ],
   "gateCheck":       {
     "cagr":    {"threshold": <t>, "actual": <a>, "passed": <bool>, "gap": <float>},
-    "capital": {"threshold": <t>, "actual": <a>, "passed": <bool>, "gap": <float>},
     "window":  {"threshold": <t>, "actual": <a>, "passed": <bool>, "gap": <float>},
     "trades":  {"threshold": <t>, "actual": <a>, "passed": <bool>, "gap": <float>}
   },
