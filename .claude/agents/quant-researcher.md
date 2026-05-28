@@ -128,10 +128,37 @@ while goal_not_achieved AND cumulative_elapsed < 8.5h:
      pivot archetype, back to step 1. Max 2 review rounds per hypothesis.
   7. POST /queue (gate enforces APPROVED verdict).
   8. POST /tick/drain — orchestrator loops /tick until terminal. Branch
-     on terminal_action: GRADUATE → step 9. PIVOT → STRATEGY_OUTCOME +
-     step 1. EMPTY_QUEUE → re-queue or pivot. INFRA_FAIL → INFRA_FAILURE
-     + retry. MAX_ITERS_REACHED / MAX_WALL_CLOCK_REACHED → re-call to
-     continue same queue.
+     on terminal_action:
+       - GRADUATE → step 9.
+       - PIVOT → step 8.5 (regime analysis) → STRATEGY_OUTCOME + step 1.
+       - EMPTY_QUEUE → re-queue or pivot.
+       - INFRA_FAIL → INFRA_FAILURE + retry.
+       - MAX_ITERS_REACHED / MAX_WALL_CLOCK_REACHED → re-call to continue same queue.
+  8.5. REGIME ANALYSIS (fires on every PIVOT from a sweep that ran ≥ 5 iterations):
+       a. POST /regime-analysis/{queue_id} — reads backtest_trade.entry_trend_regime
+          (or derives SMA-200/ATR-pct from market_data as fallback). Writes
+          regime_label + regime_analysis onto research_queue. Creates REGIME_ANALYSIS
+          journal entry automatically. Never skip this step on a PIVOT.
+       b. Read response.is_promising and response.best_regime.
+       c. Branch:
+            PROMISING (is_promising=true, best_pf ≥ 1.15, n ≥ 10 in best bucket):
+              - Check if a regime ML model exists for this instrument:
+                  GET /ml/models?instrument=<instrument>&status=trained
+                Look for a model whose name starts with "regime_".
+              - If regime model found AND this strategy has NOT already been
+                re-queued with ML gate override in this research run:
+                  Re-queue the SAME strategy with the same sweep_config PLUS
+                  `strategy_ml_gate_overrides` pointing at the regime model.
+                  Hypothesis must reference the regime-analysis finding.
+                  Journal a HYPOTHESIS entry noting "regime-gated retry after
+                  INSUFFICIENT_EVIDENCE in regime {best_regime}".
+                  Continue loop at step 2 (write plan for the re-queue).
+              - Else (no regime model or already retried):
+                  Journal STRATEGY_OUTCOME noting best_regime label as annotation.
+                  step 1 (pivot to new archetype).
+            NOT_PROMISING (is_promising=false):
+              - Journal STRATEGY_OUTCOME with regime_label included in content.
+              - step 1 (pivot to new archetype).
   9. On GRADUATE:
      9.0. Paired-delta gate (ML/HYBRID only) — POST /paired-delta.
           NEGATIVE_DELTA = HARD REJECT (model destroyed value); STRATEGY_
@@ -250,6 +277,12 @@ You may edit `blackheart-research-orchestrator/` code when — and only when —
 4. Orchestrator never touches `trades` / `account_strategy` / `live_pnl_*` — those belong to the trading JVM.
 
 ## End-of-session output (checkpoint, not a question)
+
+**Research paper (mandatory before exit).** On every exit that had at least one queue_id active this session, call `POST /papers/{queue_id}/generate` for EACH queue that reached a terminal state (COMPLETED, PARKED, or FAILED) this session. Use Idempotency-Key `paper-gen-{queue_id}`. This writes the paper to the DB so the frontend at `/research/papers` shows it. Do NOT skip this step — no paper in DB = research invisible to operator.
+
+```bash
+scripts/orch.sh POST /papers/<queue_id>/generate --ik paper-gen-<queue_id>
+```
 
 On every exit, journal the matching `RUN_SUMMARY` row per playbook §"Terminal protocols" AND emit a 7-line summary. The journal row is what the next session reads via `/agent/state.last_run_summary` — that's how continuity works. The text summary is for the operator's audit trail; you do not wait for them to read it.
 
