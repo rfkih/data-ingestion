@@ -129,7 +129,7 @@ jobs:
              -e INGEST_PROFILE=prod \
              -e INGEST_SERVER_HOST=0.0.0.0 \
              -e INGEST_SERVER_PORT=8001 \
-             -e 'INGEST_DB_DSN=postgresql://blackheart_research:${BLACKHEART_RESEARCH_PASSWORD}@postgres:5432/trading_db' \
+             -e "INGEST_DB_DSN=postgresql://blackheart_research:\$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)@postgres:5432/trading_db" \
              -e KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
              ghcr.io/rfkih/blackheart-ingest:${NEW_TAG}"
 
@@ -149,7 +149,7 @@ jobs:
                  -e INGEST_PROFILE=prod \
                  -e INGEST_SERVER_HOST=0.0.0.0 \
                  -e INGEST_SERVER_PORT=8001 \
-                 -e 'INGEST_DB_DSN=postgresql://blackheart_research:${BLACKHEART_RESEARCH_PASSWORD}@postgres:5432/trading_db' \
+                 -e "INGEST_DB_DSN=postgresql://blackheart_research:\$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)@postgres:5432/trading_db" \
                  -e KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
                  ghcr.io/rfkih/blackheart-ingest:${PREV_TAG}"
             fi

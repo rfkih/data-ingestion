@@ -132,7 +132,7 @@ jobs:
              -e INFERENCE_HOST=0.0.0.0 \
              -e INFERENCE_PORT=8000 \
              -e INFERENCE_AUTH_TOKEN=prod-inference-token \
-             -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:${BLACKHEART_RESEARCH_PASSWORD}@postgres:5432/trading_db' \
+             -e "INFERENCE_DB_DSN=postgresql://blackheart_research:\$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)@postgres:5432/trading_db" \
              -e INFERENCE_ARTIFACT_DIR=/artifacts \
              -e INFERENCE_STREAMING_ENABLED=true \
              ghcr.io/rfkih/blackheart-inference:${NEW_TAG}"
@@ -156,7 +156,7 @@ jobs:
                  -e INFERENCE_HOST=0.0.0.0 \
                  -e INFERENCE_PORT=8000 \
                  -e INFERENCE_AUTH_TOKEN=prod-inference-token \
-                 -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:${BLACKHEART_RESEARCH_PASSWORD}@postgres:5432/trading_db' \
+                 -e "INFERENCE_DB_DSN=postgresql://blackheart_research:\$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)@postgres:5432/trading_db" \
                  -e INFERENCE_ARTIFACT_DIR=/artifacts \
                  -e INFERENCE_STREAMING_ENABLED=true \
                  ghcr.io/rfkih/blackheart-inference:${PREV_TAG}"
