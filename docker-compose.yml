@@ -155,11 +155,12 @@ services:
       RESEARCH_ORCH_TOKEN: ${RESEARCH_ORCH_TOKEN:?set in /c/Project/.env}
       # Browser origins allowed to hit the API. localhost:3000 covers the
       # host-machine browser; the Tailscale Funnel URL covers external access
-      # via the VPS proxy (https://middleware.tailbf9662.ts.net:8443 → Caddy
-      # on VPS → tailnet → this home stack). Add domains here as deployment
-      # surfaces grow.
-      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,http://100.112.13.126:3000,https://middleware.tailbf9662.ts.net:8443
-      WS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,http://100.112.13.126:3000,https://middleware.tailbf9662.ts.net:8443
+      # via the VPS proxy (https://middleware.tailbf9662.ts.net → Caddy
+      # on VPS → tailnet → this home stack). No port suffix — Funnel is port 443
+      # (standard HTTPS) so the browser Origin header omits the port. Add domains
+      # here as deployment surfaces grow.
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,http://100.112.13.126:3000,https://middleware.tailbf9662.ts.net
+      WS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,http://100.112.13.126:3000,https://middleware.tailbf9662.ts.net
     extra_hosts:
       # Lets the trading container reach services still running natively on
       # the host (research-orchestrator :8082, inference, ingest, train).
@@ -241,13 +242,16 @@ services:
         # NEXT_PUBLIC_* are inlined into the bundle at build time, so the
         # browser uses these URLs regardless of where the container runs.
         # Override via shell/.env to point at a different host:
-        #   FRONTEND_API_URL=http://example.com:8080 docker compose build blackridge
-        # Default is the host's Tailscale IP, which works for both a
-        # browser on the host (Tailscale resolves locally) and any
-        # Tailscale peer browsing the frontend remotely.
+        #   FRONTEND_API_URL=https://middleware.tailbf9662.ts.net docker compose build blackridge
+        # WS default uses wss:// (Funnel → Caddy → JVM). Caddy proxies /ws*
+        # to the trading JVM at port 8080 with WebSocket upgrade headers.
+        # Browsers block ws:// from HTTPS pages (mixed content), so this
+        # must stay wss:// for the Funnel-served deployment.
+        # For direct local access (http://100.112.13.126:3000) set:
+        #   FRONTEND_WS_URL=ws://100.112.13.126:8080/ws docker compose build blackridge
         NEXT_PUBLIC_API_URL: ${FRONTEND_API_URL:-http://100.112.13.126:8080}
         NEXT_PUBLIC_RESEARCH_URL: ${FRONTEND_API_URL:-http://100.112.13.126:8080}
-        NEXT_PUBLIC_WS_URL: ${FRONTEND_WS_URL:-ws://100.112.13.126:8080/ws}
+        NEXT_PUBLIC_WS_URL: ${FRONTEND_WS_URL:-wss://middleware.tailbf9662.ts.net/ws}
     container_name: blackheart-frontend
     restart: unless-stopped
     depends_on:
@@ -257,7 +261,7 @@ services:
       NODE_ENV: production
       NEXT_PUBLIC_API_URL: ${FRONTEND_API_URL:-http://100.112.13.126:8080}
       NEXT_PUBLIC_RESEARCH_URL: ${FRONTEND_API_URL:-http://100.112.13.126:8080}
-      NEXT_PUBLIC_WS_URL: ${FRONTEND_WS_URL:-ws://100.112.13.126:8080/ws}
+      NEXT_PUBLIC_WS_URL: ${FRONTEND_WS_URL:-wss://middleware.tailbf9662.ts.net/ws}
     ports:
       - "3000:3000"
 
