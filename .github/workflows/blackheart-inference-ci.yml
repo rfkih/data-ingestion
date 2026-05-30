@@ -1,4 +1,5 @@
 name: Inference CI/CD
+# Event-driven ML pipeline - uses docker run (not docker-compose) for VPS deployment
 
 on:
   push:
