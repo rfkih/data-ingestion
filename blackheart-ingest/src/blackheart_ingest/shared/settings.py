@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     compute_interval_hours: int = Field(default=4, ge=1, le=168)
     compute_lookback_hours: int = Field(default=72, ge=1, le=8760)
 
+    # Kafka bar-event consumer.
+    # When enabled, subscribes to market.bars and triggers per-bar feature compute
+    # on each closed bar — replacing the Windows Task Scheduler cron.
+    # Requires aiokafka: pip install blackheart-ingest[kafka]
+    kafka_enabled: bool = False
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_group_id: str = "blackheart-ingest"
+
     def db_kwargs(self) -> dict[str, object]:
         """Connection keyword args for ``psycopg.connect(**kwargs)``.
 
