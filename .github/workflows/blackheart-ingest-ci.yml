@@ -124,17 +124,14 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
             "docker rm -f blackheart-ingest 2>/dev/null || true && \
              docker pull ghcr.io/rfkih/blackheart-ingest:${NEW_TAG} && \
-             bash -c '\
-               DB_PASS=$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)
-               docker run -d --name blackheart-ingest --restart unless-stopped \
-                 -p 8001:8001 \
-                 -e INGEST_PROFILE=prod \
-                 -e INGEST_SERVER_HOST=0.0.0.0 \
-                 -e INGEST_SERVER_PORT=8001 \
-                 -e "INGEST_DB_DSN=postgresql://blackheart_research:'"${DB_PASS}"'@postgres:5432/trading_db" \
-                 -e KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
-                 ghcr.io/rfkih/blackheart-ingest:'"${NEW_TAG}"'
-             '"
+             docker run -d --name blackheart-ingest --restart unless-stopped \
+               -p 8001:8001 \
+               -e INGEST_PROFILE=prod \
+               -e INGEST_SERVER_HOST=0.0.0.0 \
+               -e INGEST_SERVER_PORT=8001 \
+               -e 'INGEST_DB_DSN=postgresql://blackheart_research:CLjj505OEU5emM5aaLCmHJlRrwcx@postgres:5432/trading_db' \
+               -e KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
+               ghcr.io/rfkih/blackheart-ingest:${NEW_TAG}"
 
       - name: Ingest healthcheck (with rollback on failure)
         run: |
@@ -152,7 +149,7 @@ jobs:
                  -e INGEST_PROFILE=prod \
                  -e INGEST_SERVER_HOST=0.0.0.0 \
                  -e INGEST_SERVER_PORT=8001 \
-                 -e "INGEST_DB_DSN=postgresql://blackheart_research:\$(grep BLACKHEART_RESEARCH_PASSWORD /home/starsky/blackheart/.env | cut -d= -f2)@postgres:5432/trading_db" \
+                 -e 'INGEST_DB_DSN=postgresql://blackheart_research:CLjj505OEU5emM5aaLCmHJlRrwcx@postgres:5432/trading_db' \
                  -e KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
                  ghcr.io/rfkih/blackheart-ingest:${PREV_TAG}"
             fi
