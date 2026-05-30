@@ -66,6 +66,7 @@ _BASE_URL = "https://community-api.coinmetrics.io/v4"
 _SYMBOL_TO_ASSET: dict[str, str] = {
     "BTCUSDT": "btc",
     "ETHUSDT": "eth",
+    "SOLUSDT": "sol",
 }
 
 # Best-effort allow-list of community-tier (free) metrics. CoinMetrics
