@@ -37,13 +37,6 @@ dependencies = [
     "lightgbm>=4.5,<5",
 ]
 
-# Optional Kafka producer/consumer for event-driven ML pipeline
-# (features, signals, models). Installed separately in deployment;
-# tests mock it so it's not required for dev iteration.
-kafka = [
-    "aiokafka>=0.10,<0.12",
-]
-
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3,<9",
@@ -60,6 +53,12 @@ dev = [
 html-scrape = [
     "beautifulsoup4>=4.12,<5",
     "lxml>=5.3,<7",
+]
+# Optional Kafka consumer for event-driven bar-close → feature compute pipeline.
+# Installed in production Docker image (Dockerfile uses ".[kafka]").
+# Tests mock aiokafka so this is not required for local dev iteration.
+kafka = [
+    "aiokafka>=0.10,<0.12",
 ]
 
 [project.scripts]
