@@ -121,7 +121,14 @@ jobs:
       - name: Pull + recreate ingest container
         run: |
           ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
-            "cd /home/starsky/blackheart && docker compose pull ingest 2>/dev/null || true && docker compose up -d ingest"
+            "docker rm -f blackheart-ingest 2>/dev/null || true && \
+             docker pull ghcr.io/rfkih/blackheart-ingest:${NEW_TAG} && \
+             docker run -d --name blackheart-ingest --restart unless-stopped \
+             -p 8001:8001 \
+             -e INGEST_PROFILE=prod \
+             -e 'INGEST_DB_DSN=postgresql://blackheart_research:admin@postgres:5432/trading_db' \
+             -e KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
+             ghcr.io/rfkih/blackheart-ingest:${NEW_TAG}"
 
       - name: Ingest healthcheck (with rollback on failure)
         run: |
@@ -134,7 +141,12 @@ jobs:
             echo "::error::Ingest healthcheck failed. Rolling back to ${PREV_TAG}."
             if [ "${PREV_TAG}" != "NONE" ]; then
               ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
-                "set -e && grep -v '^INGEST_TAG=' /home/starsky/blackheart/.env > /tmp/.env.rollback && echo 'INGEST_TAG=${PREV_TAG}' >> /tmp/.env.rollback && mv /tmp/.env.rollback /home/starsky/blackheart/.env && cd /home/starsky/blackheart && docker compose up -d ingest"
+                "docker rm -f blackheart-ingest && docker run -d --name blackheart-ingest --restart unless-stopped \
+                 -p 8001:8001 \
+                 -e INGEST_PROFILE=prod \
+                 -e 'INGEST_DB_DSN=postgresql://blackheart_research:admin@postgres:5432/trading_db' \
+                 -e KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
+                 ghcr.io/rfkih/blackheart-ingest:${PREV_TAG}"
             fi
             exit 1
           fi
