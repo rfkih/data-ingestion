@@ -415,6 +415,32 @@ services:
     mem_limit: 128m
 
   # ─────────────────────────────────────────────────────────────────────
+  # ML Feature Stream Processor (event-driven pipeline)
+  # ─────────────────────────────────────────────────────────────────────
+  blackheart-ingest:
+    build:
+      context: ./blackheart-ingest
+      dockerfile: Dockerfile
+    container_name: blackheart-ingest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INGEST_PROFILE: prod
+      INGEST_DB_DSN: postgresql://blackheart_research:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/trading_db
+      KAFKA_BOOTSTRAP_SERVERS: blackheart-kafka:9092
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ─────────────────────────────────────────────────────────────────────
   # ML Inference Sidecar (event-driven pipeline)
   # ─────────────────────────────────────────────────────────────────────
   blackheart-inference:
@@ -425,6 +451,8 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      blackheart-ingest:
         condition: service_healthy
     environment:
       INFERENCE_PROFILE: prod
