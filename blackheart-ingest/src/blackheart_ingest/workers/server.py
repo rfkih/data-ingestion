@@ -214,6 +214,12 @@ app = FastAPI(
 )
 
 
+@app.get("/health")
+def health() -> dict[str, Any]:
+    """Simple health check for Docker healthcheck probes."""
+    return {"status": "healthy"}
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
     return {
