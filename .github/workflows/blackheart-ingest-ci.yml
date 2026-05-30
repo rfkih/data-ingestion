@@ -86,7 +86,7 @@ jobs:
   deploy-ingest:
     name: Deploy ingest to VPS (docker)
     needs: build-image
-    if: vars.DEPLOY_ENABLED == 'true'
+    if: ${{ vars.DEPLOY_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     environment: production-vps
