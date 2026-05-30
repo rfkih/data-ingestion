@@ -184,8 +184,12 @@ async def _compute_loop(interval_hours: int, lookback_hours: int) -> None:
 
 @asynccontextmanager
 async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
+    from .bar_event_consumer import run_bar_event_consumer
+
     settings = settings_ref
     compute_task: asyncio.Task | None = None
+    bar_consumer_task: asyncio.Task | None = None
+
     if settings.compute_auto:
         compute_task = asyncio.create_task(
             _compute_loop(settings.compute_interval_hours, settings.compute_lookback_hours),
@@ -195,15 +199,27 @@ async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
             "ingest auto-compute enabled | interval_h=%d lookback_h=%d",
             settings.compute_interval_hours, settings.compute_lookback_hours,
         )
+
+    if settings.kafka_enabled:
+        bar_consumer_task = asyncio.create_task(
+            run_bar_event_consumer(settings),
+            name="ingest-bar-event-consumer",
+        )
+        logger.info(
+            "ingest bar-event consumer enabled | bootstrap=%s group=%s",
+            settings.kafka_bootstrap_servers, settings.kafka_group_id,
+        )
+
     try:
         yield
     finally:
-        if compute_task is not None:
-            compute_task.cancel()
-            try:
-                await compute_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+        for task in (compute_task, bar_consumer_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
 
 
 app = FastAPI(
