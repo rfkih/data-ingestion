@@ -1,0 +1,455 @@
+﻿==== Q01 accountRepository.findByIsActive
+                                              QUERY PLAN                                              
+------------------------------------------------------------------------------------------------------
+ Seq Scan on accounts  (cost=0.00..10.50 rows=1 width=1971) (actual time=0.012..0.013 rows=2 loops=1)
+   Filter: ((is_active)::text = '1'::text)
+   Rows Removed by Filter: 2
+   Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=492
+ Planning Time: 0.757 ms
+ Execution Time: 0.038 ms
+(8 rows)
+
+==== Q02 accountRepository.findByAccountId
+                                                         QUERY PLAN                                                          
+-----------------------------------------------------------------------------------------------------------------------------
+ Index Scan using accounts_pkey on accounts a  (cost=0.14..8.16 rows=1 width=1971) (actual time=0.045..0.046 rows=1 loops=1)
+   Index Cond: (account_id = '76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2'::uuid)
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=9
+ Planning Time: 0.100 ms
+ Execution Time: 0.055 ms
+(7 rows)
+
+==== Q03 accountRepository.findByUserId
+                                                                     QUERY PLAN                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=8.17..8.17 rows=1 width=1971) (actual time=0.037..0.037 rows=0 loops=1)
+   Sort Key: created_time
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=4
+   ->  Index Scan using uq_accounts_user_username_lower on accounts a  (cost=0.14..8.16 rows=1 width=1971) (actual time=0.004..0.004 rows=0 loops=1)
+         Index Cond: (user_id = '27fd8ae5-d322-4477-bc78-b12b679f511b'::uuid)
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=21
+ Planning Time: 0.098 ms
+ Execution Time: 0.053 ms
+(11 rows)
+
+==== Q04 accountRepository.existsByUserIdAndUsernameIgnoreCase
+                                                                    QUERY PLAN                                                                    
+--------------------------------------------------------------------------------------------------------------------------------------------------
+ Result  (cost=8.16..8.17 rows=1 width=1) (actual time=0.003..0.003 rows=1 loops=1)
+   Buffers: shared hit=1
+   InitPlan 1 (returns $0)
+     ->  Index Scan using uq_accounts_user_username_lower on accounts  (cost=0.14..8.16 rows=1 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+           Index Cond: ((user_id = '27fd8ae5-d322-4477-bc78-b12b679f511b'::uuid) AND (lower((username)::text) = 'admin'::text))
+           Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=6
+ Planning Time: 0.108 ms
+ Execution Time: 0.010 ms
+(10 rows)
+
+==== Q05 userRepository.findByEmail
+                                                           QUERY PLAN                                                           
+--------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..8.15 rows=1 width=2459) (actual time=0.014..0.014 rows=1 loops=1)
+   Buffers: shared hit=2
+   ->  Index Scan using idx_users_email on users  (cost=0.14..8.15 rows=1 width=2459) (actual time=0.013..0.013 rows=1 loops=1)
+         Index Cond: ((email)::text = 'rfkih23@gmail.com'::text)
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=88
+ Planning Time: 0.223 ms
+ Execution Time: 0.022 ms
+(9 rows)
+
+==== Q06 userRepository.findByUserId
+                                                        QUERY PLAN                                                         
+---------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..8.15 rows=1 width=2459) (actual time=0.064..0.064 rows=1 loops=1)
+   Buffers: shared hit=2
+   ->  Index Scan using users_pkey on users  (cost=0.14..8.15 rows=1 width=2459) (actual time=0.063..0.063 rows=1 loops=1)
+         Index Cond: (user_id = '27fd8ae5-d322-4477-bc78-b12b679f511b'::uuid)
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.059 ms
+ Execution Time: 0.071 ms
+(9 rows)
+
+==== Q07 userRepository.updateLastLogin
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
+ Update on users  (cost=0.14..8.16 rows=0 width=0) (actual time=0.188..0.189 rows=0 loops=1)
+   Buffers: shared hit=21
+   ->  Index Scan using users_pkey on users  (cost=0.14..8.16 rows=1 width=340) (actual time=0.005..0.006 rows=1 loops=1)
+         Index Cond: (user_id = '27fd8ae5-d322-4477-bc78-b12b679f511b'::uuid)
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=56
+ Planning Time: 0.127 ms
+ Execution Time: 0.240 ms
+(9 rows)
+
+==== Q08 portfolioRepository.findByAccountIdAndAsset
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.00..1.06 rows=1 width=699) (actual time=0.014..0.014 rows=1 loops=1)
+   Buffers: shared hit=1
+   ->  Seq Scan on portfolio  (cost=0.00..1.06 rows=1 width=699) (actual time=0.013..0.013 rows=1 loops=1)
+         Filter: ((account_id = '76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2'::uuid) AND ((asset)::text = 'BTC'::text))
+         Rows Removed by Filter: 1
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=72
+ Planning Time: 0.261 ms
+ Execution Time: 0.023 ms
+(10 rows)
+
+==== Q09 portfolioRepository.findAllByAccountIdAndAssetIn
+                                                                            QUERY PLAN                                                                            
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Seq Scan on portfolio p  (cost=0.00..1.07 rows=3 width=699) (actual time=0.004..0.004 rows=3 loops=1)
+   Filter: ((account_id = '76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2'::uuid) AND ((is_active)::text = '1'::text) AND ((asset)::text = ANY ('{BTC,ETH,USDT}'::text[])))
+   Rows Removed by Filter: 1
+   Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=52
+ Planning Time: 0.117 ms
+ Execution Time: 0.009 ms
+(8 rows)
+
+==== Q10 portfolioRepository.findAllByAccountId
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=1.10..1.11 rows=4 width=699) (actual time=0.013..0.014 rows=4 loops=1)
+   Sort Key: asset
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=4
+   ->  Seq Scan on portfolio p  (cost=0.00..1.06 rows=4 width=699) (actual time=0.003..0.004 rows=4 loops=1)
+         Filter: ((account_id = '76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2'::uuid) AND ((is_active)::text = '1'::text))
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=9
+ Planning Time: 0.062 ms
+ Execution Time: 0.020 ms
+(11 rows)
+
+==== Q11 portfolioRepository.findAllByAccountIdIn
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=1.10..1.11 rows=4 width=699) (actual time=0.007..0.008 rows=4 loops=1)
+   Sort Key: asset
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=1
+   ->  Seq Scan on portfolio p  (cost=0.00..1.06 rows=4 width=699) (actual time=0.003..0.004 rows=4 loops=1)
+         Filter: ((account_id = '76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2'::uuid) AND ((is_active)::text = '1'::text))
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.048 ms
+ Execution Time: 0.014 ms
+(11 rows)
+
+==== Q12 historicalBackfillJobRepository.findTopOrderByCreatedAtDesc
+                                                                               QUERY PLAN                                                                                
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..5.59 rows=20 width=827) (actual time=0.009..0.025 rows=20 loops=1)
+   Buffers: shared hit=12
+   ->  Index Scan using idx_historical_backfill_job_created on historical_backfill_job  (cost=0.14..28.21 rows=103 width=827) (actual time=0.008..0.023 rows=20 loops=1)
+         Buffers: shared hit=12
+ Planning:
+   Buffers: shared hit=171
+ Planning Time: 0.344 ms
+ Execution Time: 0.032 ms
+(8 rows)
+
+==== Q13 historicalBackfillJobRepository.findTopByStatusOrderByCreatedAtDesc
+                                                                             QUERY PLAN                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..8.16 rows=1 width=827) (actual time=0.004..0.004 rows=0 loops=1)
+   Buffers: shared hit=1
+   ->  Index Scan using idx_historical_backfill_job_status on historical_backfill_job  (cost=0.14..8.16 rows=1 width=827) (actual time=0.004..0.004 rows=0 loops=1)
+         Index Cond: ((status)::text = 'COMPLETED'::text)
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.055 ms
+ Execution Time: 0.010 ms
+(9 rows)
+
+==== Q14 historicalBackfillJobRepository.findActive
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=11.33..11.34 rows=4 width=827) (actual time=0.181..0.182 rows=3 loops=1)
+   Sort Key: created_at DESC
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=10
+   ->  Seq Scan on historical_backfill_job  (cost=0.00..11.29 rows=4 width=827) (actual time=0.115..0.167 rows=3 loops=1)
+         Filter: ((status)::text = ANY ('{PENDING,RUNNING}'::text[]))
+         Rows Removed by Filter: 100
+         Buffers: shared hit=10
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.057 ms
+ Execution Time: 0.190 ms
+(12 rows)
+
+==== Q15 strategyDefinitionRepository.findByStrategyCode
+                                                                     QUERY PLAN                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using uq_strategy_definition_code on strategy_definition  (cost=0.14..8.16 rows=1 width=1868) (actual time=0.033..0.033 rows=1 loops=1)
+   Index Cond: ((strategy_code)::text = 'DCB'::text)
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=112
+ Planning Time: 0.283 ms
+ Execution Time: 0.044 ms
+(7 rows)
+
+==== Q16 strategyDefinitionRepository.findFiltered (ILIKE search)
+                                                                                  QUERY PLAN                                                                                  
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=11.21..11.21 rows=1 width=1868) (actual time=0.027..0.027 rows=1 loops=1)
+   Buffers: shared hit=1
+   ->  Sort  (cost=11.21..11.21 rows=1 width=1868) (actual time=0.026..0.027 rows=1 loops=1)
+         Sort Key: created_time DESC
+         Sort Method: quicksort  Memory: 26kB
+         Buffers: shared hit=1
+         ->  Seq Scan on strategy_definition  (cost=0.00..11.20 rows=1 width=1868) (actual time=0.014..0.019 rows=1 loops=1)
+               Filter: ((lower((strategy_code)::text) ~~ lower(concat('%', 'donch'::text, '%'))) OR (lower((strategy_name)::text) ~~ lower(concat('%', 'donch'::text, '%'))))
+               Rows Removed by Filter: 12
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.088 ms
+ Execution Time: 0.043 ms
+(14 rows)
+
+==== Q17 strategyParamRepository.findActiveByAccountStrategyId
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using idx_strategy_param_by_account_strategy on strategy_param  (cost=0.14..8.16 rows=1 width=1008) (actual time=0.022..0.022 rows=1 loops=1)
+   Index Cond: (account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid)
+   Filter: is_active
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=134
+ Planning Time: 0.278 ms
+ Execution Time: 0.031 ms
+(8 rows)
+
+==== Q18 strategyParamRepository.findLiveByAccountStrategyId
+                                                                            QUERY PLAN                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Incremental Sort  (cost=4.16..8.25 rows=2 width=1008) (actual time=0.497..0.498 rows=1 loops=1)
+   Sort Key: is_active DESC, created_time
+   Presorted Key: is_active
+   Full-sort Groups: 1  Sort Method: quicksort  Average Memory: 25kB  Peak Memory: 25kB
+   Buffers: shared hit=8 read=1 dirtied=1
+   ->  Index Scan Backward using idx_strategy_param_active_lookup on strategy_param  (cost=0.14..8.16 rows=1 width=1008) (actual time=0.423..0.426 rows=1 loops=1)
+         Index Cond: (account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid)
+         Buffers: shared hit=3 read=1 dirtied=1
+ Planning:
+   Buffers: shared hit=11
+ Planning Time: 0.059 ms
+ Execution Time: 0.505 ms
+(12 rows)
+
+==== Q19 strategyParamRepository.deactivateOthers (UPDATE)
+                                                                             QUERY PLAN                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Update on strategy_param  (cost=0.00..11.05 rows=0 width=0) (actual time=3.811..3.812 rows=0 loops=1)
+   Buffers: shared hit=37 read=6 dirtied=5
+   ->  Seq Scan on strategy_param  (cost=0.00..11.05 rows=1 width=7) (actual time=0.008..0.011 rows=1 loops=1)
+         Filter: (is_active AND (param_id <> '00000000-0000-0000-0000-000000000001'::uuid) AND (account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid))
+         Rows Removed by Filter: 34
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=8
+ Planning Time: 0.096 ms
+ Trigger trg_strategy_param_updated_time: time=1.056 calls=1
+ Execution Time: 3.837 ms
+(11 rows)
+
+==== Q20 strategyConfigRepository.findActiveBySymbol (JOIN)
+                                                                                              QUERY PLAN                                                                                               
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=19.75..19.75 rows=1 width=36) (actual time=0.032..0.033 rows=0 loops=1)
+   Buffers: shared hit=3
+   ->  Sort  (cost=19.75..19.75 rows=1 width=36) (actual time=0.032..0.032 rows=0 loops=1)
+         Sort Key: sc.version DESC
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=3
+         ->  Nested Loop  (cost=0.14..19.74 rows=1 width=36) (actual time=0.005..0.005 rows=0 loops=1)
+               ->  Seq Scan on strategy_config sc  (cost=0.00..11.40 rows=1 width=20) (actual time=0.004..0.004 rows=0 loops=1)
+                     Filter: (enabled AND ((strategy_name)::text = 'DCB'::text) AND ((interval_name)::text = '1h'::text) AND ((symbol)::text = 'BTCUSDT'::text) AND ((status)::text = 'ACTIVE'::text))
+               ->  Index Scan using uq_trend_following_config_strategy_config on trend_following_config_detail tfcd  (cost=0.14..8.16 rows=1 width=32) (never executed)
+                     Index Cond: (strategy_config_id = sc.strategy_config_id)
+ Planning:
+   Buffers: shared hit=164
+ Planning Time: 0.495 ms
+ Execution Time: 0.060 ms
+(15 rows)
+
+==== Q21 strategyConfigRepository.findActiveDefault (NULL symbol)
+                                                                                     QUERY PLAN                                                                                      
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=19.57..19.58 rows=1 width=36) (actual time=0.004..0.004 rows=0 loops=1)
+   ->  Sort  (cost=19.57..19.58 rows=1 width=36) (actual time=0.004..0.004 rows=0 loops=1)
+         Sort Key: sc.version DESC
+         Sort Method: quicksort  Memory: 25kB
+         ->  Nested Loop  (cost=0.14..19.56 rows=1 width=36) (actual time=0.002..0.002 rows=0 loops=1)
+               ->  Seq Scan on strategy_config sc  (cost=0.00..11.22 rows=1 width=20) (actual time=0.002..0.002 rows=0 loops=1)
+                     Filter: ((symbol IS NULL) AND enabled AND ((strategy_name)::text = 'DCB'::text) AND ((interval_name)::text = '1h'::text) AND ((status)::text = 'ACTIVE'::text))
+               ->  Index Scan using uq_trend_following_config_strategy_config on trend_following_config_detail tfcd  (cost=0.14..8.16 rows=1 width=32) (never executed)
+                     Index Cond: (strategy_config_id = sc.strategy_config_id)
+ Planning:
+   Buffers: shared hit=11
+ Planning Time: 0.162 ms
+ Execution Time: 0.018 ms
+(13 rows)
+
+==== Q22 symbolStrategyApprovalRepository.findActivePair
+                                                                           QUERY PLAN                                                                           
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using symbol_strategy_approval_symbol_idx on symbol_strategy_approval  (cost=0.14..8.16 rows=1 width=876) (actual time=0.022..0.023 rows=1 loops=1)
+   Index Cond: (symbol = 'BTCUSDT'::text)
+   Filter: (strategy_code = 'DCB'::text)
+   Rows Removed by Filter: 3
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=91
+ Planning Time: 0.368 ms
+ Execution Time: 0.031 ms
+(9 rows)
+
+==== Q23 symbolStrategyApprovalRepository.findAllActive
+                                                                            QUERY PLAN                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using symbol_strategy_approval_active_unique on symbol_strategy_approval  (cost=0.14..8.16 rows=1 width=876) (actual time=0.003..0.004 rows=4 loops=1)
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.049 ms
+ Execution Time: 0.009 ms
+(6 rows)
+
+==== Q24 strategyPromotionLogRepository.findFirstByAccountStrategyIdOrderByCreatedTimeDesc
+                                                                            QUERY PLAN                                                                            
+------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..8.16 rows=1 width=310) (actual time=0.070..0.071 rows=1 loops=1)
+   Buffers: shared hit=2
+   ->  Index Scan using ix_promotion_log_account_strategy on strategy_promotion_log  (cost=0.14..8.16 rows=1 width=310) (actual time=0.070..0.070 rows=1 loops=1)
+         Index Cond: (account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid)
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=99
+ Planning Time: 0.330 ms
+ Execution Time: 0.088 ms
+(9 rows)
+
+==== Q25 strategyPromotionLogRepository.findRecent
+                                                            QUERY PLAN                                                            
+----------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=20.37..20.50 rows=50 width=310) (actual time=0.009..0.011 rows=19 loops=1)
+   Buffers: shared hit=1
+   ->  Sort  (cost=20.37..20.97 rows=240 width=310) (actual time=0.009..0.010 rows=19 loops=1)
+         Sort Key: created_time DESC
+         Sort Method: quicksort  Memory: 29kB
+         Buffers: shared hit=1
+         ->  Seq Scan on strategy_promotion_log  (cost=0.00..12.40 rows=240 width=310) (actual time=0.002..0.003 rows=19 loops=1)
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.041 ms
+ Execution Time: 0.017 ms
+(12 rows)
+
+==== Q26 strategyPromotionLogRepository.findRecentFiltered
+                                                          QUERY PLAN                                                           
+-------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=13.61..13.62 rows=1 width=310) (actual time=0.014..0.014 rows=3 loops=1)
+   Buffers: shared hit=1
+   ->  Sort  (cost=13.61..13.62 rows=1 width=310) (actual time=0.013..0.014 rows=3 loops=1)
+         Sort Key: created_time DESC
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=1
+         ->  Seq Scan on strategy_promotion_log  (cost=0.00..13.60 rows=1 width=310) (actual time=0.009..0.010 rows=3 loops=1)
+               Filter: (upper((strategy_code)::text) = 'DCB'::text)
+               Rows Removed by Filter: 16
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.135 ms
+ Execution Time: 0.023 ms
+(14 rows)
+
+==== Q27 researchAgentActivityRepository.findBySessionIdOrderByCreatedTimeAsc
+                                                                          QUERY PLAN                                                                          
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..9.23 rows=50 width=542) (actual time=0.053..0.145 rows=50 loops=1)
+   Buffers: shared hit=6
+   ->  Index Scan Backward using idx_raa_created on research_agent_activity  (cost=0.14..22.50 rows=123 width=542) (actual time=0.052..0.141 rows=50 loops=1)
+         Filter: (session_id = 'a6e28d65-077d-52ba-aab5-9b3daeff6812'::uuid)
+         Buffers: shared hit=6
+ Planning:
+   Buffers: shared hit=161
+ Planning Time: 0.628 ms
+ Execution Time: 0.157 ms
+(9 rows)
+
+==== Q28 researchAgentActivityRepository.findSessionSummaries (heavy GROUP BY)
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=21.61..21.62 rows=1 width=134) (actual time=0.335..0.336 rows=2 loops=1)
+   Buffers: shared hit=15
+   ->  Sort  (cost=21.61..21.62 rows=1 width=134) (actual time=0.335..0.335 rows=2 loops=1)
+         Sort Key: (max(created_time)) DESC
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=15
+         ->  GroupAggregate  (cost=14.50..21.60 rows=1 width=134) (actual time=0.315..0.317 rows=2 loops=1)
+               Group Key: session_id, agent_name
+               Buffers: shared hit=12
+               ->  Sort  (cost=14.50..14.81 rows=123 width=384) (actual time=0.258..0.262 rows=136 loops=1)
+                     Sort Key: session_id, agent_name, strategy_code
+                     Sort Method: quicksort  Memory: 80kB
+                     Buffers: shared hit=12
+                     ->  Seq Scan on research_agent_activity  (cost=0.00..10.23 rows=123 width=384) (actual time=0.006..0.111 rows=136 loops=1)
+                           Buffers: shared hit=9
+ Planning:
+   Buffers: shared hit=43
+ Planning Time: 0.182 ms
+ Execution Time: 0.396 ms
+(19 rows)
+
+==== Q29 mlIngestScheduleRepository.findBySourceAndSymbol
+                                                                     QUERY PLAN                                                                      
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using idx_ml_ingest_schedule_source on ml_ingest_schedule  (cost=0.14..8.16 rows=1 width=1167) (actual time=0.300..0.300 rows=0 loops=1)
+   Index Cond: ((source)::text = 'binance'::text)
+   Filter: ((symbol IS NULL) OR ((symbol)::text = 'BTCUSDT'::text))
+   Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=126
+ Planning Time: 0.270 ms
+ Execution Time: 0.354 ms
+(8 rows)
+
+==== Q30 lsrStrategyParamRepository.findByAccountStrategyId
+                                                                 QUERY PLAN                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using pk_lsr_strategy_param on lsr_strategy_param  (cost=0.14..8.16 rows=1 width=708) (actual time=0.001..0.001 rows=0 loops=1)
+   Index Cond: (account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid)
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=49
+ Planning Time: 0.217 ms
+ Execution Time: 0.009 ms
+(7 rows)
+

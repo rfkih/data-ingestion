@@ -1,0 +1,675 @@
+﻿==== Q01 accountStrategyRepository.findByIdForUpdate
+                                                     QUERY PLAN                                                     
+--------------------------------------------------------------------------------------------------------------------
+ LockRows  (cost=0.00..2.56 rows=1 width=860) (actual time=0.039..0.040 rows=1 loops=1)
+   Buffers: shared hit=3 dirtied=1
+   ->  Seq Scan on account_strategy a  (cost=0.00..2.55 rows=1 width=860) (actual time=0.015..0.016 rows=1 loops=1)
+         Filter: (account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid)
+         Rows Removed by Filter: 52
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=629
+ Planning Time: 1.221 ms
+ Execution Time: 0.148 ms
+(10 rows)
+
+==== Q02 accountStrategyRepository.findByUniqueKey
+                                                                                                                        QUERY PLAN                                                                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Seq Scan on account_strategy acs  (cost=0.00..2.88 rows=1 width=854) (actual time=0.016..0.016 rows=1 loops=1)
+   Filter: ((NOT is_deleted) AND (account_id = '76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2'::uuid) AND (strategy_definition_id = 'e2fdf889-27cd-448b-aa40-9fec0fe5b323'::uuid) AND ((symbol)::text = 'BTCUSDT'::text) AND ((interval_name)::text = '1h'::text))
+   Rows Removed by Filter: 52
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=12
+ Planning Time: 0.143 ms
+ Execution Time: 0.033 ms
+(8 rows)
+
+==== Q03 accountStrategyRepository.findByEnabledTrueAndIntervalName
+                                                      QUERY PLAN                                                      
+----------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=2.57..2.58 rows=3 width=854) (actual time=0.033..0.033 rows=2 loops=1)
+   Sort Key: priority_order, created_time
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=8
+   ->  Seq Scan on account_strategy acs  (cost=0.00..2.55 rows=3 width=854) (actual time=0.008..0.012 rows=2 loops=1)
+         Filter: (enabled AND (NOT is_deleted) AND ((interval_name)::text = '1h'::text))
+         Rows Removed by Filter: 51
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=24
+ Planning Time: 0.110 ms
+ Execution Time: 0.050 ms
+(12 rows)
+
+==== Q04 accountStrategyRepository.findAllEnabledStrategyRefs
+                                                  QUERY PLAN                                                   
+---------------------------------------------------------------------------------------------------------------
+ Seq Scan on account_strategy acs  (cost=0.00..2.44 rows=6 width=32) (actual time=0.004..0.008 rows=5 loops=1)
+   Filter: (enabled AND (NOT is_deleted))
+   Rows Removed by Filter: 48
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.040 ms
+ Execution Time: 0.012 ms
+(8 rows)
+
+==== Q05 accountStrategyRepository.findAllStrategyCodeRefs
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
+ Seq Scan on account_strategy acs  (cost=0.00..2.44 rows=30 width=20) (actual time=0.004..0.013 rows=39 loops=1)
+   Filter: (NOT is_deleted)
+   Rows Removed by Filter: 14
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.038 ms
+ Execution Time: 0.019 ms
+(8 rows)
+
+==== Q06 accountStrategyRepository.findAllPromoted
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Seq Scan on account_strategy acs  (cost=0.00..2.44 rows=1 width=854) (actual time=0.008..0.014 rows=4 loops=1)
+   Filter: (enabled AND (NOT simulated) AND (NOT is_deleted))
+   Rows Removed by Filter: 49
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.077 ms
+ Execution Time: 0.025 ms
+(8 rows)
+
+==== Q07 accountStrategyRepository.findActivePreset
+                                                                                                                              QUERY PLAN                                                                                                                              
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Seq Scan on account_strategy acs  (cost=0.00..2.88 rows=1 width=854) (actual time=0.007..0.007 rows=0 loops=1)
+   Filter: ((NOT is_deleted) AND enabled AND (account_id = '76fac4b6-ea6b-44cc-a9ec-382ac3c2f4a2'::uuid) AND (strategy_definition_id = 'e2fdf889-27cd-448b-aa40-9fec0fe5b323'::uuid) AND ((symbol)::text = 'BTCUSDT'::text) AND ((interval_name)::text = '1h'::text))
+   Rows Removed by Filter: 53
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.054 ms
+ Execution Time: 0.014 ms
+(8 rows)
+
+==== Q08 accountStrategyRepository.findAllVisibleToUser (JOIN)
+                                                           QUERY PLAN                                                           
+--------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=13.44..13.45 rows=3 width=854) (actual time=0.113..0.115 rows=39 loops=1)
+   Sort Key: acs.priority_order, acs.created_time
+   Sort Method: quicksort  Memory: 35kB
+   Buffers: shared hit=3
+   ->  Hash Join  (cost=10.90..13.42 rows=3 width=854) (actual time=0.047..0.064 rows=39 loops=1)
+         Hash Cond: (acs.account_id = a.account_id)
+         Join Filter: ((a.user_id = '8ff655fa-2d13-4c65-98b9-8dd1e37ef23a'::uuid) OR ((acs.visibility)::text = 'PUBLIC'::text))
+         Buffers: shared hit=3
+         ->  Seq Scan on account_strategy acs  (cost=0.00..2.44 rows=30 width=854) (actual time=0.005..0.015 rows=39 loops=1)
+               Filter: (NOT is_deleted)
+               Rows Removed by Filter: 14
+               Buffers: shared hit=2
+         ->  Hash  (cost=10.40..10.40 rows=40 width=32) (actual time=0.018..0.018 rows=4 loops=1)
+               Buckets: 1024  Batches: 1  Memory Usage: 9kB
+               Buffers: shared hit=1
+               ->  Seq Scan on accounts a  (cost=0.00..10.40 rows=40 width=32) (actual time=0.008..0.009 rows=4 loops=1)
+                     Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=151
+ Planning Time: 0.351 ms
+ Execution Time: 0.183 ms
+(21 rows)
+
+==== Q09 backtestRunRepository.countByUserIdAndStatusIn
+                                                                         QUERY PLAN                                                                         
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=8.14..8.15 rows=1 width=8) (actual time=0.553..0.553 rows=1 loops=1)
+   Buffers: shared hit=4 read=1 dirtied=1
+   ->  Index Only Scan using idx_backtest_run_active_per_user on backtest_run r  (cost=0.12..8.14 rows=1 width=0) (actual time=0.551..0.551 rows=0 loops=1)
+         Index Cond: (user_id = '8ff655fa-2d13-4c65-98b9-8dd1e37ef23a'::uuid)
+         Heap Fetches: 4
+         Buffers: shared hit=4 read=1 dirtied=1
+ Planning:
+   Buffers: shared hit=168
+ Planning Time: 0.418 ms
+ Execution Time: 0.565 ms
+(10 rows)
+
+==== Q10 backtestRunRepository.findAllOrderByCreatedTimeDesc
+                                                         QUERY PLAN                                                         
+----------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=134.73..134.85 rows=50 width=2276) (actual time=1.539..1.544 rows=50 loops=1)
+   Buffers: shared hit=89
+   ->  Sort  (cost=134.73..137.37 rows=1058 width=2276) (actual time=1.538..1.540 rows=50 loops=1)
+         Sort Key: created_time DESC
+         Sort Method: top-N heapsort  Memory: 118kB
+         Buffers: shared hit=89
+         ->  Seq Scan on backtest_run  (cost=0.00..99.58 rows=1058 width=2276) (actual time=0.007..0.760 rows=1058 loops=1)
+               Buffers: shared hit=89
+ Planning:
+   Buffers: shared hit=260
+ Planning Time: 1.346 ms
+ Execution Time: 1.602 ms
+(12 rows)
+
+==== Q11 backtestRunRepository.findFiltered (typical UI call)
+                                                                                    QUERY PLAN                                                                                     
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=110.22..110.23 rows=5 width=2276) (actual time=0.987..0.991 rows=50 loops=1)
+   Buffers: shared hit=89
+   ->  Sort  (cost=110.22..110.23 rows=5 width=2276) (actual time=0.987..0.988 rows=50 loops=1)
+         Sort Key: created_time DESC NULLS LAST
+         Sort Method: top-N heapsort  Memory: 118kB
+         Buffers: shared hit=89
+         ->  Seq Scan on backtest_run  (cost=0.00..110.16 rows=5 width=2276) (actual time=0.006..0.674 rows=1050 loops=1)
+               Filter: (((user_id = '8ff655fa-2d13-4c65-98b9-8dd1e37ef23a'::uuid) OR ((triggered_by)::text = 'RESEARCHER'::text)) AND (upper((status)::text) = 'COMPLETED'::text))
+               Rows Removed by Filter: 8
+               Buffers: shared hit=89
+ Planning:
+   Buffers: shared hit=5
+ Planning Time: 0.441 ms
+ Execution Time: 1.024 ms
+(14 rows)
+
+==== Q12 backtestRunRepository.findResearchLog (typical dashboard call)
+                                                                                                        QUERY PLAN                                                                                                        
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=141.83..141.96 rows=50 width=2276) (actual time=0.638..0.643 rows=50 loops=1)
+   Buffers: shared hit=89
+   ->  Sort  (cost=141.83..144.41 rows=1033 width=2276) (actual time=0.638..0.640 rows=50 loops=1)
+         Sort Key: created_time DESC NULLS LAST
+         Sort Method: top-N heapsort  Memory: 118kB
+         Buffers: shared hit=89
+         ->  Seq Scan on backtest_run  (cost=0.00..107.52 rows=1033 width=2276) (actual time=0.005..0.370 rows=1050 loops=1)
+               Filter: ((analysis_snapshot IS NOT NULL) AND (analysis_snapshot <> ''::text) AND ((user_id IS NULL) OR (user_id = '8ff655fa-2d13-4c65-98b9-8dd1e37ef23a'::uuid)) AND ((status)::text = 'COMPLETED'::text))
+               Rows Removed by Filter: 8
+               Buffers: shared hit=89
+ Planning:
+   Buffers: shared hit=5
+ Planning Time: 0.113 ms
+ Execution Time: 0.674 ms
+(14 rows)
+
+==== Q13 backtestRunRepository.findByIdAndUserId
+                                                            QUERY PLAN                                                             
+-----------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using backtest_run_pkey on backtest_run  (cost=0.28..8.30 rows=1 width=2276) (actual time=1.053..1.054 rows=1 loops=1)
+   Index Cond: (backtest_run_id = 'a1b0e928-eac5-489c-985c-06e5ae9088aa'::uuid)
+   Filter: ((user_id = '8ff655fa-2d13-4c65-98b9-8dd1e37ef23a'::uuid) OR ((triggered_by)::text = 'RESEARCHER'::text))
+   Buffers: shared hit=1 read=2
+ Planning:
+   Buffers: shared hit=5
+ Planning Time: 0.075 ms
+ Execution Time: 1.063 ms
+(8 rows)
+
+==== Q14 backtestRunRepository.findRecentCompletedByAccountStrategyIdValueScan (JSONB substring!)
+                                                                                                                                                                        QUERY PLAN                                                                                                                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=118.11..118.11 rows=1 width=2276) (actual time=0.753..0.753 rows=0 loops=1)
+   Buffers: shared hit=89
+   ->  Sort  (cost=118.11..118.11 rows=1 width=2276) (actual time=0.752..0.752 rows=0 loops=1)
+         Sort Key: created_time DESC
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=89
+         ->  Seq Scan on backtest_run  (cost=0.00..118.09 rows=1 width=2276) (actual time=0.749..0.749 rows=0 loops=1)
+               Filter: ((win_rate IS NOT NULL) AND (avg_win IS NOT NULL) AND (avg_loss IS NOT NULL) AND (total_trades >= 30) AND ((status)::text = 'COMPLETED'::text) AND ((account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid) OR ((strategy_account_strategy_ids)::text ~~* concat('%', '7e570001-0000-0000-0000-000000000007', '%'))))
+               Rows Removed by Filter: 1058
+               Buffers: shared hit=89
+ Planning:
+   Buffers: shared hit=14
+ Planning Time: 0.283 ms
+ Execution Time: 0.795 ms
+(14 rows)
+
+==== Q15 backtestRunRepository.markAsHoldoutRun (UPDATE)
+                                                              QUERY PLAN                                                               
+---------------------------------------------------------------------------------------------------------------------------------------
+ Update on backtest_run  (cost=0.28..8.29 rows=0 width=0) (actual time=0.373..0.374 rows=0 loops=1)
+   Buffers: shared hit=1 read=1
+   ->  Index Scan using backtest_run_pkey on backtest_run  (cost=0.28..8.29 rows=1 width=23) (actual time=0.372..0.372 rows=0 loops=1)
+         Index Cond: (backtest_run_id = '00000000-0000-0000-0000-000000000099'::uuid)
+         Filter: (NOT is_holdout_run)
+         Buffers: shared hit=1 read=1
+ Planning:
+   Buffers: shared hit=27
+ Planning Time: 0.100 ms
+ Execution Time: 0.445 ms
+(10 rows)
+
+==== Q16 signalHistoryRepository.findLatest
+                                                                                       QUERY PLAN                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..0.28 rows=1 width=325) (actual time=0.165..0.167 rows=1 loops=1)
+   Buffers: shared hit=1 read=1
+   ->  Custom Scan (ChunkAppend) on signal_history s  (cost=0.14..22.36 rows=161 width=325) (actual time=0.164..0.166 rows=1 loops=1)
+         Order: s.ts DESC
+         Buffers: shared hit=1 read=1
+         ->  Index Scan using _hyper_2_1395_chunk_signal_history_ts_idx on _hyper_2_1395_chunk s_1  (cost=0.14..22.36 rows=161 width=324) (actual time=0.163..0.163 rows=1 loops=1)
+               Filter: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+               Buffers: shared hit=1 read=1
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1381_chunk s_2  (cost=18.16..18.16 rows=1000 width=377) (never executed)
+               ->  Index Scan using compress_hyper_7_1400_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1400_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1380_chunk s_3  (cost=18.16..18.16 rows=1000 width=400) (never executed)
+               ->  Index Scan using compress_hyper_7_1399_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1399_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1379_chunk s_4  (cost=18.16..18.16 rows=1000 width=400) (never executed)
+               ->  Index Scan using compress_hyper_7_1398_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1398_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1378_chunk s_5  (cost=18.16..18.16 rows=1000 width=400) (never executed)
+               ->  Index Scan using compress_hyper_7_1397_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1397_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1377_chunk s_6  (cost=18.16..18.16 rows=1000 width=387) (never executed)
+               ->  Index Scan using compress_hyper_7_1396_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1396_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1394_chunk s_7  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1413_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1413_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1393_chunk s_8  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1412_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1412_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1392_chunk s_9  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1411_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1411_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1391_chunk s_10  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1410_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1410_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1390_chunk s_11  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1409_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1409_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1389_chunk s_12  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1408_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1408_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1388_chunk s_13  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1407_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1407_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1387_chunk s_14  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1406_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1406_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1386_chunk s_15  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1405_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1405_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1385_chunk s_16  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1404_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1404_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1384_chunk s_17  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1403_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1403_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1383_chunk s_18  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1402_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1402_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1382_chunk s_19  (cost=18.16..18.16 rows=1000 width=324) (never executed)
+               ->  Index Scan using compress_hyper_7_1401_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1401_chunk  (cost=0.14..8.16 rows=1 width=414) (never executed)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+ Planning:
+   Buffers: shared hit=8500 read=4
+ Planning Time: 10.398 ms
+ Execution Time: 0.634 ms
+(66 rows)
+
+==== Q17 signalHistoryRepository.findAt
+                                                                                                                                  QUERY PLAN                                                                                                                                   
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (ColumnarScan) on _hyper_2_1381_chunk s  (cost=18.17..18.17 rows=1000 width=377) (actual time=4.232..4.246 rows=1 loops=1)
+   Vectorized Filter: (ts = '2026-05-01 00:00:00+00'::timestamp with time zone)
+   Rows Removed by Filter: 719
+   Buffers: shared hit=42 read=3
+   ->  Index Scan using compress_hyper_7_1400_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1400_chunk  (cost=0.14..8.17 rows=1 width=414) (actual time=0.016..0.017 rows=1 loops=1)
+         Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text) AND (_ts_meta_min_1 <= '2026-05-01 00:00:00+00'::timestamp with time zone) AND (_ts_meta_max_1 >= '2026-05-01 00:00:00+00'::timestamp with time zone))
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=126
+ Planning Time: 0.298 ms
+ Execution Time: 4.262 ms
+(11 rows)
+
+==== Q18 signalHistoryRepository.findInRange
+                                                                                                                                        QUERY PLAN                                                                                                                                        
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=18.17..18.17 rows=1000 width=377) (actual time=1.208..1.338 rows=720 loops=1)
+   Buffers: shared hit=64 read=3
+   ->  Custom Scan (ChunkAppend) on signal_history s  (cost=18.17..18.17 rows=1000 width=377) (actual time=1.208..1.306 rows=720 loops=1)
+         Order: s.ts
+         Buffers: shared hit=64 read=3
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1380_chunk s_1  (cost=18.17..18.17 rows=1000 width=400) (actual time=1.207..1.216 rows=144 loops=1)
+               Vectorized Filter: ((ts >= '2026-04-01 00:00:00+00'::timestamp with time zone) AND (ts < '2026-05-01 00:00:00+00'::timestamp with time zone))
+               Rows Removed by Filter: 576
+               Buffers: shared hit=43 read=3
+               ->  Index Scan Backward using compress_hyper_7_1399_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1399_chunk  (cost=0.14..8.17 rows=1 width=414) (actual time=0.040..0.042 rows=1 loops=1)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text) AND (_ts_meta_min_1 < '2026-05-01 00:00:00+00'::timestamp with time zone) AND (_ts_meta_max_1 >= '2026-04-01 00:00:00+00'::timestamp with time zone))
+                     Buffers: shared hit=3
+         ->  Custom Scan (ColumnarScan) on _hyper_2_1381_chunk s_2  (cost=18.17..18.17 rows=1000 width=377) (actual time=0.032..0.058 rows=576 loops=1)
+               Vectorized Filter: ((ts >= '2026-04-01 00:00:00+00'::timestamp with time zone) AND (ts < '2026-05-01 00:00:00+00'::timestamp with time zone))
+               Rows Removed by Filter: 144
+               Buffers: shared hit=21
+               ->  Index Scan Backward using compress_hyper_7_1400_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1400_chunk  (cost=0.14..8.17 rows=1 width=414) (actual time=0.006..0.006 rows=1 loops=1)
+                     Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text) AND (_ts_meta_min_1 < '2026-05-01 00:00:00+00'::timestamp with time zone) AND (_ts_meta_max_1 >= '2026-04-01 00:00:00+00'::timestamp with time zone))
+                     Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=84
+ Planning Time: 0.531 ms
+ Execution Time: 1.388 ms
+(23 rows)
+
+==== Q19 signalHistoryRepository.countFor
+                                                                                                      QUERY PLAN                                                                                                      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize Aggregate  (cost=383.12..383.13 rows=1 width=8) (actual time=0.327..0.332 rows=1 loops=1)
+   Buffers: shared hit=44
+   ->  Append  (cost=20.66..383.07 rows=19 width=8) (actual time=0.033..0.329 rows=19 loops=1)
+         Buffers: shared hit=44
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.032..0.033 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1377_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.030..0.030 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1396_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1396_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.029..0.030 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.010..0.010 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1378_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.009..0.010 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1397_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1397_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.009..0.009 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.009..0.009 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1379_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.008..0.009 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1398_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1398_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.008..0.008 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.007..0.007 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1380_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.006..0.007 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1399_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1399_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.006..0.006 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.007..0.007 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1381_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.007..0.007 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1400_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1400_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.007..0.007 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.014..0.015 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1382_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.014..0.014 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1401_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1401_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.014..0.014 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.012..0.012 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1383_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.012..0.012 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1402_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1402_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.011..0.012 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.014..0.014 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1384_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.014..0.014 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1403_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1403_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.014..0.014 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.014..0.014 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1385_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.014..0.014 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1404_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1404_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.014..0.014 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.016..0.016 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1386_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.015..0.015 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1405_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1405_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.015..0.015 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.011..0.011 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1387_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.010..0.010 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1406_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1406_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.010..0.010 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.014..0.014 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1388_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.013..0.014 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1407_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1407_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.013..0.013 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.012..0.013 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1389_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.012..0.012 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1408_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1408_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.012..0.012 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.011..0.011 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1390_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.011..0.011 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1409_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1409_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.010..0.010 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.008..0.008 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1391_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.008..0.008 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1410_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1410_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.008..0.008 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.018..0.018 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1392_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.017..0.017 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1411_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1411_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.017..0.017 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.015..0.015 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1393_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.014..0.014 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1412_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1412_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.014..0.014 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=20.66..20.68 rows=1 width=8) (actual time=0.016..0.016 rows=1 loops=1)
+               Buffers: shared hit=2
+               ->  Custom Scan (ColumnarIndexScan) on _hyper_2_1394_chunk s  (cost=18.16..18.16 rows=1000 width=0) (actual time=0.016..0.016 rows=1 loops=1)
+                     Buffers: shared hit=2
+                     ->  Index Scan using compress_hyper_7_1413_chunk_signal_id_symbol__ts_meta_min_1_idx on compress_hyper_7_1413_chunk  (cost=0.14..8.16 rows=1 width=78) (actual time=0.015..0.016 rows=1 loops=1)
+                           Index Cond: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                           Buffers: shared hit=2
+         ->  Partial Aggregate  (cost=10.82..10.83 rows=1 width=8) (actual time=0.080..0.080 rows=1 loops=1)
+               Buffers: shared hit=8
+               ->  Seq Scan on _hyper_2_1395_chunk s_1  (cost=0.00..10.41 rows=161 width=0) (actual time=0.010..0.075 rows=161 loops=1)
+                     Filter: ((signal_id = '53141c26-76c6-46e8-b503-cc7612eb23fa'::uuid) AND ((symbol)::text = 'ETHUSDT'::text))
+                     Buffers: shared hit=8
+ Planning:
+   Buffers: shared hit=549
+ Planning Time: 1.992 ms
+ Execution Time: 0.558 ms
+(139 rows)
+
+==== Q20 inferenceLogRepository.findByIdAccountStrategyId...Between (derived)
+                                                                                                                   QUERY PLAN                                                                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (ChunkAppend) on inference_log  (cost=0.27..16.37 rows=2 width=1811) (actual time=0.339..0.340 rows=0 loops=1)
+   Order: inference_log.decision_time DESC
+   Buffers: shared hit=3 read=1
+   ->  Index Scan using _hyper_24_1347_chunk_idx_inference_log_strategy_time on _hyper_24_1347_chunk  (cost=0.27..8.29 rows=1 width=1811) (actual time=0.005..0.005 rows=0 loops=1)
+         Index Cond: ((account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid) AND (decision_time >= '2026-05-19 00:00:00'::timestamp without time zone) AND (decision_time <= '2026-05-22 23:59:59'::timestamp without time zone))
+         Buffers: shared hit=2
+   ->  Index Scan using _hyper_24_1332_chunk_idx_inference_log_strategy_time on _hyper_24_1332_chunk  (cost=0.27..8.08 rows=1 width=1811) (actual time=0.332..0.332 rows=0 loops=1)
+         Index Cond: ((account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid) AND (decision_time >= '2026-05-19 00:00:00'::timestamp without time zone) AND (decision_time <= '2026-05-22 23:59:59'::timestamp without time zone))
+         Buffers: shared hit=1 read=1
+ Planning:
+   Buffers: shared hit=643 read=3
+ Planning Time: 2.659 ms
+ Execution Time: 0.363 ms
+(13 rows)
+
+==== Q21 inferenceLogRepository.findReadyForBackfill
+                                                                                          QUERY PLAN                                                                                          
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.27..24.57 rows=200 width=1811) (actual time=0.078..0.227 rows=200 loops=1)
+   Buffers: shared hit=22
+   ->  Custom Scan (ChunkAppend) on inference_log  (cost=0.27..57.36 rows=470 width=1811) (actual time=0.077..0.218 rows=200 loops=1)
+         Order: inference_log.decision_time
+         Buffers: shared hit=22
+         ->  Index Scan using _hyper_24_1332_chunk_idx_inference_log_unbackfilled on _hyper_24_1332_chunk  (cost=0.27..57.36 rows=470 width=1811) (actual time=0.077..0.208 rows=200 loops=1)
+               Filter: (horizon_bars IS NOT NULL)
+               Buffers: shared hit=22
+         ->  Index Scan using _hyper_24_1347_chunk_idx_inference_log_unbackfilled on _hyper_24_1347_chunk  (cost=0.27..43.01 rows=295 width=1811) (never executed)
+               Index Cond: (decision_time <= '2026-05-22 12:00:00'::timestamp without time zone)
+               Filter: (horizon_bars IS NOT NULL)
+ Planning:
+   Buffers: shared hit=45
+ Planning Time: 0.249 ms
+ Execution Time: 0.245 ms
+(15 rows)
+
+==== Q22 inferenceLogRepository.existsByIdDecisionTimeAndIdAccountStrategyId (derived)
+                                                                                       QUERY PLAN                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Result  (cost=8.29..8.30 rows=1 width=1) (actual time=0.005..0.005 rows=1 loops=1)
+   Buffers: shared hit=2
+   InitPlan 1 (returns $0)
+     ->  Index Only Scan using _hyper_24_1347_chunk_idx_inference_log_strategy_time on _hyper_24_1347_chunk  (cost=0.27..8.29 rows=1 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+           Index Cond: ((account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid) AND (decision_time = '2026-05-22 12:00:00'::timestamp without time zone))
+           Heap Fetches: 0
+           Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=27
+ Planning Time: 0.136 ms
+ Execution Time: 0.011 ms
+(11 rows)
+
+==== Q23 inferenceLogRepository.findTradeReturnsForWindow
+                                                                                                                  QUERY PLAN                                                                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (ChunkAppend) on inference_log  (cost=0.27..16.38 rows=2 width=28) (actual time=0.007..0.007 rows=0 loops=1)
+   Order: inference_log.decision_time
+   Buffers: shared hit=4
+   ->  Index Scan Backward using _hyper_24_1332_chunk_idx_inference_log_strategy_time on _hyper_24_1332_chunk  (cost=0.27..8.08 rows=1 width=28) (actual time=0.004..0.004 rows=0 loops=1)
+         Index Cond: ((account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid) AND (decision_time >= '2026-05-19 00:00:00'::timestamp without time zone) AND (decision_time < '2026-05-23 00:00:00'::timestamp without time zone))
+         Filter: ((realized_return IS NOT NULL) AND ((decision_type)::text = ANY ('{OPEN_LONG,OPEN_SHORT}'::text[])))
+         Buffers: shared hit=2
+   ->  Index Scan Backward using _hyper_24_1347_chunk_idx_inference_log_strategy_time on _hyper_24_1347_chunk  (cost=0.27..8.30 rows=1 width=28) (actual time=0.002..0.003 rows=0 loops=1)
+         Index Cond: ((account_strategy_id = '7e570001-0000-0000-0000-000000000007'::uuid) AND (decision_time >= '2026-05-19 00:00:00'::timestamp without time zone) AND (decision_time < '2026-05-23 00:00:00'::timestamp without time zone))
+         Filter: ((realized_return IS NOT NULL) AND ((decision_type)::text = ANY ('{OPEN_LONG,OPEN_SHORT}'::text[])))
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=57
+ Planning Time: 0.301 ms
+ Execution Time: 0.016 ms
+(15 rows)
+
+==== Q24 modelRegistryRepository.findLatestByStatus
+                                                                                                                       QUERY PLAN                                                                                                                       
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=5.23..5.24 rows=1 width=2291) (actual time=0.036..0.036 rows=1 loops=1)
+   Sort Key: version DESC
+   Sort Method: quicksort  Memory: 26kB
+   Buffers: shared hit=5
+   ->  Seq Scan on model_registry m  (cost=0.00..5.22 rows=1 width=2291) (actual time=0.015..0.032 rows=1 loops=1)
+         Filter: ((("interval" IS NULL) OR (("interval")::text = '1h'::text)) AND ((horizon_bars IS NULL) OR (horizon_bars = 24)) AND ((purpose)::text = 'regime'::text) AND ((symbol)::text = 'BTCUSDT'::text) AND ((status)::text = 'trained'::text))
+         Rows Removed by Filter: 18
+         Buffers: shared hit=5
+ Planning:
+   Buffers: shared hit=188
+ Planning Time: 0.389 ms
+ Execution Time: 0.047 ms
+(12 rows)
+
+==== Q25 modelRegistryRepository.findLatestByStatusSynced
+                                                                                                                                    QUERY PLAN                                                                                                                                     
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=5.23..5.24 rows=1 width=2291) (actual time=0.012..0.012 rows=0 loops=1)
+   Sort Key: version DESC
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=5
+   ->  Seq Scan on model_registry m  (cost=0.00..5.22 rows=1 width=2291) (actual time=0.010..0.010 rows=0 loops=1)
+         Filter: (artifact_synced_to_vps AND (("interval" IS NULL) OR (("interval")::text = '1h'::text)) AND ((horizon_bars IS NULL) OR (horizon_bars = 24)) AND ((purpose)::text = 'regime'::text) AND ((symbol)::text = 'BTCUSDT'::text) AND ((status)::text = 'trained'::text))
+         Rows Removed by Filter: 19
+         Buffers: shared hit=5
+ Planning:
+   Buffers: shared hit=5
+ Planning Time: 0.083 ms
+ Execution Time: 0.021 ms
+(12 rows)
+
+==== Q26 modelRegistryRepository.findByArtifactSha256 (derived)
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Seq Scan on model_registry  (cost=0.00..5.12 rows=1 width=2291) (actual time=0.004..0.010 rows=1 loops=1)
+   Filter: ((artifact_sha256)::text = '35e09a6f865a7ef976a4118afff8fa7b992c60e16cb6eb035e995b3b8dfd3fd0'::text)
+   Rows Removed by Filter: 18
+   Buffers: shared hit=5
+ Planning:
+   Buffers: shared hit=5
+ Planning Time: 0.061 ms
+ Execution Time: 0.018 ms
+(8 rows)
+
+==== Q27 modelRegistryRepository.findByStatusOrderByCreatedTimeDesc (derived)
+                                                   QUERY PLAN                                                    
+-----------------------------------------------------------------------------------------------------------------
+ Sort  (cost=5.13..5.14 rows=1 width=2291) (actual time=0.013..0.014 rows=3 loops=1)
+   Sort Key: created_time DESC
+   Sort Method: quicksort  Memory: 30kB
+   Buffers: shared hit=5
+   ->  Seq Scan on model_registry  (cost=0.00..5.12 rows=1 width=2291) (actual time=0.005..0.009 rows=3 loops=1)
+         Filter: ((status)::text = 'trained'::text)
+         Rows Removed by Filter: 16
+         Buffers: shared hit=5
+ Planning:
+   Buffers: shared hit=5
+ Planning Time: 0.068 ms
+ Execution Time: 0.022 ms
+(12 rows)
+
+==== Q28 fundingRateRepository.findLatestBefore
+                                                                            QUERY PLAN                                                                             
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.29..0.35 rows=1 width=37) (actual time=0.019..0.019 rows=1 loops=1)
+   Buffers: shared hit=3
+   ->  Index Scan Backward using pk_funding_rate_history on funding_rate_history  (cost=0.29..483.36 rows=6985 width=37) (actual time=0.018..0.018 rows=1 loops=1)
+         Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (funding_time <= '2026-05-22 12:00:00'::timestamp without time zone))
+         Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=41
+ Planning Time: 0.213 ms
+ Execution Time: 0.026 ms
+(9 rows)
+
+==== Q29 fundingRateRepository.findInWindow
+                                                                                             QUERY PLAN                                                                                              
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using pk_funding_rate_history on funding_rate_history  (cost=0.29..18.94 rows=7 width=37) (actual time=0.003..0.003 rows=0 loops=1)
+   Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (funding_time > '2026-05-15 00:00:00'::timestamp without time zone) AND (funding_time <= '2026-05-22 00:00:00'::timestamp without time zone))
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.047 ms
+ Execution Time: 0.007 ms
+(7 rows)
+
+==== Q30 fundingRateRepository.findAllUpTo
+                                                                      QUERY PLAN                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using pk_funding_rate_history on funding_rate_history  (cost=0.29..483.36 rows=6985 width=37) (actual time=0.031..0.741 rows=6986 loops=1)
+   Index Cond: (((symbol)::text = 'BTCUSDT'::text) AND (funding_time <= '2026-05-22 12:00:00'::timestamp without time zone))
+   Buffers: shared hit=86
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.048 ms
+ Execution Time: 0.912 ms
+(7 rows)
+

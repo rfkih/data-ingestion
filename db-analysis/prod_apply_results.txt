@@ -1,0 +1,28 @@
+﻿== 1/7 idx_trades_active_lookup
+CREATE INDEX
+== 2/7 idx_trades_account_status_entry
+CREATE INDEX
+== 3/7 idx_trades_closed_exit_time (partial WHERE status=CLOSED)
+CREATE INDEX
+== 4/7 idx_trades_status_exit_time (partial WHERE status=CLOSED)
+CREATE INDEX
+== 5/7 idx_trades_open_entry_time (partial WHERE status IN OPEN/PARTIALLY_CLOSED)
+CREATE INDEX
+== 6/7 idx_trades_strategy_closed_exit (partial WHERE status=CLOSED)
+CREATE INDEX
+== 7/7 idx_trades_asset_intent_entry (partial WHERE intended_entry_price NOT NULL)
+CREATE INDEX
+== Refresh stats
+ANALYZE
+== Verify all 7 created
+            indexname            |    size    
+---------------------------------+------------
+ idx_trades_account_status_entry | 16 kB
+ idx_trades_active_lookup        | 16 kB
+ idx_trades_asset_intent_entry   | 16 kB
+ idx_trades_closed_exit_time     | 16 kB
+ idx_trades_open_entry_time      | 8192 bytes
+ idx_trades_status_exit_time     | 16 kB
+ idx_trades_strategy_closed_exit | 16 kB
+(7 rows)
+

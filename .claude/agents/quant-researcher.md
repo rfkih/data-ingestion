@@ -148,7 +148,16 @@ while goal_not_achieved AND cumulative_elapsed < 8.5h:
               - If regime model found AND this strategy has NOT already been
                 re-queued with ML gate override in this research run:
                   Re-queue the SAME strategy with the same sweep_config PLUS
-                  `strategy_ml_gate_overrides` pointing at the regime model.
+                  these ML sentinel params appended to `params`:
+                    {"name": "_ml_gate_enabled", "values": [true]}
+                    {"name": "_ml_signal_name",  "values": ["<regime_model_name>"]}
+                    {"name": "_ml_shadow_mode",  "values": [false]}
+                  (The sentinel system routes these through sweep.build_ml_override_maps
+                  into BacktestRun.strategyMlGateOverrides/strategyMlSignalNameOverrides
+                  — do NOT use strategy_ml_gate_overrides as a top-level sweep_config key.)
+                  NOTE: The ML gate will fail-open if signal_history has no rows for
+                  the backtest window — bit-identical metrics confirms fail-open, NOT
+                  a wiring bug. The gate wiring lives in RiskGuardService, not the engine.
                   Hypothesis must reference the regime-analysis finding.
                   Journal a HYPOTHESIS entry noting "regime-gated retry after
                   INSUFFICIENT_EVIDENCE in regime {best_regime}".
@@ -279,6 +288,32 @@ You may edit `blackheart-research-orchestrator/` code when — and only when —
 ## End-of-session output (checkpoint, not a question)
 
 **Research paper (mandatory before exit).** On every exit that had at least one queue_id active this session, call `POST /papers/{queue_id}/generate` for EACH queue that reached a terminal state (COMPLETED, PARKED, or FAILED) this session. Use Idempotency-Key `paper-gen-{queue_id}`. This writes the paper to the DB so the frontend at `/research/papers` shows it. Do NOT skip this step — no paper in DB = research invisible to operator.
+
+**Filesystem .md paper — canonical format and versioning.** ALSO write a filesystem paper per the template at `research/RESEARCH_PAPER_TEMPLATE.md`. Read the template before writing. Rules:
+
+**Naming convention (mandatory):**
+```
+RESEARCH_PAPER_<STRATEGY>_<INSTRUMENT>_<INTERVAL>_v<N>_<TYPE>_<DATE>.md
+```
+- `<STRATEGY>` — uppercase strategy code, e.g. `ATR_MOM`, `DCB`, `MMR`
+- `<INSTRUMENT>` — full symbol, e.g. `ETHUSDT`, `BTCUSDT` (never abbreviate to `ETH` or `BTC`)
+- `<INTERVAL>` — interval, e.g. `1H`, `4H`, `15M`
+- `v<N>` — attempt number on this surface, computed by globbing `research/RESEARCH_PAPER_<STRATEGY>_<INSTRUMENT>_<INTERVAL>_v*.md` and taking max(N)+1. First paper on a new surface = `v1`.
+- `<TYPE>` — exactly one of: `ALGO` | `HYBRID` | `ML` | `CHAR` (characterization of a production strategy). Never use free-text descriptors like `REDO`, `2022WINDOW`, `EXTENDED` — the what-changed belongs in §1 Background, not the filename.
+- `<DATE>` — YYYY-MM-DD
+
+**Examples:**
+- `RESEARCH_PAPER_ATR_MOM_ETHUSDT_1H_v1_ALGO_2026-05-27.md`
+- `RESEARCH_PAPER_ATR_MOM_ETHUSDT_1H_v5_HYBRID_2026-05-29.md`
+- `RESEARCH_PAPER_VBO_BTCUSDT_1H_v1_CHAR_2026-05-29.md`
+
+**Header fields (mandatory):**
+- `Surface attempt: v<N> — <TYPE> (<one-line context>)` — e.g. `v5 — HYBRID (regime-gated retry; v4 had wrong param names + empty signal_history)`
+- `Prior papers on this surface: <comma-separated list of prior vN filenames>` — e.g. `v1_ALGO_2026-05-27, v2_ALGO_2026-05-28, ...`
+
+**Required sections every paper:** header block, TL;DR, §1 Background, §2 Hypothesis, §3 Methodology, §4 Parameter Space, §5 Results, §10 Methodology Compliance Audit, §11 Conclusions, §13 Appendix. Conditional (include only when they occurred): §6 Graduation Candidate, §7 Specialist Reviews, §8 Walk-Forward, §9 Infrastructure Notes, §12 Data Wishlist. Do NOT write a section header and leave it blank — omit entirely.
+
+**Quality bar.** Self-contained: a reader who has not seen this session must understand what was tested, what happened, and why. "Setup / Empirical finding / Verdict" bullet lists are not a paper. Every metrics claim grounded in iteration_ids / fold tables / paired-delta CI. Conclusions numbered and evidence-backed.
 
 ```bash
 scripts/orch.sh POST /papers/<queue_id>/generate --ik paper-gen-<queue_id>

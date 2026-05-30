@@ -1,0 +1,473 @@
+﻿==== Q01 backtestTradeRepository.findByBacktestRunIdAndStatus
+                                                             QUERY PLAN                                                             
+------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on backtest_trade  (cost=5.39..480.38 rows=125 width=887) (actual time=0.629..0.630 rows=4 loops=1)
+   Recheck Cond: (backtest_run_id = '0d7d94e7-1a51-4d08-a4a0-72618da45f07'::uuid)
+   Filter: ((status)::text = 'CLOSED'::text)
+   Heap Blocks: exact=1
+   Buffers: shared read=4
+   ->  Bitmap Index Scan on idx_backtest_trade_run_id  (cost=0.00..5.36 rows=125 width=0) (actual time=0.291..0.291 rows=4 loops=1)
+         Index Cond: (backtest_run_id = '0d7d94e7-1a51-4d08-a4a0-72618da45f07'::uuid)
+         Buffers: shared read=3
+ Planning:
+   Buffers: shared hit=719 read=15 dirtied=1
+ Planning Time: 5.898 ms
+ Execution Time: 0.689 ms
+(12 rows)
+
+==== Q02 backtestTradeRepository.findAllByBacktestRunId
+                                                                   QUERY PLAN                                                                   
+------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=484.43..484.74 rows=125 width=887) (actual time=0.044..0.045 rows=4 loops=1)
+   Buffers: shared hit=7
+   ->  Sort  (cost=484.43..484.74 rows=125 width=887) (actual time=0.043..0.044 rows=4 loops=1)
+         Sort Key: entry_time
+         Sort Method: quicksort  Memory: 29kB
+         Buffers: shared hit=7
+         ->  Bitmap Heap Scan on backtest_trade  (cost=5.39..480.07 rows=125 width=887) (actual time=0.005..0.006 rows=4 loops=1)
+               Recheck Cond: (backtest_run_id = '0d7d94e7-1a51-4d08-a4a0-72618da45f07'::uuid)
+               Heap Blocks: exact=1
+               Buffers: shared hit=4
+               ->  Bitmap Index Scan on idx_backtest_trade_run_id  (cost=0.00..5.36 rows=125 width=0) (actual time=0.003..0.003 rows=4 loops=1)
+                     Index Cond: (backtest_run_id = '0d7d94e7-1a51-4d08-a4a0-72618da45f07'::uuid)
+                     Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=18
+ Planning Time: 0.147 ms
+ Execution Time: 0.102 ms
+(17 rows)
+
+==== Q03 backtestEquityPointRepository.findByBacktestRunIdOrderByEquityDateAsc
+                                                                     QUERY PLAN                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=4063.76..4067.05 rows=1316 width=742) (actual time=3.107..3.195 rows=1235 loops=1)
+   Buffers: shared hit=3 read=36
+   ->  Sort  (cost=4063.76..4067.05 rows=1316 width=742) (actual time=3.106..3.140 rows=1235 loops=1)
+         Sort Key: equity_date
+         Sort Method: quicksort  Memory: 348kB
+         Buffers: shared hit=3 read=36
+         ->  Bitmap Heap Scan on backtest_equity_point  (cost=58.62..3995.58 rows=1316 width=742) (actual time=2.110..2.815 rows=1235 loops=1)
+               Recheck Cond: (backtest_run_id = '0d7d94e7-1a51-4d08-a4a0-72618da45f07'::uuid)
+               Heap Blocks: exact=23
+               Buffers: shared read=36
+               ->  Bitmap Index Scan on uq_backtest_equity_point  (cost=0.00..58.29 rows=1316 width=0) (actual time=2.093..2.093 rows=1235 loops=1)
+                     Index Cond: (backtest_run_id = '0d7d94e7-1a51-4d08-a4a0-72618da45f07'::uuid)
+                     Buffers: shared read=13
+ Planning:
+   Buffers: shared hit=100 read=3 dirtied=1
+ Planning Time: 1.298 ms
+ Execution Time: 3.294 ms
+(17 rows)
+
+==== Q04 backtestTradePositionRepository.findAllByTradeId
+                                                                                 QUERY PLAN                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=8.45..8.45 rows=1 width=380) (actual time=1.610..1.612 rows=2 loops=1)
+   Buffers: shared read=4
+   ->  Sort  (cost=8.45..8.45 rows=1 width=380) (actual time=1.609..1.610 rows=2 loops=1)
+         Sort Key: entry_time
+         Sort Method: quicksort  Memory: 26kB
+         Buffers: shared read=4
+         ->  Index Scan using idx_backtest_trade_position_trade_id on backtest_trade_position  (cost=0.42..8.44 rows=1 width=380) (actual time=1.601..1.603 rows=2 loops=1)
+               Index Cond: (backtest_trade_id = '7e82fa30-d05c-434b-9c62-5d7761b05e76'::uuid)
+               Buffers: shared read=4
+ Planning:
+   Buffers: shared hit=159 read=10
+ Planning Time: 4.690 ms
+ Execution Time: 1.635 ms
+(13 rows)
+
+==== Q05 backtestTradeEventRepository.findAllByBacktestRunId
+                                                                             QUERY PLAN                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=8.17..8.18 rows=1 width=926) (actual time=0.004..0.004 rows=0 loops=1)
+   Buffers: shared hit=2
+   ->  Sort  (cost=8.17..8.18 rows=1 width=926) (actual time=0.003..0.003 rows=0 loops=1)
+         Sort Key: event_time, created_time
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=2
+         ->  Index Scan using idx_backtest_trade_event_run_id on backtest_trade_event  (cost=0.14..8.16 rows=1 width=926) (actual time=0.001..0.001 rows=0 loops=1)
+               Index Cond: (backtest_run_id = '0d7d94e7-1a51-4d08-a4a0-72618da45f07'::uuid)
+               Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=62 read=2
+ Planning Time: 1.090 ms
+ Execution Time: 0.014 ms
+(13 rows)
+
+==== Q06 backtestTradeEventRepository.findAllByTradeId
+                                                         QUERY PLAN                                                          
+-----------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=11.01..11.02 rows=1 width=926) (actual time=0.007..0.007 rows=0 loops=1)
+   ->  Sort  (cost=11.01..11.02 rows=1 width=926) (actual time=0.006..0.006 rows=0 loops=1)
+         Sort Key: event_time, created_time
+         Sort Method: quicksort  Memory: 25kB
+         ->  Seq Scan on backtest_trade_event  (cost=0.00..11.00 rows=1 width=926) (actual time=0.004..0.004 rows=0 loops=1)
+               Filter: (trade_id = '7e82fa30-d05c-434b-9c62-5d7761b05e76'::uuid)
+ Planning:
+   Buffers: shared hit=6
+ Planning Time: 0.067 ms
+ Execution Time: 0.016 ms
+(10 rows)
+
+==== Q07 backtestTradeEventRepository.findAllByTradePositionId
+                                                         QUERY PLAN                                                          
+-----------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=11.01..11.02 rows=1 width=926) (actual time=0.004..0.004 rows=0 loops=1)
+   ->  Sort  (cost=11.01..11.02 rows=1 width=926) (actual time=0.004..0.004 rows=0 loops=1)
+         Sort Key: event_time, created_time
+         Sort Method: quicksort  Memory: 25kB
+         ->  Seq Scan on backtest_trade_event  (cost=0.00..11.00 rows=1 width=926) (actual time=0.002..0.002 rows=0 loops=1)
+               Filter: (trade_position_id = '00000000-0000-0000-0000-000000000001'::uuid)
+ Planning:
+   Buffers: shared hit=6
+ Planning Time: 0.052 ms
+ Execution Time: 0.013 ms
+(10 rows)
+
+==== Q08 strategyDailyRealizedCurveRepository.findTopByAccountStrategyIdAndCurveDateBefore
+                                                                                   QUERY PLAN                                                                                    
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..8.16 rows=1 width=888) (actual time=0.171..0.171 rows=1 loops=1)
+   Buffers: shared hit=2
+   ->  Index Scan Backward using uq_strategy_daily_realized_curve on strategy_daily_realized_curve  (cost=0.14..8.16 rows=1 width=888) (actual time=0.170..0.171 rows=1 loops=1)
+         Index Cond: ((account_strategy_id = '5c2c73d3-3d19-4b80-8104-5875930e773d'::uuid) AND (curve_date < '2026-05-23'::date))
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=80
+ Planning Time: 0.196 ms
+ Execution Time: 0.180 ms
+(9 rows)
+
+==== Q09 strategyDailyRealizedCurveRepository.findByAccountStrategyIdAndCurveDate
+                                                                               QUERY PLAN                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..8.16 rows=1 width=888) (actual time=0.003..0.003 rows=1 loops=1)
+   Buffers: shared hit=2
+   ->  Index Scan using uq_strategy_daily_realized_curve on strategy_daily_realized_curve  (cost=0.14..8.16 rows=1 width=888) (actual time=0.002..0.002 rows=1 loops=1)
+         Index Cond: ((account_strategy_id = '5c2c73d3-3d19-4b80-8104-5875930e773d'::uuid) AND (curve_date = '2026-05-22'::date))
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.048 ms
+ Execution Time: 0.009 ms
+(9 rows)
+
+==== Q10 strategyDailyRealizedCurveRepository.findByCurveDate
+                                                           QUERY PLAN                                                           
+--------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=11.01..11.02 rows=1 width=888) (actual time=0.054..0.054 rows=5 loops=1)
+   Sort Key: account_strategy_id
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=5 dirtied=1
+   ->  Seq Scan on strategy_daily_realized_curve  (cost=0.00..11.00 rows=1 width=888) (actual time=0.043..0.044 rows=5 loops=1)
+         Filter: (curve_date = '2026-05-22'::date)
+         Rows Removed by Filter: 73
+         Buffers: shared hit=2 dirtied=1
+ Planning:
+   Buffers: shared hit=8
+ Planning Time: 0.059 ms
+ Execution Time: 0.063 ms
+(12 rows)
+
+==== Q11 strategyDailyRealizedCurveRepository.findLatestBeforeDateForStrategies (DISTINCT ON)
+                                                                                    QUERY PLAN                                                                                     
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Unique  (cost=11.21..11.22 rows=1 width=888) (actual time=0.014..0.016 rows=2 loops=1)
+   Buffers: shared hit=2
+   ->  Sort  (cost=11.21..11.21 rows=1 width=888) (actual time=0.014..0.014 rows=14 loops=1)
+         Sort Key: account_strategy_id, curve_date DESC
+         Sort Method: quicksort  Memory: 26kB
+         Buffers: shared hit=2
+         ->  Seq Scan on strategy_daily_realized_curve  (cost=0.00..11.20 rows=1 width=888) (actual time=0.003..0.008 rows=14 loops=1)
+               Filter: ((account_strategy_id = ANY ('{5c2c73d3-3d19-4b80-8104-5875930e773d,7e570001-0000-0000-0000-000000000007}'::uuid[])) AND (curve_date < '2026-05-23'::date))
+               Rows Removed by Filter: 64
+               Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.064 ms
+ Execution Time: 0.023 ms
+(14 rows)
+
+==== Q12 strategyDailyRealizedCurveRepository.findByAccountStrategyIdsAndCurveDate
+                                                                              QUERY PLAN                                                                               
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Seq Scan on strategy_daily_realized_curve  (cost=0.00..11.20 rows=1 width=888) (actual time=0.011..0.012 rows=1 loops=1)
+   Filter: ((account_strategy_id = ANY ('{5c2c73d3-3d19-4b80-8104-5875930e773d,7e570001-0000-0000-0000-000000000007}'::uuid[])) AND (curve_date = '2026-05-22'::date))
+   Rows Removed by Filter: 77
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.052 ms
+ Execution Time: 0.018 ms
+(8 rows)
+
+==== Q13 strategyDailyRealizedCurveRepository.findByAccountStrategyIdsAndCurveDateBetween
+                                                                                                     QUERY PLAN                                                                                                      
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=11.41..11.42 rows=1 width=888) (actual time=0.013..0.013 rows=14 loops=1)
+   Sort Key: account_strategy_id, curve_date
+   Sort Method: quicksort  Memory: 26kB
+   Buffers: shared hit=2
+   ->  Seq Scan on strategy_daily_realized_curve  (cost=0.00..11.40 rows=1 width=888) (actual time=0.003..0.008 rows=14 loops=1)
+         Filter: ((account_strategy_id = ANY ('{5c2c73d3-3d19-4b80-8104-5875930e773d,7e570001-0000-0000-0000-000000000007}'::uuid[])) AND (curve_date >= '2026-04-01'::date) AND (curve_date <= '2026-05-22'::date))
+         Rows Removed by Filter: 64
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=10
+ Planning Time: 0.073 ms
+ Execution Time: 0.020 ms
+(12 rows)
+
+==== Q14 strategyDailyRealizedCurveRepository.findByAccountStrategyIdAndCurveDateBetween
+                                                                             QUERY PLAN                                                                             
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using uq_strategy_daily_realized_curve on strategy_daily_realized_curve  (cost=0.14..8.16 rows=1 width=888) (actual time=0.003..0.005 rows=13 loops=1)
+   Index Cond: ((account_strategy_id = '5c2c73d3-3d19-4b80-8104-5875930e773d'::uuid) AND (curve_date >= '2026-04-01'::date) AND (curve_date <= '2026-05-22'::date))
+   Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.047 ms
+ Execution Time: 0.010 ms
+(7 rows)
+
+==== Q15 walkForwardRunRepository.findFiltered
+                                                         QUERY PLAN                                                          
+-----------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=12.85..12.97 rows=50 width=1112) (actual time=0.015..0.016 rows=6 loops=1)
+   Buffers: shared hit=2
+   ->  Sort  (cost=12.85..13.02 rows=70 width=1112) (actual time=0.014..0.015 rows=6 loops=1)
+         Sort Key: created_time DESC
+         Sort Method: quicksort  Memory: 36kB
+         Buffers: shared hit=2
+         ->  Seq Scan on walk_forward_run w  (cost=0.00..10.70 rows=70 width=1112) (actual time=0.008..0.010 rows=6 loops=1)
+               Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=134
+ Planning Time: 0.239 ms
+ Execution Time: 0.024 ms
+(12 rows)
+
+==== Q16 walkForwardRunRepository.findRecentForStrategy
+                                                                      QUERY PLAN                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.14..8.17 rows=1 width=1112) (actual time=0.048..0.049 rows=0 loops=1)
+   Buffers: shared hit=3
+   ->  Index Scan using idx_walk_forward_strategy on walk_forward_run w  (cost=0.14..8.17 rows=1 width=1112) (actual time=0.048..0.048 rows=0 loops=1)
+         Index Cond: ((strategy_code)::text = 'DCB'::text)
+         Filter: (((instrument)::text = 'BTCUSDT'::text) AND ((interval_name)::text = '1h'::text))
+         Rows Removed by Filter: 4
+         Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.096 ms
+ Execution Time: 0.056 ms
+(11 rows)
+
+==== Q17 walkForwardRunRepository.findByCreatedTimeAfterOrderByCreatedTimeDesc (derived)
+                                                     QUERY PLAN                                                      
+---------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=11.40..11.45 rows=23 width=1112) (actual time=0.011..0.011 rows=6 loops=1)
+   Sort Key: created_time DESC
+   Sort Method: quicksort  Memory: 33kB
+   Buffers: shared hit=2
+   ->  Seq Scan on walk_forward_run  (cost=0.00..10.88 rows=23 width=1112) (actual time=0.004..0.006 rows=6 loops=1)
+         Filter: (created_time > '2026-05-01 00:00:00'::timestamp without time zone)
+         Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.054 ms
+ Execution Time: 0.020 ms
+(11 rows)
+
+==== Q18 tradePositionRepository.findByTradePositionId
+                                                               QUERY PLAN                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using trade_positions_pkey on trade_positions  (cost=0.14..8.16 rows=1 width=1702) (actual time=0.404..0.405 rows=0 loops=1)
+   Index Cond: (trade_position_id = '00000000-0000-0000-0000-000000000001'::uuid)
+   Buffers: shared read=1
+ Planning:
+   Buffers: shared hit=108
+ Planning Time: 0.200 ms
+ Execution Time: 0.412 ms
+(7 rows)
+
+==== Q19 tradePositionRepository.findAllByTradeId
+                                                                      QUERY PLAN                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=8.17..8.17 rows=1 width=1702) (actual time=0.372..0.373 rows=0 loops=1)
+   Sort Key: entry_time
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared read=1
+   ->  Index Scan using idx_trade_positions_trade_id on trade_positions  (cost=0.14..8.16 rows=1 width=1702) (actual time=0.370..0.370 rows=0 loops=1)
+         Index Cond: (trade_id = '00000000-0000-0000-0000-000000000001'::uuid)
+         Buffers: shared read=1
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.045 ms
+ Execution Time: 0.381 ms
+(11 rows)
+
+==== Q20 tradePositionRepository.findAllByTradeIdAndStatus
+                                                                      QUERY PLAN                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=8.17..8.18 rows=1 width=1702) (actual time=0.003..0.003 rows=0 loops=1)
+   Sort Key: entry_time
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=1
+   ->  Index Scan using idx_trade_positions_trade_id on trade_positions  (cost=0.14..8.16 rows=1 width=1702) (actual time=0.002..0.002 rows=0 loops=1)
+         Index Cond: (trade_id = '00000000-0000-0000-0000-000000000001'::uuid)
+         Filter: ((status)::text = 'OPEN'::text)
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.061 ms
+ Execution Time: 0.013 ms
+(12 rows)
+
+==== Q21 tradePositionRepository.findAllByAssetAndStatus
+                                                    QUERY PLAN                                                     
+-------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=10.61..10.62 rows=1 width=1702) (actual time=0.013..0.014 rows=0 loops=1)
+   Sort Key: entry_time
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=1
+   ->  Seq Scan on trade_positions  (cost=0.00..10.60 rows=1 width=1702) (actual time=0.012..0.012 rows=0 loops=1)
+         Filter: (((asset)::text = 'BTCUSDT'::text) AND ((status)::text = 'OPEN'::text))
+         Rows Removed by Filter: 4
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.067 ms
+ Execution Time: 0.023 ms
+(12 rows)
+
+==== Q22 tradePositionRepository.findDailyClosedPositionAggregates
+                                                                                              QUERY PLAN                                                                                              
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate  (cost=10.71..10.76 rows=1 width=128) (actual time=0.008..0.008 rows=0 loops=1)
+   Group Key: account_id, account_strategy_id
+   Buffers: shared hit=1
+   ->  Sort  (cost=10.71..10.71 rows=1 width=76) (actual time=0.008..0.008 rows=0 loops=1)
+         Sort Key: account_id, account_strategy_id
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=1
+         ->  Seq Scan on trade_positions  (cost=0.00..10.70 rows=1 width=76) (actual time=0.005..0.005 rows=0 loops=1)
+               Filter: ((exit_time >= '2026-05-22 00:00:00'::timestamp without time zone) AND (exit_time < '2026-05-23 00:00:00'::timestamp without time zone) AND ((status)::text = 'CLOSED'::text))
+               Rows Removed by Filter: 4
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=22
+ Planning Time: 0.118 ms
+ Execution Time: 0.026 ms
+(15 rows)
+
+==== Q23 idempotencyRecordRepository.findUnexpired
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using idempotency_record_pkey on idempotency_record  (cost=0.14..8.16 rows=1 width=724) (actual time=0.003..0.003 rows=0 loops=1)
+   Index Cond: (((agent_name)::text = 'researcher'::text) AND ((key)::text = 'sample-key'::text))
+   Filter: (expires_at >= '2026-05-24 00:00:00+00'::timestamp with time zone)
+   Buffers: shared hit=2
+ Planning:
+   Buffers: shared hit=55 read=2
+ Planning Time: 1.553 ms
+ Execution Time: 0.016 ms
+(8 rows)
+
+==== Q24 idempotencyRecordRepository.deleteExpired (DELETE)
+                                                     QUERY PLAN                                                     
+--------------------------------------------------------------------------------------------------------------------
+ Delete on idempotency_record  (cost=0.00..11.25 rows=0 width=0) (actual time=0.003..0.004 rows=0 loops=1)
+   ->  Seq Scan on idempotency_record  (cost=0.00..11.25 rows=33 width=6) (actual time=0.002..0.003 rows=0 loops=1)
+         Filter: (expires_at < '2020-01-01 00:00:00+00'::timestamp with time zone)
+ Planning:
+   Buffers: shared hit=63
+ Planning Time: 0.126 ms
+ Execution Time: 0.066 ms
+(7 rows)
+
+==== Q25 errorLogRepository.countOpen
+                                                                                                      QUERY PLAN                                                                                                       
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=20.37..20.38 rows=1 width=8) (actual time=2.544..2.545 rows=1 loops=1)
+   Buffers: shared hit=1 read=17 dirtied=7
+   ->  Seq Scan on error_log e  (cost=0.00..20.30 rows=26 width=0) (actual time=0.106..2.536 rows=34 loops=1)
+         Filter: (((status)::text = ANY ('{NEW,INVESTIGATING}'::text[])) AND (CASE severity WHEN 'CRITICAL'::text THEN 4 WHEN 'HIGH'::text THEN 3 WHEN 'MEDIUM'::text THEN 2 WHEN 'LOW'::text THEN 1 ELSE 0 END >= 3))
+         Rows Removed by Filter: 59
+         Buffers: shared hit=1 read=17 dirtied=7
+ Planning:
+   Buffers: shared hit=128
+ Planning Time: 0.390 ms
+ Execution Time: 2.559 ms
+(10 rows)
+
+==== Q26 errorLogRepository.findOpenByFingerprint
+                                                                 QUERY PLAN                                                                 
+--------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using uq_error_log_fingerprint_open on error_log  (cost=0.14..8.16 rows=1 width=1172) (actual time=0.005..0.005 rows=0 loops=1)
+   Index Cond: ((fingerprint)::text = 'sample-fingerprint'::text)
+   Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=62
+ Planning Time: 0.285 ms
+ Execution Time: 0.012 ms
+(7 rows)
+
+==== Q27 errorLogRepository.bumpOccurrence (UPDATE)
+                                                           QUERY PLAN                                                            
+---------------------------------------------------------------------------------------------------------------------------------
+ Update on error_log  (cost=0.14..8.16 rows=0 width=0) (actual time=0.004..0.004 rows=0 loops=1)
+   Buffers: shared hit=1
+   ->  Index Scan using error_log_pkey on error_log  (cost=0.14..8.16 rows=1 width=18) (actual time=0.003..0.003 rows=0 loops=1)
+         Index Cond: (error_id = '00000000-0000-0000-0000-000000000001'::uuid)
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=6
+ Planning Time: 0.058 ms
+ Execution Time: 0.022 ms
+(9 rows)
+
+==== Q28 errorLogRepository.markNotified (UPDATE)
+                                                           QUERY PLAN                                                            
+---------------------------------------------------------------------------------------------------------------------------------
+ Update on error_log  (cost=0.14..8.16 rows=0 width=0) (actual time=0.002..0.002 rows=0 loops=1)
+   Buffers: shared hit=1
+   ->  Index Scan using error_log_pkey on error_log  (cost=0.14..8.16 rows=1 width=46) (actual time=0.002..0.002 rows=0 loops=1)
+         Index Cond: (error_id = '00000000-0000-0000-0000-000000000001'::uuid)
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=6
+ Planning Time: 0.053 ms
+ Execution Time: 0.010 ms
+(9 rows)
+
+==== Q29 errorLogRepository.updateStatus (UPDATE)
+                                                            QUERY PLAN                                                            
+----------------------------------------------------------------------------------------------------------------------------------
+ Update on error_log  (cost=0.14..8.16 rows=0 width=0) (actual time=0.003..0.003 rows=0 loops=1)
+   Buffers: shared hit=1
+   ->  Index Scan using error_log_pkey on error_log  (cost=0.14..8.16 rows=1 width=390) (actual time=0.002..0.002 rows=0 loops=1)
+         Index Cond: (error_id = '00000000-0000-0000-0000-000000000001'::uuid)
+         Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=6
+ Planning Time: 0.048 ms
+ Execution Time: 0.010 ms
+(9 rows)
+
+==== Q30 alertEventRepository.findFiltered
+                                                                     QUERY PLAN                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.29..116.39 rows=50 width=283) (actual time=2.481..16.567 rows=8 loops=1)
+   Buffers: shared hit=453 read=45
+   ->  Index Scan using idx_alert_event_created on alert_event a  (cost=0.29..671.37 rows=289 width=283) (actual time=2.480..16.561 rows=8 loops=1)
+         Filter: ((NOT suppressed) AND ((kind)::text = 'ML_REGIME_GATE_BLOCKED'::text))
+         Rows Removed by Filter: 8935
+         Buffers: shared hit=453 read=45
+ Planning:
+   Buffers: shared hit=115 read=2
+ Planning Time: 0.609 ms
+ Execution Time: 16.578 ms
+(10 rows)
+
