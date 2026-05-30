@@ -39,3 +39,17 @@ topics:
     retention_ms: 86400000  # 24 hours
     compression_type: snappy
     purpose: "ML inference errors and anomalies for monitoring"
+
+  - name: backtest-requests
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 2592000000  # 30 days
+    compression_type: snappy
+    purpose: "Backtest run execution queue (consumed by research JVM BacktestKafkaConsumer)"
+
+  - name: backtest-requests.DLQ
+    partitions: 1
+    replication_factor: 1
+    retention_ms: 604800000  # 7 days
+    compression_type: snappy
+    purpose: "Dead-letter topic for unparseable or permanently failed backtest messages"
