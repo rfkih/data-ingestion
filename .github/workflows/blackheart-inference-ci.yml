@@ -130,6 +130,7 @@ jobs:
              -e INFERENCE_PROFILE=prod \
              -e INFERENCE_HOST=0.0.0.0 \
              -e INFERENCE_PORT=8000 \
+             -e INFERENCE_AUTH_TOKEN=prod-inference-token \
              -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:admin@postgres:5432/trading_db' \
              -e INFERENCE_ARTIFACT_DIR=/artifacts \
              -e INFERENCE_STREAMING_ENABLED=true \
@@ -153,6 +154,7 @@ jobs:
                  -e INFERENCE_PROFILE=prod \
                  -e INFERENCE_HOST=0.0.0.0 \
                  -e INFERENCE_PORT=8000 \
+                 -e INFERENCE_AUTH_TOKEN=prod-inference-token \
                  -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:admin@postgres:5432/trading_db' \
                  -e INFERENCE_ARTIFACT_DIR=/artifacts \
                  -e INFERENCE_STREAMING_ENABLED=true \

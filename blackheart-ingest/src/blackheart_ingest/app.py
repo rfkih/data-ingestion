@@ -24,6 +24,10 @@ def create_app(settings=None) -> FastAPI:
         description="Feature computation and streaming endpoints.",
     )
 
+    @app.get("/health")
+    async def health():
+        return {"status": "healthy"}
+
     app.include_router(compute_router)
 
     return app
