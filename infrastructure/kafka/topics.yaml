@@ -1,0 +1,41 @@
+# Kafka Topics Configuration for Event-Driven ML Inference Pipeline
+# This file defines the topics used for real-time market data, feature computation,
+# signal generation, model deployment, and error handling.
+#
+# Expected SLA: <100ms p99 latency from market bar to inference prediction
+
+topics:
+  - name: market.bars
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 604800000  # 7 days
+    compression_type: snappy
+    purpose: "Real-time OHLCV market bars from Binance WebSocket"
+
+  - name: features.computed
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 604800000  # 7 days
+    compression_type: snappy
+    purpose: "Computed feature vectors for ML models"
+
+  - name: signals.live
+    partitions: 2
+    replication_factor: 1
+    retention_ms: 604800000  # 7 days
+    compression_type: snappy
+    purpose: "Live ML signal predictions and regime classifications"
+
+  - name: models.deployed
+    partitions: 1
+    replication_factor: 1
+    retention_ms: 2592000000  # 30 days
+    compression_type: snappy
+    purpose: "Model deployment events (new versions, rollbacks, metadata)"
+
+  - name: errors.inference
+    partitions: 2
+    replication_factor: 1
+    retention_ms: 86400000  # 24 hours
+    compression_type: snappy
+    purpose: "ML inference errors and anomalies for monitoring"

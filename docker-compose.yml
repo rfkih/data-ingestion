@@ -80,6 +80,25 @@ services:
       retries: 20
 
   # ─────────────────────────────────────────────────────────────────────
+  # ZOOKEEPER — Event-driven ML inference pipeline coordination
+  # ─────────────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: blackheart-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_INIT_LIMIT: 5
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 2181"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ─────────────────────────────────────────────────────────────────────
   # KAFKA — DEV / HOME-LAB ONLY
   # ─────────────────────────────────────────────────────────────────────
   # Single broker, replication-factor=1, MIN_ISR=1. A broker crash before
@@ -89,10 +108,10 @@ services:
   # but NOT acceptable for any flow that assumes Kafka durability.
   #
   # Before promoting any service that publishes to Kafka to a prod host:
-  #   1. Run 3 brokers (KAFKA_NODE_ID 1/2/3, KAFKA_PROCESS_ROLES=broker,controller).
-  #   2. Bump KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=3.
-  #   3. Bump KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=3, MIN_ISR=2.
-  #   4. Recreate `backtest-requests` with --replication-factor 3.
+  #   1. Run 3 brokers (KAFKA_BROKER_ID 1/2/3).
+  #   2. Bump KAFKA_DEFAULT_REPLICATION_FACTOR=3.
+  #   3. Bump KAFKA_MIN_INSYNC_REPLICAS=2.
+  #   4. Recreate topics with --replication-factor 3.
   #   5. Set producer acks=all (already on — see KafkaProducerConfig.java:27).
   #
   # Poison-pill protection: BacktestDlqPublisher forwards non-UUID and
@@ -101,38 +120,30 @@ services:
   # --bootstrap-server localhost:9092 --topic backtest-requests.DLQ
   # --from-beginning`. Non-empty = something dropped on the floor.
   kafka:
-    image: apache/kafka:3.7.0
+    image: confluentinc/cp-kafka:7.5.0
     container_name: blackheart-kafka
     restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_healthy
     environment:
-      # KRaft mode — no Zookeeper required.
-      KAFKA_NODE_ID: "1"
-      KAFKA_PROCESS_ROLES: broker,controller
-      # PLAINTEXT: used by containers in this compose network (kafka:9092).
-      # EXTERNAL: used from the host machine (localhost:9094).
-      # CONTROLLER: KRaft metadata channel (not exposed).
-      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:9094,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      # WARNING: replication-factor=1 + MIN_ISR=1 = no durability.
-      # See header comment above for the prod 3-broker upgrade path.
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
-      # backtest-requests auto-creates with 3 partitions (matches consumer concurrency)
-      # when the first producer or consumer connects — no NewTopic bean needed.
-      # backtest-requests.DLQ auto-creates with the same default on first poison
-      # publish (BacktestDlqPublisher).
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "1"
+      KAFKA_MIN_INSYNC_REPLICAS: "1"
       KAFKA_NUM_PARTITIONS: "3"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
     ports:
+      - "9092:9092"
       - "9094:9094"   # host access — use localhost:9094 from your machine
     volumes:
       - kafkadata:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 | grep -q ApiVersion"]
       interval: 10s
       timeout: 5s
       retries: 15
