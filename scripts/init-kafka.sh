@@ -60,11 +60,11 @@ for topic in $topics; do
   fi
 
   # Extract partitions (default to 1 if not found)
-  partitions=$(awk "NR>=$topic_line && NR<NR+100 && /^\s*partitions:/ {print \$2; exit}" "$TOPICS_CONFIG_FILE")
+  partitions=$(awk "NR>=$topic_line && NR<$((topic_line+100)) && /^\s*partitions:/ {print \$2; exit}" "$TOPICS_CONFIG_FILE")
   partitions=${partitions:-1}
 
   # Extract replication_factor (default to 1 if not found)
-  replication=$(awk "NR>=$topic_line && NR<NR+100 && /^\s*replication_factor:/ {print \$2; exit}" "$TOPICS_CONFIG_FILE")
+  replication=$(awk "NR>=$topic_line && NR<$((topic_line+100)) && /^\s*replication_factor:/ {print \$2; exit}" "$TOPICS_CONFIG_FILE")
   replication=${replication:-1}
 
   # Create topic using docker exec
