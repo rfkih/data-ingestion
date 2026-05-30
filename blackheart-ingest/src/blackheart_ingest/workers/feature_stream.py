@@ -166,12 +166,10 @@ class FeatureStreamProcessor:
                     feature_vector = await self._compute_features(bar)
 
                     # Create and publish computed feature event
-                    # Extract interval from context; for now use a placeholder
-                    # In production, interval would come from the bar or signal config
                     event = ComputedFeatureEvent(
                         signal_id=self.signal_id,
                         symbol=bar.symbol,
-                        interval="1h",  # TODO: extract from bar metadata or config
+                        interval=bar.interval,
                         ts=bar.ts,
                         feature_vector=feature_vector,
                         feature_version=self.feature_version,

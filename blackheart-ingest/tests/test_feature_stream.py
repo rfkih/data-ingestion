@@ -50,6 +50,7 @@ async def test_feature_stream_compute_features():
     ts = datetime(2026, 5, 30, 14, 30, 45, 123456, tzinfo=timezone.utc)
     bar = MarketBarEvent(
         symbol="BTCUSDT",
+        interval="1h",
         ts=ts,
         open=45000.50,
         high=45500.75,
@@ -127,6 +128,7 @@ async def test_feature_stream_creates_correct_event_structure():
     ts = datetime(2026, 5, 30, 14, 30, 45, 123456, tzinfo=timezone.utc)
     bar = MarketBarEvent(
         symbol="BTCUSDT",
+        interval="1h",
         ts=ts,
         open=45000.50,
         high=45500.75,

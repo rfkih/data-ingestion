@@ -28,6 +28,7 @@ class TestMarketBarEvent:
         ts = datetime(2026, 5, 30, 14, 30, 45, 123456, tzinfo=timezone.utc)
         event = MarketBarEvent(
             symbol="BTCUSDT",
+            interval="1h",
             ts=ts,
             open=45000.50,
             high=45500.75,
@@ -53,6 +54,7 @@ class TestMarketBarEvent:
         with pytest.raises(Exception):  # Pydantic ValidationError
             MarketBarEvent(
                 symbol="BTCUSDT",
+                interval="1h",
                 ts=ts,
                 open=45000.50,
                 high=45500.75,

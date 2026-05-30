@@ -37,6 +37,7 @@ class MarketBarEvent(BaseModel):
         json_schema_extra={
             "example": {
                 "symbol": "BTCUSDT",
+                "interval": "1h",
                 "ts": "2026-05-30T14:30:45.123456Z",
                 "open": 45000.50,
                 "high": 45500.75,
@@ -48,7 +49,8 @@ class MarketBarEvent(BaseModel):
     )
 
     symbol: str = Field(..., description="Trading pair symbol (e.g., BTCUSDT)")
-    ts: datetime = Field(..., description="Bar timestamp (UTC)")
+    interval: str = Field(..., description="Candle interval (5m, 15m, 1h, 4h)")
+    ts: datetime = Field(..., description="Bar open timestamp (UTC)")
     open: float = Field(..., description="Opening price")
     high: float = Field(..., description="Highest price in period")
     low: float = Field(..., description="Lowest price in period")
