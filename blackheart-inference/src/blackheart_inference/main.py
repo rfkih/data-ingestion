@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from .api.batch import router as batch_router
 from .api.health import router as health_router
 from .api.inference import router as inference_router
+from .api.metrics import router as metrics_router
 from .api.streaming import router as streaming_router
 from .auth import AuthMiddleware
 from .errors import register_exception_handlers
@@ -85,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(inference_router)
     app.include_router(streaming_router)
     app.include_router(batch_router)
+    app.include_router(metrics_router)
     return app
 
 

@@ -19,7 +19,7 @@ from .settings import Settings
 
 logger = logging.getLogger(__name__)
 
-_PUBLIC_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz"})
+_PUBLIC_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz", "/metrics/latency", "/metrics/reset"})
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
