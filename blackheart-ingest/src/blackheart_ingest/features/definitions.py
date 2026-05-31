@@ -390,6 +390,132 @@ def _rolling_realized_vol(
 #     hook for that policy.
 
 
+def _ofi_ratio() -> Callable[[pd.DataFrame], pd.Series]:
+    """Taker buy fraction: taker_buy_base_volume / volume.
+
+    Values in [0, 1]: >0.5 = net buy-side aggression, <0.5 = net sell-side.
+    Zero-volume bars produce NaN (masked via .where) so they are excluded
+    from downstream rolling windows without corrupting them.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        vol = df["volume"].astype("float64")
+        buy = df["taker_buy_base_volume"].astype("float64")
+        return buy / vol.where(vol > 0)
+
+    return _impl
+
+
+def _ofi_rolling_zscore(window: int, min_periods: int) -> Callable[[pd.DataFrame], pd.Series]:
+    """Rolling z-score of the per-bar OFI ratio.
+
+    Normalises the raw taker buy fraction against the trailing ``window``
+    bars so the signal is regime-adjusted. NaN for the first
+    ``min_periods - 1`` rows (warmup) and for flat-volume bars masked
+    by _ofi_ratio.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        vol = df["volume"].astype("float64")
+        buy = df["taker_buy_base_volume"].astype("float64")
+        ratio = buy / vol.where(vol > 0)
+        mean = ratio.rolling(window, min_periods=min_periods).mean()
+        std = ratio.rolling(window, min_periods=min_periods).std()
+        return (ratio - mean) / std.where(std > 0)
+
+    return _impl
+
+
+def _ofi_momentum(periods: int) -> Callable[[pd.DataFrame], pd.Series]:
+    """``periods``-bar % change of the OFI ratio.
+
+    Captures accelerating or decelerating buy-side pressure: positive when
+    buy fraction is rising vs. ``periods`` bars ago. NaN for the first
+    ``periods`` rows.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        vol = df["volume"].astype("float64")
+        buy = df["taker_buy_base_volume"].astype("float64")
+        ratio = buy / vol.where(vol > 0)
+        return ratio.pct_change(periods=periods)
+
+    return _impl
+
+
+def _cvd_proxy_zscore(window: int, min_periods: int) -> Callable[[pd.DataFrame], pd.Series]:
+    """Rolling z-score of the per-bar cumulative-volume-delta proxy.
+
+    CVD proxy = 2 * taker_buy_base_volume - volume. Positive when taker
+    buys dominate (net buy); negative when taker sells dominate. Normalised
+    by rolling std so the scale is comparable across vol regimes.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        vol = df["volume"].astype("float64")
+        buy = df["taker_buy_base_volume"].astype("float64")
+        cvd = 2.0 * buy - vol
+        mean = cvd.rolling(window, min_periods=min_periods).mean()
+        std = cvd.rolling(window, min_periods=min_periods).std()
+        return (cvd - mean) / std.where(std > 0)
+
+    return _impl
+
+
+def _ob_spread_pct() -> Callable[[pd.DataFrame], pd.Series]:
+    """Bid-ask spread as a fraction of mid price.
+
+    spread_pct = (best_ask - best_bid) / mid_price. Reads ``best_bid``
+    and ``best_ask`` columns from the wide orderbook_snapshots frame.
+    Zero or negative mid produces NaN (masked via .where).
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        bid = df["best_bid"].astype("float64")
+        ask = df["best_ask"].astype("float64")
+        mid = (bid + ask) / 2.0
+        return (ask - bid) / mid.where(mid > 0)
+
+    return _impl
+
+
+def _ob_depth_imbalance() -> Callable[[pd.DataFrame], pd.Series]:
+    """Normalised order book depth imbalance at top-N levels.
+
+    (bid_depth_sum - ask_depth_sum) / (bid_depth_sum + ask_depth_sum).
+    Range [-1, 1]: +1 = all depth on bid side, -1 = all on ask side.
+    Zero total depth produces NaN.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        bid_d = df["bid_depth_sum"].astype("float64")
+        ask_d = df["ask_depth_sum"].astype("float64")
+        total = bid_d + ask_d
+        return (bid_d - ask_d) / total.where(total > 0)
+
+    return _impl
+
+
+def _ob_spread_rolling_zscore(window: int, min_periods: int) -> Callable[[pd.DataFrame], pd.Series]:
+    """Rolling z-score of the bid-ask spread pct from the OB snapshot.
+
+    Computes spread_pct inline (same as _ob_spread_pct) then applies a
+    rolling z-score normalisation so regime changes in typical spread width
+    do not bias the signal. NaN during the first ``min_periods - 1`` rows.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        bid = df["best_bid"].astype("float64")
+        ask = df["best_ask"].astype("float64")
+        mid = (bid + ask) / 2.0
+        spread = (ask - bid) / mid.where(mid > 0)
+        mean = spread.rolling(window, min_periods=min_periods).mean()
+        std = spread.rolling(window, min_periods=min_periods).std()
+        return (spread - mean) / std.where(std > 0)
+
+    return _impl
+
+
 def _forward_return(
     close_col: str, horizon_bars: int
 ) -> Callable[[pd.DataFrame], pd.Series]:
@@ -1287,8 +1413,113 @@ FEATURES: tuple[FeatureDef, ...] = (
         description="30-day rolling z-score of BTC transaction count (CoinMetrics TxCnt, "
         "daily). Normalized on-chain activity level. V125.",
     ),
+    # ── V136: Bar-level OFI microstructure features ───────────────────────────
+    # Derived from market_data.taker_buy_base_volume — zero new raw data needed.
+    # Symbols and intervals match the existing bar-level technical feature set.
+    FeatureDef(
+        name="ofi_ratio",
+        version=1,
+        family="microstructure",
+        inputs=("volume", "taker_buy_base_volume"),
+        transformer=_ofi_ratio(),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
+        intervals=("1h", "4h"),
+        description="Taker buy fraction per bar: taker_buy_base_volume / volume. "
+        "Raw OFI ratio in [0,1]; >0.5 = net buy-side aggression. V136.",
+    ),
+    FeatureDef(
+        name="ofi_zscore_24h",
+        version=1,
+        family="microstructure",
+        inputs=("volume", "taker_buy_base_volume"),
+        transformer=_ofi_rolling_zscore(window=24, min_periods=24),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
+        intervals=("1h", "4h"),
+        description="24-bar rolling z-score of ofi_ratio. Regime-adjusts the "
+        "buy fraction so cross-bar comparisons are vol-normalised. "
+        "NaN during 24-bar warmup. V136.",
+    ),
+    FeatureDef(
+        name="ofi_momentum_8h",
+        version=1,
+        family="microstructure",
+        inputs=("volume", "taker_buy_base_volume"),
+        transformer=_ofi_momentum(periods=8),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
+        intervals=("1h", "4h"),
+        description="8-bar % change of ofi_ratio. Captures accelerating buy-side "
+        "or sell-side pressure (8h window on 1h bars). V136.",
+    ),
+    FeatureDef(
+        name="cvd_proxy_zscore_24h",
+        version=1,
+        family="microstructure",
+        inputs=("volume", "taker_buy_base_volume"),
+        transformer=_cvd_proxy_zscore(window=24, min_periods=24),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
+        intervals=("1h", "4h"),
+        description="24-bar rolling z-score of CVD proxy (2*taker_buy_base_volume - volume). "
+        "Positive = net buy bars dominating; negative = net sell. V136.",
+    ),
+    # ── V137: Order book depth microstructure features ────────────────────────
+    # Derived from orderbook_snapshots fetched at bar-close by binance_orderbook.py.
+    # bar_event_consumer hooks the fetch after each closed bar.
+    FeatureDef(
+        name="ob_spread_pct",
+        version=1,
+        family="microstructure",
+        inputs=("best_bid", "best_ask"),
+        transformer=_ob_spread_pct(),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("orderbook_snapshots",),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        intervals=("1h", "4h"),
+        description="Bid-ask spread as fraction of mid price from L2 snapshot at "
+        "bar-close: (best_ask - best_bid) / mid. Proxy for market liquidity. V137.",
+    ),
+    FeatureDef(
+        name="ob_depth_imbalance",
+        version=1,
+        family="microstructure",
+        inputs=("bid_depth_sum", "ask_depth_sum"),
+        transformer=_ob_depth_imbalance(),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("orderbook_snapshots",),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        intervals=("1h", "4h"),
+        description="Normalised depth imbalance at top-20 levels: "
+        "(bid_depth - ask_depth) / (bid_depth + ask_depth). "
+        "Range [-1, 1]; positive = more depth on bid side. V137.",
+    ),
+    FeatureDef(
+        name="ob_spread_zscore_24h",
+        version=1,
+        family="microstructure",
+        inputs=("best_bid", "best_ask"),
+        transformer=_ob_spread_rolling_zscore(window=24, min_periods=24),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("orderbook_snapshots",),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        intervals=("1h", "4h"),
+        description="24-bar rolling z-score of ob_spread_pct. Normalises spread "
+        "width against recent history to detect spread-widening regimes. V137.",
+    ),
 )
-
 
 _FEATURE_INDEX: dict[tuple[str, int], FeatureDef] = {
     (f.name, f.version): f for f in FEATURES
