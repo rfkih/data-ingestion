@@ -6,6 +6,11 @@ COPY pyproject.toml .
 COPY README.md .
 COPY src/ ./src/
 
+# libsnappy is required by python-snappy (used by aiokafka to decompress
+# market.bars messages published with compression.type=snappy).
+RUN apt-get update && apt-get install -y --no-install-recommends libsnappy1v5 && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install with Kafka support for event-driven pipeline
 RUN pip install --no-cache-dir ".[kafka]"
 
