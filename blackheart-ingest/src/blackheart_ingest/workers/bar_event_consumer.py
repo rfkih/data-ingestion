@@ -35,6 +35,7 @@ from ..features.persistence import fail_run, finish_run, start_run, write_values
 from ..schemas.events import MarketBarEvent
 from ..shared.db import get_connection
 from ..shared.settings import Settings, get_settings
+from ..sources.binance_orderbook import fetch_and_store as _ob_fetch_and_store
 from ..webhooks import notify_inference_batch_ready
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,13 @@ logger = logging.getLogger(__name__)
 # Rolling window passed to compute() for per-bar features.
 # 40 days covers btc_realized_vol_30d's 720-bar lookback with slack.
 _LOOKBACK_DAYS = 40
+
+# Symbols and intervals for which we fetch an L2 OB snapshot at each bar-close.
+# Mirrors the symbols/intervals declared on the ob_spread_pct / ob_depth_imbalance
+# / ob_spread_zscore_24h FeatureDefs. Kept as a module constant so tests can
+# assert against it without importing definitions.
+_OB_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT"})
+_OB_INTERVALS: frozenset[str] = frozenset({"1h", "4h"})
 
 
 def _features_for_bar(
@@ -115,8 +123,40 @@ async def _compute_bar_features(
     return total_rows
 
 
+async def _fetch_ob_snapshot(bar: MarketBarEvent) -> None:
+    """Fetch and store an L2 OB snapshot for this bar if the symbol/interval is in scope.
+
+    Runs in a thread-pool executor so the HTTP call doesn't block the event loop.
+    Failures are logged as warnings and swallowed — the OB snapshot is best-effort
+    and must not prevent the main feature-compute pipeline from proceeding.
+    """
+    if bar.symbol not in _OB_SYMBOLS or bar.interval not in _OB_INTERVALS:
+        return
+    loop = asyncio.get_event_loop()
+
+    def _run() -> None:
+        with get_connection() as conn:
+            _ob_fetch_and_store(bar.symbol, bar.interval, bar.ts, conn=conn)
+
+    try:
+        await loop.run_in_executor(None, _run)
+        logger.debug(
+            "bar_event.ob_snapshot_stored | symbol=%s interval=%s ts=%s",
+            bar.symbol, bar.interval, bar.ts,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "bar_event.ob_snapshot_failed | symbol=%s interval=%s ts=%s error=%s",
+            bar.symbol, bar.interval, bar.ts, e,
+        )
+
+
 async def _handle_bar_event(bar: MarketBarEvent) -> None:
     """Process one closed-bar event end-to-end. Errors are caught and logged."""
+    # Fetch the OB snapshot first so orderbook_snapshots features see the
+    # current bar's L2 state when the compute pipeline runs below.
+    await _fetch_ob_snapshot(bar)
+
     features = _features_for_bar(bar.symbol, bar.interval)
     if not features:
         logger.debug(

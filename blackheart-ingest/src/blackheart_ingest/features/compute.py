@@ -98,6 +98,55 @@ _MARKET_DATA_COLS = (
     "trade_count",
 )
 
+# Columns available to transformers reading orderbook_snapshots (V137).
+# Rows are indexed by bar_ts (the bar-close timestamp written by
+# binance_orderbook.py). Gapless-ness is NOT guaranteed — snapshots are
+# fetched on a best-effort basis at bar-close. Transformers that need
+# rolling windows should declare ffill_policy=None and accept NaN gaps.
+_ORDERBOOK_COLS = (
+    "best_bid",
+    "best_ask",
+    "bid_depth_sum",
+    "ask_depth_sum",
+)
+
+
+def _read_orderbook_wide(
+    conn: psycopg.Connection,
+    symbol: str,
+    interval: str,
+    start: datetime,
+    end: datetime,
+) -> pd.DataFrame:
+    """Read L2 snapshot rows for ``(symbol, interval)`` over ``[start, end]``.
+
+    Returns a wide DataFrame indexed by ``bar_ts`` with the four OB columns.
+    Unlike market_data, rows are not guaranteed to be gapless — a missed
+    fetch leaves a gap. Callers must tolerate NaN rows in rolling windows.
+    """
+    cols_sql = ", ".join(_ORDERBOOK_COLS)
+    sql = f"""
+        SELECT bar_ts, {cols_sql}
+        FROM orderbook_snapshots
+        WHERE symbol = %(symbol)s
+          AND interval = %(interval)s
+          AND bar_ts >= %(start)s
+          AND bar_ts <= %(end)s
+        ORDER BY bar_ts ASC
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, {"symbol": symbol, "interval": interval, "start": start, "end": end})
+        rows = cur.fetchall()
+    if not rows:
+        return pd.DataFrame(columns=list(_ORDERBOOK_COLS))
+    df = pd.DataFrame(rows)
+    df["bar_ts"] = pd.to_datetime(df["bar_ts"], utc=True).dt.tz_convert(None)
+    df = df.set_index("bar_ts").sort_index()
+    for col in _ORDERBOOK_COLS:
+        if col in df.columns:
+            df[col] = df[col].astype("float64")
+    return df
+
 
 def _read_market_data_wide(
     conn: psycopg.Connection,
@@ -253,7 +302,7 @@ def compute(
 
         columns: ['ts', 'value', 'name', 'version', 'family']
 
-    Two read paths, dispatched by ``feat.raw_tables[0]``:
+    Three read paths, dispatched by ``feat.raw_tables[0]``:
 
     * ``"macro_raw"`` — long-format publisher events. Engine pivots to wide
       ``[event_time × series_id]`` and applies the declared ffill policy
@@ -262,6 +311,10 @@ def compute(
       (one row per bar, OHLCV columns) and skips pivot/ffill since
       market_data is gapless by construction. ``symbol`` and ``interval``
       are required.
+    * ``"orderbook_snapshots"`` — per-bar L2 depth snapshots written by
+      binance_orderbook.py at bar-close. Read wide directly (indexed by
+      bar_ts). Not gapless — missed fetches leave NaN gaps; transformers
+      must tolerate them. ``symbol`` and ``interval`` are required.
 
     Empty input window → empty output (with note logged), not an error.
     """
@@ -300,10 +353,26 @@ def compute(
                     f"{list(_MARKET_DATA_COLS)}"
                 )
             wide_df = _compute_from_market_data(conn, feat, symbol, interval, start, end)
+        elif table == "orderbook_snapshots":
+            if not symbol or not interval:
+                raise FeatureComputeError(
+                    f"feature={feat.name} reads orderbook_snapshots; symbol and interval "
+                    f"are both required (got symbol={symbol!r} interval={interval!r})"
+                )
+            bad_cols = [c for c in feat.inputs if c not in _ORDERBOOK_COLS]
+            if bad_cols:
+                raise FeatureComputeError(
+                    f"feature={feat.name} declares orderbook_snapshots inputs that aren't "
+                    f"known OB columns: {bad_cols}. Known columns: "
+                    f"{list(_ORDERBOOK_COLS)}"
+                )
+            wide_df = _read_orderbook_wide(conn, symbol, interval, start, end)
+            if wide_df.empty:
+                wide_df = None
         else:
             raise FeatureComputeError(
                 f"feature={feat.name} declares unknown raw_table '{table}'. "
-                f"Supported: macro_raw, market_data"
+                f"Supported: macro_raw, market_data, orderbook_snapshots"
             )
     finally:
         if owned:
