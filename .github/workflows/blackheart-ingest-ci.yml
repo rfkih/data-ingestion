@@ -134,6 +134,8 @@ jobs:
                -e INGEST_KAFKA_ENABLED=true \
                -e INGEST_KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
                -e INGEST_KAFKA_GROUP_ID=blackheart-ingest \
+               -e INGEST_INFERENCE_BASE_URL=http://blackheart-inference:8000 \
+               -e INGEST_INFERENCE_AUTH_TOKEN=prod-inference-token \
                ghcr.io/rfkih/blackheart-ingest:${NEW_TAG}"
 
       - name: Ingest healthcheck (with rollback on failure)
@@ -157,6 +159,8 @@ jobs:
                  -e INGEST_KAFKA_ENABLED=true \
                  -e INGEST_KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
                  -e INGEST_KAFKA_GROUP_ID=blackheart-ingest \
+                 -e INGEST_INFERENCE_BASE_URL=http://blackheart-inference:8000 \
+                 -e INGEST_INFERENCE_AUTH_TOKEN=prod-inference-token \
                  ghcr.io/rfkih/blackheart-ingest:${PREV_TAG}"
             fi
             exit 1
