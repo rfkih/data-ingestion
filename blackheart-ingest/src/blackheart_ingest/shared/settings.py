@@ -6,6 +6,7 @@ own env (`SPRING_*`, `JWT_*`, etc.) when both run on the same host.
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +21,9 @@ class Settings(BaseSettings):
     )
 
     # Postgres — shared with trading JVM.
+    # Set either db_dsn (full DSN string) OR the individual fields below.
+    # db_dsn takes precedence when set.
+    db_dsn: str = ""
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "trading_db"
@@ -56,11 +60,19 @@ class Settings(BaseSettings):
     def db_kwargs(self) -> dict[str, object]:
         """Connection keyword args for ``psycopg.connect(**kwargs)``.
 
-        Returns a dict rather than a DSN string so passwords with spaces,
-        quotes, or backslashes can't break the connection-string parser.
-        psycopg handles per-field quoting/escaping automatically when given
-        keyword args.
+        If INGEST_DB_DSN is set it is parsed and takes precedence over the
+        individual INGEST_DB_* fields, so a single env var is enough in
+        Docker/CI deployments.
         """
+        if self.db_dsn:
+            p = urlparse(self.db_dsn)
+            return {
+                "host": p.hostname or self.db_host,
+                "port": p.port or self.db_port,
+                "dbname": (p.path or "").lstrip("/") or self.db_name,
+                "user": p.username or self.db_user,
+                "password": p.password or self.db_password,
+            }
         return {
             "host": self.db_host,
             "port": self.db_port,
