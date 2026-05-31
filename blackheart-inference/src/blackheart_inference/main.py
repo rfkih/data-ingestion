@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from functools import partial
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -48,6 +49,15 @@ async def _lifespan(settings: Settings, app: FastAPI):
             run_streaming_loop(settings, db, app.state.streaming),
             name="inference-streaming",
         )
+
+    artifact_count = sum(1 for _ in Path(settings.artifact_dir).rglob("*.pkl"))
+    if artifact_count == 0:
+        log.warning(
+            "inference.no_artifacts",
+            artifact_dir=str(settings.artifact_dir),
+            hint="Run scripts/sync-artifacts.ps1 from the home machine to sync model files to VPS.",
+        )
+
     log.info("inference.startup",
              host=settings.host, port=settings.port, profile=settings.profile,
              streaming=settings.streaming_enabled)

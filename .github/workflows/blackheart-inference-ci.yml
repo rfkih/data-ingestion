@@ -165,6 +165,17 @@ jobs:
           fi
           echo "Inference deploy ${NEW_TAG} healthy."
 
+      - name: Verify ML artifacts present on VPS
+        run: |
+          COUNT=$(ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+            "find /home/starsky/blackheart-train/artifacts -name '*.pkl' 2>/dev/null | wc -l")
+          echo "VPS artifact count: ${COUNT}"
+          if [ "${COUNT:-0}" -eq 0 ]; then
+            echo "::error::Artifact directory on VPS is empty — inference will 502 on every backfill call."
+            echo "::error::Run scripts/sync-artifacts.ps1 from the home machine then re-deploy."
+            exit 1
+          fi
+
       - name: Prune stale Docker images
         if: success()
         run: |

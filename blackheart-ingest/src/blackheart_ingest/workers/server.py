@@ -201,8 +201,28 @@ async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
         )
 
     if settings.kafka_enabled:
+        async def _consumer_with_restart() -> None:
+            delay = 5
+            while True:
+                try:
+                    await run_bar_event_consumer(settings)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "ingest bar-event consumer crashed, restarting in %ds | error=%s",
+                        delay, exc,
+                    )
+                else:
+                    logger.warning(
+                        "ingest bar-event consumer exited cleanly (no cancel), restarting in %ds",
+                        delay,
+                    )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
+
         bar_consumer_task = asyncio.create_task(
-            run_bar_event_consumer(settings),
+            _consumer_with_restart(),
             name="ingest-bar-event-consumer",
         )
         logger.info(
