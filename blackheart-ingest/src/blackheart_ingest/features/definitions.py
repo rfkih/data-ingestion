@@ -629,7 +629,7 @@ def _forward_sharpe_binary_sign_train_compat(
 def _forward_sharpe(
     close_col: str, horizon_bars: int
 ) -> Callable[[pd.DataFrame], pd.Series]:
-    """Annualised forward Sharpe ratio over ``horizon_bars`` bars.
+    """Horizon-scaled forward Sharpe ratio over ``horizon_bars`` bars.
 
     At row t, computes the Sharpe of log returns over bars [t+1, t+horizon].
     Returns a continuous float in (-∞, +∞); NaN for the last horizon_bars
@@ -1648,7 +1648,7 @@ FEATURES: tuple[FeatureDef, ...] = (
         raw_tables=("market_data",),
         symbols=("BTCUSDT", "ETHUSDT"),
         intervals=("1h",),
-        description="Annualised forward Sharpe ratio over the next 24 bars. "
+        description="Horizon-scaled forward Sharpe ratio over the next 24 bars. "
         "Continuous regression target — preserves magnitude that binary risk-on/off discards. "
         "NaN for last 24 rows (future data unavailable). label_direction='forward'. V138.",
     ),

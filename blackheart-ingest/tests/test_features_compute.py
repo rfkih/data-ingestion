@@ -563,7 +563,7 @@ def test_forward_sharpe_zero_std_returns_nan():
     closes = [100.0] * 60
     df = _sharpe_df(closes)
     result = _forward_sharpe(close_col="close_price", horizon_bars=24)(df)
-    assert result.dropna().isna().all() or result.dropna().empty
+    assert result.dropna().empty, "Expected all NaN for constant-price series"
 
 
 def test_forward_sharpe_negative_for_falling_price():
