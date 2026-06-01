@@ -101,6 +101,19 @@ class FeatureDef:
                 f"is only supported for market_data features. Got "
                 f"raw_tables={self.raw_tables!r}."
             )
+        # Guard: forward-looking features MUST be in family='label' so that
+        # the schema-based loader filter (label_direction='forward' in DB) can
+        # exclude them from input matrices. A pit_safe=False non-label feature
+        # has no DB-side guard and will silently leak into training inputs.
+        if not self.pit_safe and self.family != "label":
+            raise ValueError(
+                f"FeatureDef '{self.name}' v{self.version}: pit_safe=False "
+                f"requires family='label' (got family={self.family!r}). "
+                f"Forward-looking features must be labels so the DB-side "
+                f"label_direction='forward' filter can exclude them from inputs. "
+                f"If this is intentional, set family='label' and add "
+                f"label_direction='forward' to the corresponding SQL migration."
+            )
 
 
 # ── Transformers ──────────────────────────────────────────────────────────────
@@ -650,7 +663,9 @@ def _forward_sharpe(
         fwd = log_ret.shift(-1)
         fwd_mean = fwd.rolling(horizon_bars).mean().shift(-(horizon_bars - 1))
         fwd_std  = fwd.rolling(horizon_bars).std().shift(-(horizon_bars - 1))
-        sharpe = fwd_mean / fwd_std.where(fwd_std > 1e-10) * np.sqrt(horizon_bars)
+        # Guard only exact zero — genuine low-vol trending bars have fwd_std > 0
+        # and should return a large-magnitude Sharpe, not be silently dropped.
+        sharpe = fwd_mean / fwd_std.where(fwd_std > 0) * np.sqrt(horizon_bars)
         return sharpe
     return _impl
 
@@ -1502,7 +1517,7 @@ FEATURES: tuple[FeatureDef, ...] = (
         symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
         intervals=("15m", "1h", "4h"),
         description="8-bar % change of ofi_ratio. Captures accelerating buy-side "
-        "or sell-side pressure (8h window on 1h bars). V136.",
+        "or sell-side pressure (8-bar window; 2h on 15m, 8h on 1h, 32h on 4h). V136.",
     ),
     FeatureDef(
         name="cvd_proxy_zscore_24h",
