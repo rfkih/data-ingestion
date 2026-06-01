@@ -30,7 +30,7 @@ except ImportError:
     AIOKafkaConsumer = None  # type: ignore
 
 from ..features.compute import compute as compute_feature
-from ..features.definitions import FEATURES, FeatureDef
+from ..features.definitions import FEATURES, FeatureDef, get_feature
 from ..features.persistence import fail_run, finish_run, start_run, write_values
 from ..schemas.events import MarketBarEvent
 from ..shared.db import get_connection
@@ -50,6 +50,15 @@ _LOOKBACK_DAYS = 40
 # assert against it without importing definitions.
 _OB_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT"})
 _OB_INTERVALS: frozenset[str] = frozenset({"1h", "4h"})
+
+# V137: macro_raw OB features to (re)compute after the snapshot writes the
+# binance_ob_*_{sym} series. Symbol-agnostic single series (computed with
+# symbol=None → stored symbol=NULL), so they aren't picked up by the
+# market_data-only _features_for_bar path and must be computed explicitly.
+_OB_MACRO_FEATURES_BY_SYMBOL: dict[str, tuple[str, ...]] = {
+    "BTCUSDT": ("ob_spread_bps_btc", "ob_imbalance_btc", "ob_imbalance_momentum_8h_btc"),
+    "ETHUSDT": ("ob_spread_bps_eth", "ob_imbalance_eth", "ob_imbalance_momentum_8h_eth"),
+}
 
 
 def _features_for_bar(
@@ -151,11 +160,35 @@ async def _fetch_ob_snapshot(bar: MarketBarEvent) -> None:
         )
 
 
+async def _compute_ob_macro_features(bar: MarketBarEvent) -> None:
+    """Compute the macro_raw OB features (ob_spread_bps_*/ob_imbalance_*/…) after
+    the snapshot has written their input series. These are symbol-agnostic single
+    series (symbol in the name), so they are NOT selected by the market_data-only
+    ``_features_for_bar`` path and must be computed explicitly here — with
+    ``symbol=None`` so they store under ``symbol=NULL`` (matching the V137 registry).
+    Best-effort: failures are logged and swallowed.
+    """
+    names = _OB_MACRO_FEATURES_BY_SYMBOL.get(bar.symbol)
+    if not names or bar.interval not in _OB_INTERVALS:
+        return
+    feats = [get_feature(n) for n in names]
+    try:
+        await _compute_bar_features(symbol=None, interval=None, features=feats)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "bar_event.ob_macro_compute_failed | symbol=%s ts=%s error=%s",
+            bar.symbol, bar.ts, e,
+        )
+
+
 async def _handle_bar_event(bar: MarketBarEvent) -> None:
     """Process one closed-bar event end-to-end. Errors are caught and logged."""
     # Fetch the OB snapshot first so orderbook_snapshots features see the
-    # current bar's L2 state when the compute pipeline runs below.
+    # current bar's L2 state when the compute pipeline runs below. The snapshot
+    # also writes the binance_ob_*_{sym} macro_raw series → compute the OB
+    # macro features right after so they fill on the same bar.
     await _fetch_ob_snapshot(bar)
+    await _compute_ob_macro_features(bar)
 
     features = _features_for_bar(bar.symbol, bar.interval)
     if not features:

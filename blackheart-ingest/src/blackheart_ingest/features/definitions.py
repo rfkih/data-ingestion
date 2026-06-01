@@ -516,6 +516,22 @@ def _ob_spread_rolling_zscore(window: int, min_periods: int) -> Callable[[pd.Dat
     return _impl
 
 
+def _ob_imbalance_momentum(col: str, periods: int) -> Callable[[pd.DataFrame], pd.Series]:
+    """``periods``-bar change of the order-book depth-imbalance series.
+
+    Reads the ``binance_ob_imbalance_{symbol}`` column from the pivoted
+    macro_raw frame and returns its absolute change over ``periods`` rows.
+    Uses a diff (not pct_change) because the imbalance is a bounded [-1, 1]
+    series centred near zero, where pct_change explodes across sign flips.
+    NaN for the first ``periods`` rows. (V137 transformer_ref.)
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        return df[col].astype("float64").diff(periods=periods)
+
+    return _impl
+
+
 def _forward_return(
     close_col: str, horizon_bars: int
 ) -> Callable[[pd.DataFrame], pd.Series]:
@@ -1518,6 +1534,78 @@ FEATURES: tuple[FeatureDef, ...] = (
         intervals=("1h", "4h"),
         description="24-bar rolling z-score of ob_spread_pct. Normalises spread "
         "width against recent history to detect spread-widening regimes. V137.",
+    ),
+    # ── V137 macro_raw OB features — match feature_registry V137 names ─────────
+    # Sourced from the binance_ob_spread_bps_{sym} / binance_ob_imbalance_{sym}
+    # series that binance_orderbook._store_macro_series writes to macro_raw at
+    # each bar-close. Symbol is in the NAME (symbols omitted → stored symbol=NULL),
+    # matching the registry rows. live_only — no historical backfill (Binance
+    # serves no historical L2 depth).
+    FeatureDef(
+        name="ob_spread_bps_btc",
+        version=1,
+        family="microstructure",
+        inputs=("binance_ob_spread_bps_btcusdt",),
+        transformer=_passthrough("binance_ob_spread_bps_btcusdt"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=2,
+        description="BTCUSDT bid-ask spread in basis points from the L2 snapshot at bar-close. V137.",
+    ),
+    FeatureDef(
+        name="ob_imbalance_btc",
+        version=1,
+        family="microstructure",
+        inputs=("binance_ob_imbalance_btcusdt",),
+        transformer=_passthrough("binance_ob_imbalance_btcusdt"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=2,
+        description="BTCUSDT top-5 depth imbalance (bid5-ask5)/(bid5+ask5) in [-1,1]. V137.",
+    ),
+    FeatureDef(
+        name="ob_imbalance_momentum_8h_btc",
+        version=1,
+        family="microstructure",
+        inputs=("binance_ob_imbalance_btcusdt",),
+        transformer=_ob_imbalance_momentum("binance_ob_imbalance_btcusdt", periods=8),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=4,
+        description="8-bar change of BTCUSDT top-5 depth imbalance. V137.",
+    ),
+    FeatureDef(
+        name="ob_spread_bps_eth",
+        version=1,
+        family="microstructure",
+        inputs=("binance_ob_spread_bps_ethusdt",),
+        transformer=_passthrough("binance_ob_spread_bps_ethusdt"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=2,
+        description="ETHUSDT bid-ask spread in basis points from the L2 snapshot at bar-close. V137.",
+    ),
+    FeatureDef(
+        name="ob_imbalance_eth",
+        version=1,
+        family="microstructure",
+        inputs=("binance_ob_imbalance_ethusdt",),
+        transformer=_passthrough("binance_ob_imbalance_ethusdt"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=2,
+        description="ETHUSDT top-5 depth imbalance (bid5-ask5)/(bid5+ask5) in [-1,1]. V137.",
+    ),
+    FeatureDef(
+        name="ob_imbalance_momentum_8h_eth",
+        version=1,
+        family="microstructure",
+        inputs=("binance_ob_imbalance_ethusdt",),
+        transformer=_ob_imbalance_momentum("binance_ob_imbalance_ethusdt", periods=8),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=4,
+        description="8-bar change of ETHUSDT top-5 depth imbalance. V137.",
     ),
 )
 

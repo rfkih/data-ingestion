@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -48,7 +48,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from ..shared.db import get_connection
+from ..shared.db import content_hash, get_connection, write_macro_raw_rows
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,8 @@ name = "binance_orderbook"
 _BINANCE_BASE = "https://api.binance.com"
 _DEFAULT_DEPTH = 20
 _MAX_DEPTH = 100
+# Imbalance is measured over the top-N levels (registry V137: "(bid5 - ask5) / ...").
+_IMBALANCE_LEVELS = 5
 
 
 @retry(
@@ -99,11 +101,30 @@ def _parse_depth_response(data: dict[str, Any]) -> dict[str, float | None]:
         except (IndexError, ValueError, TypeError):
             logger.warning("binance_orderbook: failed to parse asks from response")
 
+    # ── Derived microstructure series (V137 macro_raw) ──────────────────────
+    # spread_bps = (ask - bid) / mid * 10_000; imbalance = top-N depth skew in [-1, 1].
+    spread_bps: float | None = None
+    imbalance: float | None = None
+    if best_bid is not None and best_ask is not None:
+        mid = (best_bid + best_ask) / 2.0
+        if mid > 0:
+            spread_bps = (best_ask - best_bid) / mid * 10_000.0
+    try:
+        bid_n = sum(float(qty) for _, qty in bids[:_IMBALANCE_LEVELS])
+        ask_n = sum(float(qty) for _, qty in asks[:_IMBALANCE_LEVELS])
+        total_n = bid_n + ask_n
+        if total_n > 0:
+            imbalance = (bid_n - ask_n) / total_n
+    except (IndexError, ValueError, TypeError):
+        logger.warning("binance_orderbook: failed to compute top-%d imbalance", _IMBALANCE_LEVELS)
+
     return {
         "best_bid": best_bid,
         "best_ask": best_ask,
         "bid_depth_sum": bid_depth_sum,
         "ask_depth_sum": ask_depth_sum,
+        "spread_bps": spread_bps,
+        "imbalance": imbalance,
     }
 
 
@@ -174,6 +195,47 @@ def _store_snapshot(
             ctx.__exit__(*sys.exc_info())
 
 
+def _store_macro_series(
+    symbol: str,
+    bar_ts: datetime,
+    snapshot: dict[str, float | None],
+    *,
+    conn: Any = None,
+) -> None:
+    """Write the two derived OB series to ``macro_raw`` (V137 feature contract).
+
+    series_ids: ``binance_ob_spread_bps_{symbol_lower}`` and
+    ``binance_ob_imbalance_{symbol_lower}`` — the inputs the registered
+    ``ob_spread_bps_*`` / ``ob_imbalance_*`` / ``ob_imbalance_momentum_8h_*``
+    features read via the FEATURES list. Only non-null values are written.
+    """
+    sym_lower = symbol.lower()
+    ingestion_time = datetime.now(timezone.utc).replace(tzinfo=None)
+    iso_ts = bar_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    series_values = {
+        f"binance_ob_spread_bps_{sym_lower}": snapshot.get("spread_bps"),
+        f"binance_ob_imbalance_{sym_lower}": snapshot.get("imbalance"),
+    }
+    rows = [
+        {
+            "source": name,
+            "source_uri": f"binance/depth/{symbol}/{iso_ts}",
+            "symbol": symbol,
+            "series_id": series_id,
+            "event_time": bar_ts,
+            "ingestion_time": ingestion_time,
+            "value": value,
+            "value_text": None,
+            "content_hash": content_hash(series_id, iso_ts, value),
+            "schema_version": 1,
+        }
+        for series_id, value in series_values.items()
+        if value is not None
+    ]
+    if rows:
+        write_macro_raw_rows(rows, conn=conn)
+
+
 def fetch_and_store(
     symbol: str,
     interval: str,
@@ -197,6 +259,9 @@ def fetch_and_store(
     t0 = time.monotonic()
     snapshot = fetch_snapshot(symbol, depth=depth)
     _store_snapshot(symbol, interval, bar_ts, snapshot, depth=depth, conn=conn)
+    # V137: also emit the two derived series to macro_raw so the registered
+    # ob_spread_bps_* / ob_imbalance_* / ob_imbalance_momentum_8h_* features fill.
+    _store_macro_series(symbol, bar_ts, snapshot, conn=conn)
     logger.info(
         "binance_orderbook.snapshot_stored | symbol=%s interval=%s bar_ts=%s "
         "best_bid=%s best_ask=%s elapsed=%.2fs",
