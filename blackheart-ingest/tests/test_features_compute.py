@@ -530,3 +530,45 @@ def test_triple_barrier_tail_rows_are_nan():
     )(df)
     # Last `horizon` rows: future window walks past end of data -> NaN.
     assert out.iloc[-horizon:].isna().all()
+
+
+# ── Forward Sharpe label (regression target) ─────────────────────────────────
+
+from blackheart_ingest.features.definitions import _forward_sharpe
+
+
+def _sharpe_df(closes: list[float]) -> pd.DataFrame:
+    idx = pd.date_range("2025-01-01", periods=len(closes), freq="1h")
+    return pd.DataFrame({"close_price": closes}, index=idx)
+
+
+def test_forward_sharpe_last_rows_are_nan():
+    closes = [100.0 + i for i in range(50)]
+    df = _sharpe_df(closes)
+    result = _forward_sharpe(close_col="close_price", horizon_bars=24)(df)
+    assert result.iloc[-24:].isna().all()
+
+
+def test_forward_sharpe_is_float_not_binary():
+    closes = [100.0 * (1 + 0.001 * i) for i in range(100)]
+    df = _sharpe_df(closes)
+    result = _forward_sharpe(close_col="close_price", horizon_bars=24)(df)
+    non_nan = result.dropna()
+    assert non_nan.dtype == float
+    unique_vals = non_nan.round(4).unique()
+    assert len(unique_vals) > 2, f"Expected continuous values, got {unique_vals[:5]}"
+
+
+def test_forward_sharpe_zero_std_returns_nan():
+    closes = [100.0] * 60
+    df = _sharpe_df(closes)
+    result = _forward_sharpe(close_col="close_price", horizon_bars=24)(df)
+    assert result.dropna().isna().all() or result.dropna().empty
+
+
+def test_forward_sharpe_negative_for_falling_price():
+    closes = [100.0 - 0.5 * i for i in range(80)]
+    df = _sharpe_df(closes)
+    result = _forward_sharpe(close_col="close_price", horizon_bars=24)(df)
+    non_nan = result.dropna()
+    assert (non_nan < 0).mean() > 0.8, "Expected mostly negative Sharpe for falling series"

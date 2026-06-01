@@ -626,6 +626,35 @@ def _forward_sharpe_binary_sign_train_compat(
     return _impl
 
 
+def _forward_sharpe(
+    close_col: str, horizon_bars: int
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """Annualised forward Sharpe ratio over ``horizon_bars`` bars.
+
+    At row t, computes the Sharpe of log returns over bars [t+1, t+horizon].
+    Returns a continuous float in (-∞, +∞); NaN for the last horizon_bars
+    rows where future data is unavailable.
+
+    This is the regression analogue of ``_forward_sharpe_binary_sign``.
+    Instead of binarising on sign(Sharpe), it returns the raw magnitude —
+    preserving "strongly bullish" (+2.1) vs "barely bullish" (+0.05) vs
+    "strongly bearish" (-1.8).
+
+    PIT: pit_safe=False (reads future bars). The output at ts=T is observable
+    only at T + horizon_bars * interval. Downstream training MUST NOT use this
+    as an input feature.
+    """
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        c = df[close_col].astype("float64")
+        log_ret = np.log(c / c.shift(1))
+        fwd = log_ret.shift(-1)
+        fwd_mean = fwd.rolling(horizon_bars).mean().shift(-(horizon_bars - 1))
+        fwd_std  = fwd.rolling(horizon_bars).std().shift(-(horizon_bars - 1))
+        sharpe = fwd_mean / fwd_std.where(fwd_std > 1e-10) * np.sqrt(horizon_bars)
+        return sharpe
+    return _impl
+
+
 def _atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     """Average True Range over ``n`` bars (SMA, not Wilder's EMA — close
     enough for labeling; cleaner closed-form). Requires high/low/close
@@ -1606,6 +1635,22 @@ FEATURES: tuple[FeatureDef, ...] = (
         ffill_policy="last_value",
         max_ffill_age_hours=4,
         description="8-bar change of ETHUSDT top-5 depth imbalance. V137.",
+    ),
+    # ── Regression label: continuous forward Sharpe ───────────────────────
+    FeatureDef(
+        name="label_forward_sharpe_24h",
+        version=1,
+        family="label",
+        inputs=("close_price",),
+        transformer=_forward_sharpe(close_col="close_price", horizon_bars=24),
+        pit_safe=False,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        intervals=("1h",),
+        description="Annualised forward Sharpe ratio over the next 24 bars. "
+        "Continuous regression target — preserves magnitude that binary risk-on/off discards. "
+        "NaN for last 24 rows (future data unavailable). label_direction='forward'. V138.",
     ),
 )
 
