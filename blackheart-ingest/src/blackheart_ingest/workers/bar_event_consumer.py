@@ -55,9 +55,19 @@ _OB_INTERVALS: frozenset[str] = frozenset({"1h", "4h"})
 # binance_ob_*_{sym} series. Symbol-agnostic single series (computed with
 # symbol=None → stored symbol=NULL), so they aren't picked up by the
 # market_data-only _features_for_bar path and must be computed explicitly.
+# Auto-derived from FEATURES: macro_raw microstructure features whose names
+# embed the symbol slug (e.g. "ob_spread_bps_btc" → BTCUSDT).
+# Adding a new OB FeatureDef automatically appears here at next import.
 _OB_MACRO_FEATURES_BY_SYMBOL: dict[str, tuple[str, ...]] = {
-    "BTCUSDT": ("ob_spread_bps_btc", "ob_imbalance_btc", "ob_imbalance_momentum_8h_btc"),
-    "ETHUSDT": ("ob_spread_bps_eth", "ob_imbalance_eth", "ob_imbalance_momentum_8h_eth"),
+    symbol: tuple(
+        f.name
+        for f in FEATURES
+        if f.family == "microstructure"
+        and f.raw_tables == ("macro_raw",)
+        and not f.symbols  # global scope (no per-symbol stamp)
+        and symbol.lower().replace("usdt", "") in f.name
+    )
+    for symbol in _OB_SYMBOLS
 }
 
 
@@ -171,9 +181,9 @@ async def _compute_ob_macro_features(bar: MarketBarEvent) -> None:
     names = _OB_MACRO_FEATURES_BY_SYMBOL.get(bar.symbol)
     if not names or bar.interval not in _OB_INTERVALS:
         return
-    feats = [get_feature(n) for n in names]
     try:
-        await _compute_bar_features(symbol=None, interval=None, features=feats)
+        feats = [get_feature(n) for n in names]
+        await _compute_bar_features(symbol="", interval="", features=feats)
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "bar_event.ob_macro_compute_failed | symbol=%s ts=%s error=%s",
