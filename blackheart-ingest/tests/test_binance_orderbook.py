@@ -121,7 +121,9 @@ def test_store_snapshot_executes_upsert():
     sql_arg = mock_cur.execute.call_args[0][0]
     assert "orderbook_snapshots" in sql_arg
     assert "ON CONFLICT" in sql_arg
-    mock_conn.commit.assert_called_once()
+    # When conn is externally supplied the caller owns the transaction;
+    # _store_snapshot must NOT commit so snapshot + macro_raw share one txn.
+    mock_conn.commit.assert_not_called()
 
 
 # ── fetch_and_store ───────────────────────────────────────────────────────────

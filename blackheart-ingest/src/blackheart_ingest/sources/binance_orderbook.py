@@ -109,14 +109,15 @@ def _parse_depth_response(data: dict[str, Any]) -> dict[str, float | None]:
         mid = (best_bid + best_ask) / 2.0
         if mid > 0:
             spread_bps = (best_ask - best_bid) / mid * 10_000.0
-    try:
-        bid_n = sum(float(qty) for _, qty in bids[:_IMBALANCE_LEVELS])
-        ask_n = sum(float(qty) for _, qty in asks[:_IMBALANCE_LEVELS])
-        total_n = bid_n + ask_n
-        if total_n > 0:
-            imbalance = (bid_n - ask_n) / total_n
-    except (IndexError, ValueError, TypeError):
-        logger.warning("binance_orderbook: failed to compute top-%d imbalance", _IMBALANCE_LEVELS)
+    if best_bid is not None and best_ask is not None:
+        try:
+            bid_n = sum(float(qty) for _, qty in bids[:_IMBALANCE_LEVELS])
+            ask_n = sum(float(qty) for _, qty in asks[:_IMBALANCE_LEVELS])
+            total_n = bid_n + ask_n
+            if total_n > 0:
+                imbalance = (bid_n - ask_n) / total_n
+        except (IndexError, ValueError, TypeError):
+            logger.warning("binance_orderbook: failed to compute top-%d imbalance", _IMBALANCE_LEVELS)
 
     return {
         "best_bid": best_bid,
@@ -185,7 +186,8 @@ def _store_snapshot(
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
-        conn.commit()
+        if owned:
+            conn.commit()
     except Exception:
         if owned:
             conn.rollback()
