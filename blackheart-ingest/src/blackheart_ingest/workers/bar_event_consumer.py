@@ -216,12 +216,22 @@ async def _handle_bar_event(bar: MarketBarEvent) -> None:
         rows = await _compute_bar_features(
             symbol=bar.symbol, interval=bar.interval, features=features,
         )
+        # Fire the inference webhook unconditionally — the bar just closed so
+        # features for its timestamp are ready whether _compute_bar_features
+        # wrote them now (rows > 0) or the orchestrator feature_refresh already
+        # UPSERTed them (rows == 0). Gating on rows > 0 caused source='stream'
+        # to silently degrade to 'catchup_scan' whenever the feature_refresh
+        # race-won by ~1s.
+        cfg = get_settings()
+        await notify_inference_batch_ready(
+            base_url=cfg.inference_base_url,
+            auth_token=cfg.inference_auth_token.get_secret_value(),
+            compute_run_id="bar_event",
+        )
         if rows > 0:
-            cfg = get_settings()
-            await notify_inference_batch_ready(
-                base_url=cfg.inference_base_url,
-                auth_token=cfg.inference_auth_token.get_secret_value(),
-                compute_run_id="bar_event",
+            logger.debug(
+                "bar_event.features_written | symbol=%s interval=%s rows=%d",
+                bar.symbol, bar.interval, rows,
             )
     except Exception as e:  # noqa: BLE001
         logger.exception(
