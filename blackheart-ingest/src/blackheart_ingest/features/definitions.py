@@ -1426,7 +1426,7 @@ FEATURES: tuple[FeatureDef, ...] = (
         ffill_policy=None,
         raw_tables=("market_data",),
         symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
-        intervals=("1h", "4h"),
+        intervals=("15m", "1h", "4h"),
         description="Taker buy fraction per bar: taker_buy_base_volume / volume. "
         "Raw OFI ratio in [0,1]; >0.5 = net buy-side aggression. V136.",
     ),
@@ -1440,7 +1440,7 @@ FEATURES: tuple[FeatureDef, ...] = (
         ffill_policy=None,
         raw_tables=("market_data",),
         symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
-        intervals=("1h", "4h"),
+        intervals=("15m", "1h", "4h"),
         description="24-bar rolling z-score of ofi_ratio. Regime-adjusts the "
         "buy fraction so cross-bar comparisons are vol-normalised. "
         "NaN during 24-bar warmup. V136.",
@@ -1455,7 +1455,7 @@ FEATURES: tuple[FeatureDef, ...] = (
         ffill_policy=None,
         raw_tables=("market_data",),
         symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
-        intervals=("1h", "4h"),
+        intervals=("15m", "1h", "4h"),
         description="8-bar % change of ofi_ratio. Captures accelerating buy-side "
         "or sell-side pressure (8h window on 1h bars). V136.",
     ),
@@ -1469,7 +1469,7 @@ FEATURES: tuple[FeatureDef, ...] = (
         ffill_policy=None,
         raw_tables=("market_data",),
         symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
-        intervals=("1h", "4h"),
+        intervals=("15m", "1h", "4h"),
         description="24-bar rolling z-score of CVD proxy (2*taker_buy_base_volume - volume). "
         "Positive = net buy bars dominating; negative = net sell. V136.",
     ),
