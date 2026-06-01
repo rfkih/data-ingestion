@@ -79,8 +79,10 @@ _SNAPSHOT_RECENCY_HOURS = 1
 
 @retry(
     reraise=True,
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=2, max=30),
+    stop=stop_after_attempt(5),
+    # max=65s ensures at least one full retry survives CoinGecko's ~1-min
+    # free-tier rate-limit window (previous max=30s was too short).
+    wait=wait_exponential(multiplier=2, min=5, max=65),
     retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
 )
 def _http_get(client: httpx.Client, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -301,7 +303,10 @@ def fetch(request: IngestionRequest) -> IngestionResult:
             )
 
         # ── Per-coin history ───────────────────────────────────────────────
-        for coin_id in per_coin:
+        for i, coin_id in enumerate(per_coin):
+            if i > 0:
+                # Space out requests to avoid CoinGecko free-tier rate limits.
+                time.sleep(3.0)
             logger.info(
                 "coingecko fetching coin=%s days_back=%d (window %s → %s)",
                 coin_id,
