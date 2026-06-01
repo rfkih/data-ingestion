@@ -70,6 +70,8 @@ async def test_handle_bar_event_triggers_compute_and_webhook():
     with patch("blackheart_ingest.workers.bar_event_consumer.FEATURES", [feat]), \
          patch("blackheart_ingest.workers.bar_event_consumer._compute_bar_features",
                new_callable=AsyncMock) as mock_compute, \
+         patch("blackheart_ingest.workers.bar_event_consumer._compute_ob_macro_features",
+               new_callable=AsyncMock), \
          patch("blackheart_ingest.workers.bar_event_consumer.notify_inference_batch_ready",
                new_callable=AsyncMock) as mock_webhook:
 
@@ -77,6 +79,8 @@ async def test_handle_bar_event_triggers_compute_and_webhook():
 
         await _handle_bar_event(bar)
 
+        # market_data features computed exactly once (OB macro compute is patched out —
+        # it's a separate path covered by its own selection logic).
         mock_compute.assert_called_once_with(
             symbol="BTCUSDT",
             interval="1h",
