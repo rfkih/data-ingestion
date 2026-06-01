@@ -221,7 +221,12 @@ def _store_macro_series(
     rows = [
         {
             "source": name,
-            "source_uri": f"binance/depth/{symbol}/{iso_ts}",
+            # series_id MUST be in source_uri: macro_raw has a UNIQUE index on
+            # (source, source_uri, event_time). Both derived series share the same
+            # symbol+bar, so a series-less source_uri made them collide — the second
+            # row (imbalance) was silently dropped by ON CONFLICT DO NOTHING, leaving
+            # only spread_bps. Keying source_uri by series_id keeps them distinct.
+            "source_uri": f"binance/depth/{symbol}/{series_id}/{iso_ts}",
             "symbol": symbol,
             "series_id": series_id,
             "event_time": bar_ts,

@@ -17,6 +17,7 @@ from blackheart_ingest.sources.binance_orderbook import (
     fetch_snapshot,
     fetch_and_store,
     _store_snapshot,
+    _store_macro_series,
 )
 from blackheart_ingest.workers.bar_event_consumer import (
     _OB_INTERVALS,
@@ -146,6 +147,38 @@ def test_fetch_and_store_calls_fetch_then_store():
     mock_fetch.assert_called_once_with("BTCUSDT", depth=20)
     mock_store.assert_called_once()
     assert result == snapshot
+
+
+def test_store_macro_series_distinct_source_uri_per_series():
+    """Regression: macro_raw has UNIQUE(source, source_uri, event_time).
+
+    The two derived OB series (spread_bps + imbalance) share the same symbol and
+    bar, so if source_uri does not include the series_id they collide on that
+    unique index — the second row is silently dropped by ON CONFLICT DO NOTHING,
+    leaving only spread_bps. This guards that both rows are emitted with a
+    distinct (source, source_uri, event_time) key.
+    """
+    snapshot = {
+        "best_bid": 50000.0, "best_ask": 50001.0,
+        "bid_depth_sum": 4.0, "ask_depth_sum": 5.0,
+        "spread_bps": 0.2, "imbalance": -0.8,  # negative imbalance must still persist
+    }
+    with patch(
+        "blackheart_ingest.sources.binance_orderbook.write_macro_raw_rows"
+    ) as mock_write:
+        _store_macro_series("BTCUSDT", _BAR_TS, snapshot, conn=MagicMock())
+
+    mock_write.assert_called_once()
+    rows = mock_write.call_args[0][0]
+    assert {r["series_id"] for r in rows} == {
+        "binance_ob_spread_bps_btcusdt",
+        "binance_ob_imbalance_btcusdt",
+    }
+    unique_keys = {(r["source"], r["source_uri"], r["event_time"]) for r in rows}
+    assert len(unique_keys) == len(rows) == 2, (
+        "each series must have a distinct (source, source_uri, event_time) "
+        "or it collides on uq_macro_raw_source_uri"
+    )
 
 
 # ── OB feature transformer unit tests ────────────────────────────────────────
