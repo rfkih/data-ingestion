@@ -136,6 +136,7 @@ jobs:
                -e INGEST_KAFKA_GROUP_ID=blackheart-ingest \
                -e INGEST_INFERENCE_BASE_URL=http://blackheart-inference:8000 \
                -e INGEST_INFERENCE_AUTH_TOKEN=prod-inference-token \
+               -e 'INGEST_FRED_API_KEY=${{ secrets.INGEST_FRED_API_KEY }}' \
                ghcr.io/rfkih/blackheart-ingest:${NEW_TAG}"
 
       - name: Ingest healthcheck (with rollback on failure)
@@ -161,6 +162,7 @@ jobs:
                  -e INGEST_KAFKA_GROUP_ID=blackheart-ingest \
                  -e INGEST_INFERENCE_BASE_URL=http://blackheart-inference:8000 \
                  -e INGEST_INFERENCE_AUTH_TOKEN=prod-inference-token \
+                 -e 'INGEST_FRED_API_KEY=${{ secrets.INGEST_FRED_API_KEY }}' \
                  ghcr.io/rfkih/blackheart-ingest:${PREV_TAG}"
             fi
             exit 1
