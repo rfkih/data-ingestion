@@ -154,14 +154,24 @@ async def batch_predict(
                 rows_failed.append(f"{signal_name}:no_symbol_or_interval")
                 continue
 
-            # Fetch feature vector at latest_ts
+            # Resolve the ts for THIS signal's own (symbol, interval) — the
+            # global latest_ts is interval-agnostic and is almost always a 15m
+            # timestamp once any 15m symbol streams, which has no row for a 1h
+            # signal → it would skip and fall to catchup_scan. Per-surface ts
+            # lets each signal infer at its own latest bar.
+            signal_ts = await features_repo.get_latest_ts_for(conn, symbol, interval)
+            if signal_ts is None:
+                rows_failed.append(f"{signal_name}:no_features_for_surface")
+                continue
+
+            # Fetch feature vector at the signal's own latest ts
             feature_vector = await features_repo.fetch_per_bar_values_at_ts(
                 conn,
                 feature_names=feature_names,
                 versions=versions,
                 symbol=symbol,
                 interval_name=interval,
-                ts=latest_ts,
+                ts=signal_ts,
             )
 
             # Predict
@@ -183,7 +193,7 @@ async def batch_predict(
                 "model_status_at_inference": model["status"],
                 "compute_run_id": body.compute_run_id,
             }
-            to_write.append((signal_id, symbol, latest_ts, value, meta))
+            to_write.append((signal_id, symbol, signal_ts, value, meta))
 
         except Exception as e:
             # If any single signal fails, don't crash the whole batch.

@@ -36,6 +36,31 @@ async def get_latest_ts(
     return None
 
 
+async def get_latest_ts_for(
+    conn: asyncpg.Connection, symbol: str, interval_name: str
+) -> datetime | None:
+    """Latest feature_values ts for ONE (symbol, interval).
+
+    The global :func:`get_latest_ts` is interval-agnostic — its MAX(ts) is
+    almost always a 15m timestamp once any 15m symbol streams, so evaluating
+    a 1h signal there finds no feature row and skips it (the row then falls to
+    the catchup_scan fallback). Each signal must be inferred at the latest bar
+    for ITS OWN interval. Returns None when that surface has no rows.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT MAX(ts) AS latest_ts
+          FROM feature_values
+         WHERE symbol = $1 AND interval = $2
+        """,
+        symbol,
+        interval_name,
+    )
+    if row and row["latest_ts"]:
+        return row["latest_ts"]
+    return None
+
+
 async def fetch_feature_versions(
     conn: asyncpg.Connection, feature_names: list[str]
 ) -> dict[str, int]:
