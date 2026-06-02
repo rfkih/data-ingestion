@@ -475,6 +475,46 @@ def _cvd_proxy_zscore(window: int, min_periods: int) -> Callable[[pd.DataFrame],
     return _impl
 
 
+def _ofi_ratio_percentile_rank(
+    window: int, min_periods: int
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """Rolling percentile rank of ofi_ratio over ``window`` bars.
+
+    Computes the taker-buy fraction then applies pandas Rolling.rank(pct=True).
+    Output is in [0, 1] uniform regardless of epoch — the long window
+    (2160 bars = 90 days at 1h) absorbs multi-year distributional drift
+    that the 24-bar z-score cannot. Fixes adversarial_auc ≈ 1.0 on
+    ofi_ratio / ofi_zscore_24h. Zero-volume bars produce NaN.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        vol = df["volume"].astype("float64")
+        buy = df["taker_buy_base_volume"].astype("float64")
+        ratio = buy / vol.where(vol > 0)
+        return ratio.rolling(window, min_periods=min_periods).rank(pct=True)
+
+    return _impl
+
+
+def _cvd_proxy_percentile_rank(
+    window: int, min_periods: int
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """Rolling percentile rank of the CVD proxy over ``window`` bars.
+
+    CVD proxy = 2 * taker_buy_base_volume - volume. Rolling percentile rank
+    forces [0, 1] uniform distribution regardless of epoch. window=2160
+    covers 90 days at 1h. Fixes adversarial_auc ≈ 1.0 on cvd_proxy_zscore_24h.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        vol = df["volume"].astype("float64")
+        buy = df["taker_buy_base_volume"].astype("float64")
+        cvd = 2.0 * buy - vol
+        return cvd.rolling(window, min_periods=min_periods).rank(pct=True)
+
+    return _impl
+
+
 def _ob_spread_pct() -> Callable[[pd.DataFrame], pd.Series]:
     """Bid-ask spread as a fraction of mid price.
 
@@ -1532,6 +1572,45 @@ FEATURES: tuple[FeatureDef, ...] = (
         intervals=("15m", "1h", "4h"),
         description="24-bar rolling z-score of CVD proxy (2*taker_buy_base_volume - volume). "
         "Positive = net buy bars dominating; negative = net sell. V136.",
+    ),
+    # ── V141: Stationary OFI variants — 90-day percentile rank ───────────────
+    # The four V136 OFI features show adversarial_auc ≈ 1.0 in ML training:
+    # 24-bar z-score and 8-bar momentum cannot absorb multi-year drift.
+    # These two stationary variants use a 2160-bar (90-day at 1h) rolling
+    # percentile rank, forcing [0,1] uniform output regardless of epoch.
+    # min_periods=720 = 30-day warmup before emitting values.
+    # Backfill from existing market_data (ofi_ratio history 2022+):
+    #   POST /compute/refresh {"features":["ofi_ratio_pctrank_90d",
+    #     "cvd_proxy_pctrank_90d"],"incremental":false}
+    FeatureDef(
+        name="ofi_ratio_pctrank_90d",
+        version=1,
+        family="microstructure",
+        inputs=("volume", "taker_buy_base_volume"),
+        transformer=_ofi_ratio_percentile_rank(window=2160, min_periods=720),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
+        intervals=("15m", "1h", "4h"),
+        description="90-day (2160-bar at 1h) rolling percentile rank of ofi_ratio. "
+        "Stationary by construction: [0,1] uniform regardless of epoch. "
+        "Fixes adversarial_auc ≈ 1.0 on ofi_ratio/ofi_zscore_24h. V141.",
+    ),
+    FeatureDef(
+        name="cvd_proxy_pctrank_90d",
+        version=1,
+        family="microstructure",
+        inputs=("volume", "taker_buy_base_volume"),
+        transformer=_cvd_proxy_percentile_rank(window=2160, min_periods=720),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT"),
+        intervals=("15m", "1h", "4h"),
+        description="90-day (2160-bar at 1h) rolling percentile rank of CVD proxy "
+        "(2*taker_buy_base_volume - volume). Stationary by construction. "
+        "Fixes adversarial_auc ≈ 1.0 on cvd_proxy_zscore_24h. V141.",
     ),
     # ── V137: Order book depth microstructure features ────────────────────────
     # Derived from orderbook_snapshots fetched at bar-close by binance_orderbook.py.
