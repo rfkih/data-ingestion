@@ -124,7 +124,10 @@ def _fetch_dvol(
             if ts_ms < start_ms or ts_ms in seen_ts or close is None:
                 continue
             seen_ts.add(ts_ms)
-            event_time = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+            # Naive UTC — the codebase convention (request.start arrives naive,
+            # macro_raw.event_time is naive; mixing aware datetimes breaks the
+            # PIT comparison in partition_by_pit).
+            event_time = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).replace(tzinfo=None)
             iso_ts = event_time.isoformat()
             value = float(close)
             rows.append(
@@ -157,7 +160,7 @@ def _fetch_dvol(
 
 def fetch(request: IngestionRequest) -> IngestionResult:
     started = time.monotonic()
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()  # naive UTC — matches request.start / macro_raw convention
     currencies = request.config.get("currencies") or _DEFAULT_CURRENCIES
     resolution = int(request.config.get("resolution") or _DEFAULT_RESOLUTION)
 

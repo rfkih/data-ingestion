@@ -40,11 +40,14 @@ def test_fetch_dvol_builds_macro_raw_rows():
     assert r["value"] == 60.0
     assert r["value_text"] is None
     assert r["content_hash"]
-    assert r["event_time"] == start
+    # event_time MUST be naive UTC — the server passes naive request.start, and
+    # mixing aware/naive crashes partition_by_pit. Guard the bug class directly.
+    assert r["event_time"].tzinfo is None
+    assert r["event_time"] == start.replace(tzinfo=None)
     # source_uri must be unique per (series_id, event_time) — guards the
     # macro_raw UNIQUE(source, source_uri, event_time) collision class.
     assert len({row["source_uri"] for row in rows}) == len(rows)
-    assert r["source_uri"] == "deribit/deribit_btc_dvol/" + start.isoformat()
+    assert r["source_uri"] == "deribit/deribit_btc_dvol/" + start.replace(tzinfo=None).isoformat()
 
 
 def test_fetch_dvol_dedupes_and_filters_window():
@@ -62,7 +65,7 @@ def test_fetch_dvol_dedupes_and_filters_window():
 
     assert len(rows) == 1
     assert rows[0]["series_id"] == "deribit_eth_dvol"
-    assert rows[0]["event_time"] == datetime(2024, 1, 1, 1, tzinfo=timezone.utc)
+    assert rows[0]["event_time"] == datetime(2024, 1, 1, 1)  # naive UTC
 
 
 def test_fetch_dvol_pages_backward_until_start():
