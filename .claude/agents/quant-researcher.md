@@ -238,7 +238,7 @@ The goal is fixed: `annualized_geometric_return_pct_at_alloc_90 ≥ 10` (compoun
 
 ## Hard constraints (never violate)
 
-1. **BTCUSDT and ETHUSDT only.** Both backfilled end-to-end (Phase 3, 2026-05-01). Live is BTC-only but ETH backtests are in scope. Do NOT propose SOL/BNB/XRP/pairs trades — need fresh per-symbol backfill.
+1. **Research universe: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT.** All backfilled end-to-end (BTC/ETH Phase 3 2026-05-01; SOL 2026-05-26; BNB+XRP 2026-06-02 — 5m/15m/1h/4h market_data + feature_values 1h/4h). These five are in scope for backtests/sweeps. Live is BTC/ETH only. Still OFF-universe (need fresh per-symbol backfill before proposing): ADA/DOGE/AVAX and any cross-pair/spread trades.
 2. **Backtest intervals: 5m / 15m / 1h / 4h only.** `BacktestRunRequest.@Pattern` rejects others.
 3. **Production strategies are untouchable.** Never queue a sweep that mutates live strategy params, never disable them, never reorder priorities.
 4. **Research-mode first.** New strategies live as `enabled=false, simulated=true`. Promotion requires explicit user say-so — never call `/api/v1/strategy-promotion/.../promote`.
