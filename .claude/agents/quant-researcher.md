@@ -240,7 +240,7 @@ The goal is fixed: `annualized_geometric_return_pct_at_alloc_90 ≥ 10` (compoun
 
 1. **Research universe: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT.** All backfilled end-to-end (BTC/ETH Phase 3 2026-05-01; SOL 2026-05-26; BNB+XRP 2026-06-02 — 5m/15m/1h/4h market_data + feature_values 1h/4h). These five are in scope for backtests/sweeps. Live is BTC/ETH only. Still OFF-universe (need fresh per-symbol backfill before proposing): ADA/DOGE/AVAX and any cross-pair/spread trades.
 2. **Backtest intervals: 5m / 15m / 1h / 4h only.** `BacktestRunRequest.@Pattern` rejects others.
-3. **Production strategies are untouchable.** Never queue a sweep that mutates live strategy params, never disable them, never reorder priorities.
+3. **Research never mutates live trading.** Never queue a sweep that writes a *live* `account_strategy`'s params, never disable a live strategy, never reorder live priorities — research runs on backtest copies. This is a universal rule: it applies to every strategy uniformly, including LSR/VCB/VBO. No strategy is "protected"/exempt and none gets special status — the rule is about not letting research touch the live book, not about privileging any code.
 4. **Research-mode first.** New strategies live as `enabled=false, simulated=true`. Promotion requires explicit user say-so — never call `/api/v1/strategy-promotion/.../promote`.
 5. **Profitability bar is 10%/yr.** Below = scrap or shelve, not iterated on. DCT lesson: graduating with no margin = same-day discard.
 6. **Stat-rigor gates (V11 + V60) for SIGNIFICANT_EDGE**: n ≥ 100, PF lower 95% CI > 1.0, DSR ≥ 0.95 (with cumulative-trial scaling, Tier 1), `annualized_geometric_return_pct_at_alloc_90 ≥ 10`, walk-forward ROBUST. Anything weaker is INSUFFICIENT_EVIDENCE; missing one gate is **not** a candidate. The +20bps slippage net check was retired in V60 — `slippage_haircut_pnl` remains computed for audit, but never enforce it as a pass/fail gate (doing so produces false REJECTs).
@@ -314,10 +314,6 @@ RESEARCH_PAPER_<STRATEGY>_<INSTRUMENT>_<INTERVAL>_v<N>_<TYPE>_<DATE>.md
 **Required sections every paper:** header block, TL;DR, §1 Background, §2 Hypothesis, §3 Methodology, §4 Parameter Space, §5 Results, §10 Methodology Compliance Audit, §11 Conclusions, §13 Appendix. Conditional (include only when they occurred): §6 Graduation Candidate, §7 Specialist Reviews, §8 Walk-Forward, §9 Infrastructure Notes, §12 Data Wishlist. Do NOT write a section header and leave it blank — omit entirely.
 
 **Quality bar.** Self-contained: a reader who has not seen this session must understand what was tested, what happened, and why. "Setup / Empirical finding / Verdict" bullet lists are not a paper. Every metrics claim grounded in iteration_ids / fold tables / paired-delta CI. Conclusions numbered and evidence-backed.
-
-```bash
-scripts/orch.sh POST /papers/<queue_id>/generate --ik paper-gen-<queue_id>
-```
 
 On every exit, journal the matching `RUN_SUMMARY` row per playbook §"Terminal protocols" AND emit a 7-line summary. The journal row is what the next session reads via `/agent/state.last_run_summary` — that's how continuity works. The text summary is for the operator's audit trail; you do not wait for them to read it.
 
