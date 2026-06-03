@@ -58,23 +58,35 @@ def _get_max_ts_for_feature(
 
     Returns None if no rows exist.
     """
+    # Column is ``feature_name`` (the PK is (feature_name, version, symbol,
+    # interval, ts)) — there is no ``name`` column; the prior ``WHERE name=``
+    # raised UndefinedColumn on every incremental call. Alias MAX(ts) AS max_ts
+    # and read by key so this works under shared.db's ``dict_row`` factory,
+    # where ``row[0]`` raises KeyError(0) (same bug class fixed in
+    # persistence._count_persisted_for_run, 2026-05-20).
     sql = """
-        SELECT MAX(ts) as max_ts
+        SELECT MAX(ts) AS max_ts
         FROM feature_values
-        WHERE name = %(name)s
+        WHERE feature_name = %(name)s
           AND symbol IS NOT DISTINCT FROM %(symbol)s
           AND interval IS NOT DISTINCT FROM %(interval)s
     """
     with conn.cursor() as cur:
         cur.execute(sql, {"name": feat_name, "symbol": symbol, "interval": interval})
         row = cur.fetchone()
-    if row and row[0]:
-        # Convert to naive UTC datetime if needed
+    if not row:
+        return None
+    # Dict-row access; if row_factory is tuple-row, fall back to [0].
+    try:
+        ts = row["max_ts"]
+    except (TypeError, KeyError):
         ts = row[0]
-        if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
-            ts = ts.replace(tzinfo=None)
-        return ts
-    return None
+    if ts is None:
+        return None
+    # Convert to naive UTC datetime if needed
+    if hasattr(ts, "tzinfo") and ts.tzinfo is not None:
+        ts = ts.replace(tzinfo=None)
+    return ts
 
 
 @router.post("/refresh", response_model=ComputeRefreshResponse)
