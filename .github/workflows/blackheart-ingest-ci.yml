@@ -127,16 +127,7 @@ jobs:
              docker run -d --name blackheart-ingest --restart unless-stopped \
                --network blackheart_default \
                -p 8001:8001 \
-               -e INGEST_PROFILE=prod \
-               -e INGEST_SERVER_HOST=0.0.0.0 \
-               -e INGEST_SERVER_PORT=8001 \
-               -e 'INGEST_DB_DSN=postgresql://blackheart_research:CLjj505OEU5emM5aaLCmHJlRrwcx@blackheart-postgres:5432/trading_db' \
-               -e INGEST_KAFKA_ENABLED=true \
-               -e INGEST_KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
-               -e INGEST_KAFKA_GROUP_ID=blackheart-ingest \
-               -e INGEST_INFERENCE_BASE_URL=http://blackheart-inference:8000 \
-               -e INGEST_INFERENCE_AUTH_TOKEN=prod-inference-token \
-               -e 'INGEST_FRED_API_KEY=${{ secrets.INGEST_FRED_API_KEY }}' \
+               --env-file /home/starsky/blackheart/ingest.env \
                ghcr.io/rfkih/blackheart-ingest:${NEW_TAG}"
 
       - name: Ingest healthcheck (with rollback on failure)
@@ -153,16 +144,7 @@ jobs:
                 "docker rm -f blackheart-ingest && docker run -d --name blackheart-ingest --restart unless-stopped \
                  --network blackheart_default \
                  -p 8001:8001 \
-                 -e INGEST_PROFILE=prod \
-                 -e INGEST_SERVER_HOST=0.0.0.0 \
-                 -e INGEST_SERVER_PORT=8001 \
-                 -e 'INGEST_DB_DSN=postgresql://blackheart_research:CLjj505OEU5emM5aaLCmHJlRrwcx@blackheart-postgres:5432/trading_db' \
-                 -e INGEST_KAFKA_ENABLED=true \
-                 -e INGEST_KAFKA_BOOTSTRAP_SERVERS=blackheart-kafka:9092 \
-                 -e INGEST_KAFKA_GROUP_ID=blackheart-ingest \
-                 -e INGEST_INFERENCE_BASE_URL=http://blackheart-inference:8000 \
-                 -e INGEST_INFERENCE_AUTH_TOKEN=prod-inference-token \
-                 -e 'INGEST_FRED_API_KEY=${{ secrets.INGEST_FRED_API_KEY }}' \
+                 --env-file /home/starsky/blackheart/ingest.env \
                  ghcr.io/rfkih/blackheart-ingest:${PREV_TAG}"
             fi
             exit 1
