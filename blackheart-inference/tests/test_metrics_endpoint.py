@@ -8,6 +8,11 @@ from fastapi.testclient import TestClient
 class TestMetricsEndpoint:
     """Tests for GET /metrics/latency and POST /metrics/reset."""
 
+    # ``/metrics/reset`` is an authenticated, state-mutating POST (it wipes
+    # SLO/latency evidence). The conftest ``client`` builds the app with
+    # ``auth_token="test-token"``; reset calls must carry it.
+    _AUTH = {"X-Inference-Token": "test-token"}
+
     def test_get_latency_metrics_empty(self, client: TestClient) -> None:
         """GET /metrics/latency with no data returns empty metrics list."""
         r = client.get("/metrics/latency")
@@ -101,7 +106,7 @@ class TestMetricsEndpoint:
         assert len(r.json()["metrics"]) == 2
 
         # Reset all
-        r = client.post("/metrics/reset")
+        r = client.post("/metrics/reset", headers=self._AUTH)
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "ok"
@@ -122,7 +127,7 @@ class TestMetricsEndpoint:
         app.state.latency_tracker = tracker
 
         # Reset signal_a only
-        r = client.post("/metrics/reset?signal_id=signal_a")
+        r = client.post("/metrics/reset?signal_id=signal_a", headers=self._AUTH)
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "ok"
@@ -134,6 +139,35 @@ class TestMetricsEndpoint:
         assert len(metrics) == 1
         assert metrics[0]["signal_id"] == "signal_b"
 
+    def test_reset_requires_auth(self, client: TestClient) -> None:
+        """POST /metrics/reset WITHOUT the token is rejected 401 — it is a
+        state-mutating endpoint that wipes SLO evidence, so it must not be
+        anonymously callable (CODE_REVIEW_2026-06-03 high)."""
+        from blackheart_inference.monitoring.latency_tracker import LatencyTracker
+
+        app = client.app
+        tracker = LatencyTracker()
+        tracker.record_latency("signal_a", 50.0)
+        app.state.latency_tracker = tracker
+
+        # No X-Inference-Token header → blocked by AuthMiddleware.
+        r = client.post("/metrics/reset")
+        assert r.status_code == 401
+
+        # And the data it would have wiped is untouched.
+        r = client.get("/metrics/latency")
+        assert len(r.json()["metrics"]) == 1
+
+    def test_reset_with_bad_token_is_rejected(self, client: TestClient) -> None:
+        """A wrong token is rejected 401 (not silently accepted)."""
+        r = client.post("/metrics/reset", headers={"X-Inference-Token": "wrong"})
+        assert r.status_code == 401
+
+    def test_latency_stays_public(self, client: TestClient) -> None:
+        """GET /metrics/latency remains reachable without a token (read-only)."""
+        r = client.get("/metrics/latency")
+        assert r.status_code == 200
+
     def test_reset_nonexistent_signal_is_safe(self, client: TestClient) -> None:
         """POST /metrics/reset on nonexistent signal is safe (no error)."""
         from blackheart_inference.monitoring.latency_tracker import LatencyTracker
@@ -144,7 +178,7 @@ class TestMetricsEndpoint:
         app.state.latency_tracker = tracker
 
         # Reset nonexistent signal
-        r = client.post("/metrics/reset?signal_id=nonexistent")
+        r = client.post("/metrics/reset?signal_id=nonexistent", headers=self._AUTH)
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "ok"

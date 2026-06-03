@@ -1,8 +1,10 @@
 """Shared-secret bearer auth — copy-shape from the orchestrator.
 
-Public endpoints (``/healthz``, ``/readyz``) skip the check; everything
-else requires ``X-Inference-Token``. ``X-Agent-Name`` is stamped onto
-``request.state.agent_name`` for forensic logging.
+Public endpoints (``/healthz``, ``/readyz`` and the read-only
+``/metrics/latency``) skip the check; everything else — including the
+state-mutating ``POST /metrics/reset``, which wipes latency/SLO
+tracking — requires ``X-Inference-Token``. ``X-Agent-Name`` is stamped
+onto ``request.state.agent_name`` for forensic logging.
 """
 
 from __future__ import annotations
@@ -19,7 +21,10 @@ from .settings import Settings
 
 logger = logging.getLogger(__name__)
 
-_PUBLIC_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz", "/metrics/latency", "/metrics/reset"})
+# NOTE: ``/metrics/reset`` is deliberately NOT public — it is a state-mutating
+# POST that clears SLO/latency evidence, so it must carry ``X-Inference-Token``.
+# Only read-only/liveness paths belong here.
+_PUBLIC_PATHS: frozenset[str] = frozenset({"/healthz", "/readyz", "/metrics/latency"})
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
