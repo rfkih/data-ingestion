@@ -71,6 +71,7 @@ _KNOWN_SOURCES: dict[str, str | None] = {
     "binance_macro": "blackheart_ingest.sources.binance_macro",
     "forexfactory": "blackheart_ingest.sources.forexfactory",
     "deribit": "blackheart_ingest.sources.deribit",
+    "binance_spot": "blackheart_ingest.sources.binance_spot",
 }
 
 
