@@ -1134,6 +1134,65 @@ FEATURES: tuple[FeatureDef, ...] = (
         max_ffill_age_hours=48,
         description="Crypto Fear & Greed Index 0-100 from alternative.me (daily).",
     ),
+    # ── Step 4 alt-data: implied volatility (Deribit DVOL) ────────────
+    # DVOL is the 30d option-implied forward-vol index (the crypto VIX) —
+    # forward-looking and structurally orthogonal to the realized-vol / ATR
+    # features computed from spot OHLCV. Source: sources/deribit.py → macro_raw
+    # series ``deribit_{btc,eth}_dvol`` (global, symbol=NULL, hourly cadence,
+    # deep free history back to ~Mar 2021). The vol-risk-premium (IV − RV) is a
+    # research-side combination of these levels with btc_realized_vol_30d, not a
+    # feature here (cross-table transformer not yet supported).
+    FeatureDef(
+        name="btc_dvol_level",
+        version=1,
+        family="market_structure",
+        inputs=("deribit_btc_dvol",),
+        transformer=_passthrough("deribit_btc_dvol"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="Deribit BTC DVOL — 30d option-implied volatility index (%). "
+        "Passthrough of macro_raw series deribit_btc_dvol (hourly). Forward-looking, "
+        "orthogonal to realized-vol features. Step 4 alt-data.",
+    ),
+    FeatureDef(
+        name="eth_dvol_level",
+        version=1,
+        family="market_structure",
+        inputs=("deribit_eth_dvol",),
+        transformer=_passthrough("deribit_eth_dvol"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="Deribit ETH DVOL — 30d option-implied volatility index (%). "
+        "Passthrough of macro_raw series deribit_eth_dvol (hourly). Step 4 alt-data.",
+    ),
+    FeatureDef(
+        name="btc_dvol_zscore_30d",
+        version=1,
+        family="market_structure",
+        # DVOL hourly cadence → 30 days = 720 rows.
+        inputs=("deribit_btc_dvol",),
+        transformer=_rolling_zscore("deribit_btc_dvol", window=720, min_periods=240),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="30-day rolling z-score of Deribit BTC DVOL (hourly, window=720 rows). "
+        "Regime-normalized implied-vol signal: high = market pricing elevated forward vol. "
+        "Step 4 alt-data — orthogonal vol-risk-premium input.",
+    ),
+    FeatureDef(
+        name="eth_dvol_zscore_30d",
+        version=1,
+        family="market_structure",
+        inputs=("deribit_eth_dvol",),
+        transformer=_rolling_zscore("deribit_eth_dvol", window=720, min_periods=240),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="30-day rolling z-score of Deribit ETH DVOL (hourly, window=720 rows). "
+        "Step 4 alt-data — orthogonal vol-risk-premium input.",
+    ),
     # ── Blueprint § 5.4 (continued): from market_data ─────────────────
     FeatureDef(
         name="btc_realized_vol_30d",
