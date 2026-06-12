@@ -13,7 +13,6 @@ dependencies = [
     "structlog>=24.4",
     "lightgbm>=4.3",
     "numpy>=1.26",
-    "aiokafka>=0.8",
 ]
 
 [project.optional-dependencies]

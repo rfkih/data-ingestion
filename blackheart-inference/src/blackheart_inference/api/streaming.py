@@ -7,7 +7,7 @@ the worker is alive without parsing logs.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -26,6 +26,7 @@ def _iter_to_dict(it: Any) -> dict[str, Any] | None:
         "targetsUpToDate": it.targets_up_to_date,
         "targetsNoFeatures": it.targets_no_features,
         "targetsGapTooLarge": it.targets_gap_too_large,
+        "targetsBackingOff": it.targets_backing_off,
         "targetsBackfilled": it.targets_backfilled,
         "rowsWrittenTotal": it.rows_written_total,
         "errors": list(it.errors)[:10],   # cap so a flood of errors doesn't bloat the response
@@ -49,5 +50,5 @@ async def get_streaming_status(request: Request) -> dict[str, Any]:
         "lastIteration": _iter_to_dict(state.last_iteration),
         "lastErrorAt": state.last_error_at.isoformat() if state.last_error_at else None,
         "lastError": state.last_error,
-        "now": datetime.utcnow().isoformat(),
+        "now": datetime.now(timezone.utc).isoformat(),
     }

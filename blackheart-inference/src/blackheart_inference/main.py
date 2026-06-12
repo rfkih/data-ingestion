@@ -18,6 +18,7 @@ from .auth import AuthMiddleware
 from .errors import register_exception_handlers
 from .infra.db import Database
 from .logging import configure_logging, get_logger
+from .monitoring.latency_tracker import LatencyTracker
 from .services.streaming import StreamingState, run_streaming_loop
 from .settings import Settings
 
@@ -34,10 +35,12 @@ async def _lifespan(settings: Settings, app: FastAPI):
         dsn=settings.db_dsn.get_secret_value(),
         min_size=settings.db_min_pool,
         max_size=settings.db_max_pool,
+        command_timeout=settings.db_command_timeout_s,
     )
     await db.open()
     app.state.settings = settings
     app.state.db = db
+    app.state.latency_tracker = LatencyTracker()
     app.state.streaming = StreamingState(
         enabled=settings.streaming_enabled,
         poll_seconds=settings.streaming_poll_seconds,
@@ -68,8 +71,10 @@ async def _lifespan(settings: Settings, app: FastAPI):
             streaming_task.cancel()
             try:
                 await streaming_task
-            except (asyncio.CancelledError, BaseException):  # noqa: BLE001
+            except asyncio.CancelledError:
                 pass
+            except Exception:  # noqa: BLE001 — shutdown must proceed, but not silently
+                log.exception("inference.streaming_shutdown_error")
         await db.close()
         log.info("inference.shutdown")
 

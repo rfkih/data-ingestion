@@ -78,9 +78,26 @@ class IterationResult:
     targets_up_to_date: int = 0
     targets_no_features: int = 0
     targets_gap_too_large: int = 0
+    targets_backing_off: int = 0
     targets_backfilled: int = 0
     rows_written_total: int = 0
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _BackoffEntry:
+    """Consecutive-failure memo for one target."""
+    failures: int
+    next_attempt_at: datetime
+
+
+def next_backoff_seconds(failures: int, poll_seconds: int) -> float:
+    """Exponential backoff for a target that keeps failing: doubles per
+    consecutive failure from ``poll_seconds``, capped at one hour. A
+    target whose backfill can never progress (permanently missing
+    feature, persistent HTTP error) previously re-ran the full gap query
+    + predict every tick, forever."""
+    return min(float(poll_seconds) * (2 ** min(failures, 16)), 3_600.0)
 
 
 @dataclass
@@ -234,9 +251,16 @@ async def streaming_iteration(
     settings: Settings,
     db: Database,
     client: httpx.AsyncClient,
+    backoff: dict[str, _BackoffEntry] | None = None,
 ) -> IterationResult:
     """One pass over all targets. Returns a structured summary even when
-    individual targets failed — caller decides whether to log loud."""
+    individual targets failed — caller decides whether to log loud.
+
+    ``backoff`` is the loop-lifetime failure memo (key:
+    ``signal/symbol/interval``). Targets inside their backoff window are
+    skipped this tick; a successful or no-op tick clears the entry."""
+    if backoff is None:
+        backoff = {}
     result = IterationResult(started_at=datetime.now(timezone.utc))
     try:
         async with db.acquire() as conn:
@@ -247,10 +271,27 @@ async def streaming_iteration(
         return result
 
     result.targets_total = len(targets)
-    base_url = f"http://{settings.host}:{settings.port}"
+    # In Docker the bind host is 0.0.0.0 — connecting to it only works on
+    # Linux by accident; loop back explicitly.
+    connect_host = "127.0.0.1" if settings.host == "0.0.0.0" else settings.host
+    base_url = f"http://{connect_host}:{settings.port}"
     auth_token = settings.auth_token.get_secret_value()
 
+    def _record_failure(key: str) -> None:
+        failures = backoff[key].failures + 1 if key in backoff else 1
+        backoff[key] = _BackoffEntry(
+            failures=failures,
+            next_attempt_at=datetime.now(timezone.utc) + timedelta(
+                seconds=next_backoff_seconds(failures, settings.streaming_poll_seconds)
+            ),
+        )
+
     for target in targets:
+        key = f"{target.signal_id}/{target.symbol}/{target.interval_name}"
+        entry = backoff.get(key)
+        if entry is not None and datetime.now(timezone.utc) < entry.next_attempt_at:
+            result.targets_backing_off += 1
+            continue
         try:
             async with db.acquire() as conn:
                 gap, reason = await find_gap_for_target(
@@ -264,6 +305,7 @@ async def streaming_iteration(
 
         if reason == "up_to_date":
             result.targets_up_to_date += 1
+            backoff.pop(key, None)
             continue
         if reason == "no_features":
             result.targets_no_features += 1
@@ -299,6 +341,7 @@ async def streaming_iteration(
                 signal=target.signal_name, symbol=target.symbol,
                 status=exc.response.status_code,
             )
+            _record_failure(key)
             continue
         except Exception as exc:  # noqa: BLE001
             result.errors.append(
@@ -308,18 +351,33 @@ async def streaming_iteration(
                 "streaming.backfill_error",
                 signal=target.signal_name, symbol=target.symbol, error=repr(exc),
             )
+            _record_failure(key)
             continue
 
         rows_written = int(payload.get("rows_written", 0) or 0)
+        rows_in_window = int(payload.get("rows_in_window", 0) or 0)
         result.targets_backfilled += 1
         result.rows_written_total += rows_written
         if rows_written > 0:
+            backoff.pop(key, None)
             log.info(
                 "streaming.backfill_ok",
                 signal=target.signal_name, symbol=target.symbol,
                 interval=target.interval_name,
                 rows_written=rows_written,
                 start=gap.start.isoformat(), end=gap.end.isoformat(),
+            )
+        elif rows_in_window > 0:
+            # Bars exist but every one was skipped for missing features —
+            # nothing changes until the feature side moves, so retrying
+            # every tick is wasted load. Back off.
+            _record_failure(key)
+            log.warning(
+                "streaming.backfill_all_skipped",
+                signal=target.signal_name, symbol=target.symbol,
+                interval=target.interval_name,
+                rows_in_window=rows_in_window,
+                consecutive_failures=backoff[key].failures,
             )
 
     result.ended_at = datetime.now(timezone.utc)
@@ -346,11 +404,14 @@ async def run_streaming_loop(
     )
     # The HTTP client is per-loop, not per-iteration — keep the keepalive
     # connection warm so the loopback handshake doesn't recur every tick.
+    # The backoff memo also lives loop-long so failure streaks survive
+    # across ticks.
+    backoff: dict[str, _BackoffEntry] = {}
     async with httpx.AsyncClient() as client:
         try:
             while True:
                 try:
-                    result = await streaming_iteration(settings, db, client)
+                    result = await streaming_iteration(settings, db, client, backoff)
                     state.iterations += 1
                     state.last_iteration = result
                     if result.errors:

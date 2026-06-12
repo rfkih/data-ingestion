@@ -11,6 +11,17 @@ from .settings import Settings
 
 
 def configure_logging(settings: Settings) -> None:
+    # Stdlib loggers (auth, errors, artifact_loader, uvicorn with
+    # log_config=None) had no handler — their INFO records vanished and
+    # WARNING+ survived only via Python's last-resort stderr handler.
+    # basicConfig is a no-op when the root logger already has handlers,
+    # so repeated create_app calls (tests) don't stack duplicates.
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
     processors: list = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,

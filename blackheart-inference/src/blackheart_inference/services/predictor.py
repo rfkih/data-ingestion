@@ -20,9 +20,22 @@ empty booster is a corrupted artifact (502 not retryable).
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
+
+
+def _is_missing(v: Any) -> bool:
+    """None or NaN — both mean "no value on the row". NaN would otherwise
+    sail through LightGBM's missing-value handling and silently predict
+    down the default split path, violating the no-imputation contract."""
+    if v is None:
+        return True
+    try:
+        return math.isnan(float(v))
+    except (TypeError, ValueError):
+        return True
 
 
 class MissingFeatureError(ValueError):
@@ -86,7 +99,7 @@ def predict_single(
     missing: list[str] = []
     for name in feature_names:
         v = feature_vector.get(name)
-        if v is None:
+        if _is_missing(v):
             missing.append(name)
         else:
             row.append(float(v))
@@ -137,7 +150,7 @@ def predict_batch(
         any_missing = False
         for name in feature_names:
             v = vec.get(name)
-            if v is None:
+            if _is_missing(v):
                 any_missing = True
                 break
             row.append(float(v))

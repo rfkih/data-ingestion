@@ -15,6 +15,8 @@ Workflow:
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -131,17 +133,25 @@ async def batch_predict(
                 rows_failed.append(f"{signal_name}:no_artifact")
                 continue
 
-            # Load artifact
+            # Load artifact — cached + content-verified, off the event loop.
             try:
-                payload = read_artifact(model["artifact_sha256"], artifact_dir)
+                payload = await asyncio.to_thread(
+                    read_artifact,
+                    model["artifact_sha256"],
+                    artifact_dir,
+                    verify_content=request.app.state.settings.artifact_verify_content,
+                )
             except (FileNotFoundError, ValueError):
                 rows_failed.append(f"{signal_name}:artifact_load_failed")
                 continue
 
-            # Get feature versions
+            # Feature metadata — artifact-pinned versions when present,
+            # else latest registered (pre-pinning artifacts).
             feature_names: list[str] = list(payload["feature_names"])
-            versions = await features_repo.fetch_feature_versions(conn, feature_names)
-            missing_versions = [n for n in feature_names if n not in versions]
+            metas = await features_repo.fetch_feature_meta(
+                conn, feature_names, payload.get("feature_versions") or None
+            )
+            missing_versions = [n for n in feature_names if n not in metas]
             if missing_versions:
                 rows_failed.append(f"{signal_name}:missing_features")
                 continue
@@ -167,22 +177,34 @@ async def batch_predict(
             # Fetch feature vector at the signal's own latest ts
             feature_vector = await features_repo.fetch_per_bar_values_at_ts(
                 conn,
-                feature_names=feature_names,
-                versions=versions,
+                metas=metas,
                 symbol=symbol,
                 interval_name=interval,
                 ts=signal_ts,
             )
 
-            # Predict
+            # Predict — off the event loop so a slow model can't stall
+            # /healthz and the other signals' webhooks.
+            predict_started = time.perf_counter()
             try:
-                value, confidence = predict_single(payload, feature_vector)
+                value, confidence = await asyncio.to_thread(
+                    predict_single, payload, feature_vector
+                )
             except MissingFeatureError:
                 rows_failed.append(f"{signal_name}:missing_feature_vector")
                 continue
             except EmptyModelError:
                 rows_failed.append(f"{signal_name}:empty_model")
                 continue
+            except NotImplementedError:
+                rows_failed.append(f"{signal_name}:ensemble_unsupported")
+                continue
+
+            tracker = getattr(request.app.state, "latency_tracker", None)
+            if tracker is not None:
+                tracker.record_latency(
+                    signal_name, (time.perf_counter() - predict_started) * 1000.0
+                )
 
             # Queue for write
             meta = {
@@ -192,6 +214,9 @@ async def batch_predict(
                 "objective": payload.get("objective"),
                 "model_status_at_inference": model["status"],
                 "compute_run_id": body.compute_run_id,
+                "feature_versions_source": (
+                    "artifact" if payload.get("feature_versions") else "registry_latest"
+                ),
             }
             to_write.append((signal_id, symbol, signal_ts, value, meta))
 

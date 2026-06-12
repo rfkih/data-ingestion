@@ -2,15 +2,18 @@
 
 Researcher-facing surface goes through the orchestrator's proxy at
 ``:8082/inference/*``. This service is loopback-only — direct callers
-are the orchestrator and (eventually) the live-streaming worker cron.
+are the orchestrator and the live-streaming worker.
 
 Workflow (run):
   1. Resolve ``signal_id`` → ``signal_definition`` row.
   2. Resolve ``model_id`` → ``model_registry`` row (must have artifact_sha256).
-  3. Load the artifact from the local content-addressed store.
-  4. Fetch feature versions from ``feature_registry``.
-  5. Fetch per-bar values from ``feature_values`` at the requested ts.
-  6. Run ``Booster.predict()``.
+  3. Load the artifact from the local content-addressed store (cached,
+     content-verified, off the event loop).
+  4. Resolve feature versions — artifact-pinned when present, else
+     latest registered (``feature_registry``).
+  5. Fetch per-bar + global values from ``feature_values`` at the
+     requested ts.
+  6. Run ``Booster.predict()`` (off the event loop).
   7. UPSERT one row into ``signal_history``.
 
 Backfill is the same minus step 5 (range-query) + step 6 (batch) +
@@ -19,11 +22,14 @@ step 7 (batched UPSERT).
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
 
 import asyncpg
+import structlog
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
@@ -39,6 +45,8 @@ from ..services.predictor import (
     predict_single,
 )
 from .deps import get_agent_name, get_db_conn
+
+log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/inference", tags=["inference"])
 
@@ -148,33 +156,35 @@ async def _resolve_artifact(
     return signal, model
 
 
-@router.post("/run")
-async def run_inference(
-    body: RunBody,
-    request: Request,
-    conn: asyncpg.Connection = Depends(get_db_conn),
-    agent: str = Depends(get_agent_name),
+async def _load_artifact_payload(
+    request: Request, model: dict[str, Any]
 ) -> dict[str, Any]:
-    _validate_interval(body.interval_name)
+    """Cached artifact load off the event loop, mapped to stable envelopes.
 
-    signal, model = await _resolve_artifact(conn, body.signal_id)
-
-    # Load artifact + feature contract.
-    artifact_dir = request.app.state.settings.artifact_dir
+    Shared by /run and /backfill so both surface identical error codes —
+    the corrupt-artifact path previously fell through to a 500 on
+    backfill while /run returned 502 artifact_corrupt.
+    """
+    settings = request.app.state.settings
     try:
-        payload = read_artifact(model["artifact_sha256"], artifact_dir)
+        return await asyncio.to_thread(
+            read_artifact,
+            model["artifact_sha256"],
+            settings.artifact_dir,
+            verify_content=settings.artifact_verify_content,
+        )
     except FileNotFoundError as exc:
         raise InferenceError(
             status_code=502,
             error_code="artifact_file_missing",
             message=(
                 f"artifact sha={model['artifact_sha256']} registered but not "
-                f"on disk at {artifact_dir}. Re-sync the artifact."
+                f"on disk at {settings.artifact_dir}. Re-sync the artifact."
             ),
             retryable=False,
             details={"sha256": model["artifact_sha256"]},
         ) from exc
-    except ValueError as exc:  # sha mismatch / tamper
+    except ValueError as exc:  # unpickle failure / sha or content mismatch
         raise InferenceError(
             status_code=502,
             error_code="artifact_corrupt",
@@ -182,33 +192,82 @@ async def run_inference(
             retryable=False,
         ) from exc
 
+
+async def _resolve_feature_meta(
+    conn: asyncpg.Connection,
+    payload: dict[str, Any],
+    signal_name: str,
+) -> tuple[dict[str, features_repo.FeatureMeta], str]:
+    """Registry metadata for the model's inputs.
+
+    Returns ``(metas, versions_source)`` where versions_source is
+    ``'artifact'`` when the artifact pinned its training-time feature
+    versions, else ``'registry_latest'`` (pre-pinning artifacts) — the
+    fallback is logged because a re-registered feature can silently
+    change the model's inputs (train/serve skew).
+    """
     feature_names: list[str] = list(payload["feature_names"])
-    versions = await features_repo.fetch_feature_versions(conn, feature_names)
-    missing_versions = [n for n in feature_names if n not in versions]
-    if missing_versions:
+    pinned = payload.get("feature_versions") or None
+    metas = await features_repo.fetch_feature_meta(conn, feature_names, pinned)
+    missing = [n for n in feature_names if n not in metas]
+    if missing:
         raise InferenceError(
             status_code=409,
             error_code="feature_not_registered",
             message=(
-                f"{len(missing_versions)} feature(s) referenced by the model "
-                "are not in feature_registry (status=registered): "
-                f"{missing_versions[:10]}"
+                f"{len(missing)} feature(s) referenced by the model are not "
+                f"in feature_registry (status=registered): {missing[:10]}"
             ),
             retryable=False,
-            details={"missing": missing_versions},
+            details={"missing": missing},
         )
+    if pinned:
+        return metas, "artifact"
+    log.warning(
+        "inference.feature_versions_unpinned",
+        signal=signal_name,
+        n_features=len(feature_names),
+        hint="artifact predates feature_versions pinning; serving "
+             "latest-registered versions (train/serve skew possible on "
+             "re-registered features)",
+    )
+    return metas, "registry_latest"
+
+
+def _record_latency(request: Request, signal_name: str, started: float) -> None:
+    tracker = getattr(request.app.state, "latency_tracker", None)
+    if tracker is not None:
+        tracker.record_latency(signal_name, (time.perf_counter() - started) * 1000.0)
+
+
+@router.post("/run")
+async def run_inference(
+    body: RunBody,
+    request: Request,
+    conn: asyncpg.Connection = Depends(get_db_conn),
+    agent: str = Depends(get_agent_name),
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    _validate_interval(body.interval_name)
+
+    signal, model = await _resolve_artifact(conn, body.signal_id)
+    payload = await _load_artifact_payload(request, model)
+    metas, versions_source = await _resolve_feature_meta(
+        conn, payload, signal.get("name", str(body.signal_id))
+    )
 
     feature_vector = await features_repo.fetch_per_bar_values_at_ts(
         conn,
-        feature_names=feature_names,
-        versions=versions,
+        metas=metas,
         symbol=body.symbol,
         interval_name=body.interval_name,
         ts=body.ts,
     )
 
     try:
-        value, confidence = predict_single(payload, feature_vector)
+        value, confidence = await asyncio.to_thread(
+            predict_single, payload, feature_vector
+        )
     except MissingFeatureError as exc:
         # Don't UPSERT a row — the JVM consumer's fail-open contract
         # already handles signal absence; we must not fabricate one.
@@ -232,6 +291,15 @@ async def run_inference(
             message=str(exc),
             retryable=False,
         ) from exc
+    except NotImplementedError as exc:
+        raise InferenceError(
+            status_code=501,
+            error_code="ensemble_unsupported",
+            message=str(exc),
+            retryable=False,
+        ) from exc
+
+    _record_latency(request, signal.get("name", str(body.signal_id)), started)
 
     meta = {
         "model_id": str(model["id"]),
@@ -239,6 +307,7 @@ async def run_inference(
         "spec_name": payload.get("spec", {}).get("name"),
         "objective": payload.get("objective"),
         "model_status_at_inference": model["status"],
+        "feature_versions_source": versions_source,
     }
     await signals_repo.upsert_signal_value(
         conn,
@@ -301,40 +370,20 @@ async def run_backfill(
         )
 
     signal, model = await _resolve_artifact(conn, body.signal_id)
-    artifact_dir = request.app.state.settings.artifact_dir
-    try:
-        payload = read_artifact(model["artifact_sha256"], artifact_dir)
-    except FileNotFoundError as exc:
-        raise InferenceError(
-            status_code=502,
-            error_code="artifact_file_missing",
-            message=str(exc),
-            retryable=False,
-        ) from exc
-
-    feature_names: list[str] = list(payload["feature_names"])
-    versions = await features_repo.fetch_feature_versions(conn, feature_names)
-    missing_versions = [n for n in feature_names if n not in versions]
-    if missing_versions:
-        raise InferenceError(
-            status_code=409,
-            error_code="feature_not_registered",
-            message=f"{len(missing_versions)} feature(s) not in feature_registry.",
-            retryable=False,
-            details={"missing": missing_versions},
-        )
+    payload = await _load_artifact_payload(request, model)
+    metas, versions_source = await _resolve_feature_meta(
+        conn, payload, signal.get("name", str(body.signal_id))
+    )
 
     grid = await features_repo.fetch_per_bar_values_range(
         conn,
-        feature_names=feature_names,
-        versions=versions,
+        metas=metas,
         symbol=body.symbol,
         interval_name=body.interval_name,
         start=body.start,
         end=body.end,
     )
 
-    max_rows = request.app.state.settings.max_backfill_rows
     if len(grid) > max_rows:
         raise InferenceError(
             status_code=413,
@@ -349,7 +398,22 @@ async def run_backfill(
     rows: list[tuple[datetime, dict[str, float | None]]] = sorted(
         ((ts, vec) for ts, vec in grid.items()), key=lambda kv: kv[0]
     )
-    preds = predict_batch(payload, rows)
+    try:
+        preds = await asyncio.to_thread(predict_batch, payload, rows)
+    except EmptyModelError as exc:
+        raise InferenceError(
+            status_code=502,
+            error_code="artifact_corrupt",
+            message=str(exc),
+            retryable=False,
+        ) from exc
+    except NotImplementedError as exc:
+        raise InferenceError(
+            status_code=501,
+            error_code="ensemble_unsupported",
+            message=str(exc),
+            retryable=False,
+        ) from exc
 
     to_write: list[dict[str, Any]] = []
     skipped = 0
@@ -363,6 +427,8 @@ async def run_backfill(
                              "artifact_sha256": model["artifact_sha256"],
                              "spec_name": payload.get("spec", {}).get("name"),
                              "objective": payload.get("objective"),
+                             "model_status_at_inference": model["status"],
+                             "feature_versions_source": versions_source,
                          }})
 
     rows_written = 0
@@ -375,6 +441,10 @@ async def run_backfill(
             source=body.source,
             created_by=agent,
         )
+
+    # No latency recording here: the 100ms SLO is per-bar inference;
+    # a multi-thousand-bar window would always "violate" it and poison
+    # the p99. /run and /batch-predict cover the per-bar surface.
 
     return {
         "signal_id": str(body.signal_id),

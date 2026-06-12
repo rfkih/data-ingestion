@@ -37,10 +37,18 @@ class Database:
     """Thin asyncpg pool wrapper. Mirrors the orchestrator's shape so the
     two services have one ops surface."""
 
-    def __init__(self, dsn: str, *, min_size: int, max_size: int) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        min_size: int,
+        max_size: int,
+        command_timeout: float | None = None,
+    ) -> None:
         self._dsn = dsn
         self._min_size = min_size
         self._max_size = max_size
+        self._command_timeout = command_timeout
         self._pool: asyncpg.Pool | None = None
 
     async def open(self) -> None:
@@ -50,6 +58,7 @@ class Database:
             dsn=self._dsn,
             min_size=self._min_size,
             max_size=self._max_size,
+            command_timeout=self._command_timeout,
             init=_init_connection,
         )
 

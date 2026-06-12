@@ -22,6 +22,7 @@ from blackheart_inference.services.streaming import (
     _INTERVAL_SECONDS,
     StreamingTarget,
     find_gap_for_target,
+    next_backoff_seconds,
 )
 
 
@@ -127,6 +128,19 @@ async def test_4h_interval_works() -> None:
     assert gap is not None
     # 4h interval — next bar is last + 4h
     assert gap.start == last_signal + timedelta(hours=4)
+
+
+def test_backoff_doubles_and_caps_at_one_hour() -> None:
+    """A target whose backfill can never progress (permanently missing
+    feature, persistent HTTP error) must not re-run the full gap query
+    every tick forever — backoff doubles per consecutive failure and
+    caps at one hour."""
+    poll = 60
+    assert next_backoff_seconds(1, poll) == 120.0
+    assert next_backoff_seconds(2, poll) == 240.0
+    assert next_backoff_seconds(5, poll) == 1920.0
+    assert next_backoff_seconds(6, poll) == 3600.0   # cap reached
+    assert next_backoff_seconds(50, poll) == 3600.0  # stays capped (no overflow)
 
 
 def test_interval_seconds_map_pinned() -> None:

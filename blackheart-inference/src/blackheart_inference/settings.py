@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # active request is plenty for a single-worker uvicorn.
     db_min_pool: int = 1
     db_max_pool: int = 8
+    # Per-statement timeout. Without one, a wedged query holds a pooled
+    # connection forever. 120s comfortably covers the largest allowed
+    # backfill feature-fetch.
+    db_command_timeout_s: float = 120.0
+
+    # Recompute the artifact's content hash from the unpickled payload
+    # (single-booster artifacts) and refuse on mismatch. Escape hatch for
+    # a lightgbm version whose model_to_string output drifts from the
+    # training environment — see artifact_loader docstring.
+    artifact_verify_content: bool = True
 
     # Feature-fetch tuning. The backfill endpoint queries a range and can
     # blow up if the range is large — cap defensively.

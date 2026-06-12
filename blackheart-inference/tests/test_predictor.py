@@ -132,3 +132,24 @@ def test_predict_batch_skips_rows_with_missing_features() -> None:
 def test_predict_batch_empty_input() -> None:
     payload = _make_tiny_binary_payload()
     assert predict_batch(payload, []) == []
+
+
+def test_predict_single_treats_nan_as_missing() -> None:
+    """NaN would sail through LightGBM's missing-value handling and
+    silently predict down the default split path — it must be treated
+    exactly like an absent feature (no-imputation contract)."""
+    payload = _make_tiny_binary_payload()
+    with pytest.raises(MissingFeatureError) as exc_info:
+        predict_single(payload, {"f0": 1.0, "f1": float("nan")})
+    assert exc_info.value.missing == ["f1"]
+
+
+def test_predict_batch_treats_nan_as_missing() -> None:
+    payload = _make_tiny_binary_payload()
+    rows = [
+        ("t0", {"f0": 1.0, "f1": 1.0}),
+        ("t1", {"f0": float("nan"), "f1": 0.0}),
+    ]
+    out = predict_batch(payload, rows)
+    assert out[0][1] is not None
+    assert out[1][1] is None

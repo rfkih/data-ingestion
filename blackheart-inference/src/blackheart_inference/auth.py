@@ -10,6 +10,7 @@ onto ``request.state.agent_name`` for forensic logging.
 from __future__ import annotations
 
 import logging
+import secrets
 from typing import Awaitable, Callable
 
 from fastapi import Request
@@ -46,7 +47,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not token:
             return _envelope(401, "auth_missing_token",
                              "X-Inference-Token header is required.")
-        if token != self._settings.auth_token.get_secret_value():
+        expected = self._settings.auth_token.get_secret_value()
+        # compare_digest on bytes: constant-time, and byte-encoding avoids
+        # its non-ASCII str TypeError.
+        if not secrets.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
             logger.warning("auth_bad_token | path=%s agent=%s",
                            path, request.state.agent_name)
             return _envelope(401, "auth_bad_token",
