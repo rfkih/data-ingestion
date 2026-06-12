@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir ".[kafka]"
 
 # In-image defaults keep the container self-consistent with the
 # EXPOSE/HEALTHCHECK below even when ingest.env omits them (M10).
-ENV INGEST_SERVER_HOST=0.0.0.0 \n    INGEST_SERVER_PORT=8001
+ENV INGEST_SERVER_HOST=0.0.0.0 INGEST_SERVER_PORT=8001
 EXPOSE 8001
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
