@@ -35,6 +35,10 @@ dependencies = [
     # as blackheart-train so binary compatibility is preserved when an
     # artifact moves between repos.
     "lightgbm>=4.5,<5",
+    # Binance USDT-M futures liquidation stream (forceOrder accrual worker).
+    # Already a uvicorn[standard] transitive, but we import it directly so
+    # the dependency is explicit and pinned.
+    "websockets>=13,<17",
 ]
 
 [project.optional-dependencies]

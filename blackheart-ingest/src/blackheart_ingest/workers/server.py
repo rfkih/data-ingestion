@@ -16,6 +16,7 @@ POST /pull/{source}                            run a one-shot pull, blocks until
 POST /compute/{feature_name}/v/{version}       run one feature compute, blocks until complete
 POST /compute/incremental                      recompute all macro features over a lookback window
 GET  /features                                 list features registered in the Python definitions.py
+GET  /liquidation/status                       Binance forceOrder liquidation stream worker status
 
 Automatic compute loop
 ----------------------
@@ -42,7 +43,7 @@ from typing import Any
 from types import ModuleType
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import __version__
@@ -191,6 +192,7 @@ async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
     settings = settings_ref
     compute_task: asyncio.Task | None = None
     bar_consumer_task: asyncio.Task | None = None
+    liquidation_task: asyncio.Task | None = None
 
     if settings.compute_auto:
         compute_task = asyncio.create_task(
@@ -232,10 +234,38 @@ async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
             settings.kafka_bootstrap_servers, settings.kafka_group_id,
         )
 
+    if settings.liquidation_stream_enabled:
+        # Lazy import (mirrors the bar consumer) so the module is only a
+        # dependency of processes that actually stream.
+        from ..sources.binance_liquidation import (
+            LiquidationStreamState,
+            run_liquidation_stream,
+        )
+
+        liq_state = LiquidationStreamState(
+            enabled=True,
+            ws_url=settings.liquidation_ws_url,
+            flush_max_rows=settings.liquidation_flush_max_rows,
+            flush_seconds=settings.liquidation_flush_seconds,
+        )
+        # Exposed via GET /liquidation/status. Only attached when enabled --
+        # the endpoint reports a clear "disabled" payload otherwise.
+        app.state.liquidation = liq_state
+        liquidation_task = asyncio.create_task(
+            run_liquidation_stream(liq_state),
+            name="ingest-liquidation-stream",
+        )
+        logger.info(
+            "ingest liquidation stream enabled | url=%s flush_max_rows=%d flush_seconds=%.1f",
+            settings.liquidation_ws_url,
+            settings.liquidation_flush_max_rows,
+            settings.liquidation_flush_seconds,
+        )
+
     try:
         yield
     finally:
-        for task in (compute_task, bar_consumer_task):
+        for task in (compute_task, bar_consumer_task, liquidation_task):
             if task is not None:
                 task.cancel()
                 try:
@@ -274,6 +304,56 @@ def list_sources() -> dict[str, Any]:
             {"name": name, "implemented": bool(mod_path)}
             for name, mod_path in sorted(_KNOWN_SOURCES.items())
         ]
+    }
+
+
+def _iso(dt: Any) -> str | None:
+    return dt.isoformat() if dt is not None else None
+
+
+@app.get("/liquidation/status")
+def liquidation_status(request: Request) -> dict[str, Any]:
+    """Status of the Binance forceOrder liquidation accrual worker.
+
+    Read-only, no DB -- reflects the in-process ``LiquidationStreamState``
+    attached to ``app.state.liquidation`` by the lifespan hook (mirrors the
+    blackheart-inference ``GET /streaming/status`` convention). When the
+    worker is disabled the state is never attached and a clear "disabled"
+    payload is returned instead.
+    """
+    state = getattr(request.app.state, "liquidation", None)
+    if state is None:
+        return {
+            "enabled": False,
+            "reason": (
+                "liquidation stream disabled -- "
+                "set INGEST_LIQUIDATION_STREAM_ENABLED=true to start accruing"
+            ),
+        }
+    return {
+        "enabled": state.enabled,
+        "connected": state.connected,
+        "ws_url": state.ws_url,
+        "flush_max_rows": state.flush_max_rows,
+        "flush_seconds": state.flush_seconds,
+        "started_at": _iso(state.started_at),
+        "connected_at": _iso(state.connected_at),
+        "last_message_at": _iso(state.last_message_at),
+        "last_event_at": _iso(state.last_event_at),
+        "last_flush_at": _iso(state.last_flush_at),
+        "events_received": state.events_received,
+        "events_parsed": state.events_parsed,
+        "events_written": state.events_written,
+        "events_skipped_duplicate": state.events_skipped_duplicate,
+        "rows_buffered": state.rows_buffered,
+        "rows_dropped_overflow": state.rows_dropped_overflow,
+        "flushes": state.flushes,
+        "reconnect_count": state.reconnect_count,
+        "last_disconnect_at": _iso(state.last_disconnect_at),
+        "last_gap_seconds": state.last_gap_seconds,
+        "last_error": state.last_error,
+        "last_error_at": _iso(state.last_error_at),
+        "now": datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 

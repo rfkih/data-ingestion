@@ -61,6 +61,29 @@ POST /pull/{source}                  # one-shot pull, blocks until complete
   returns: {"source": "...", "rows_inserted": N, "rows_rejected_pit": M, ...}
 ```
 
+## Liquidation stream (always-on worker)
+
+`sources/binance_liquidation.py` accrues Binance USDT-M futures force
+liquidations from `wss://fstream.binance.com/ws/!forceOrder@arr` into
+`macro_raw` (source=`binance_liquidation`, series
+`binance_liquidation_<symbol_lower>`, value = notional USDT, ALL symbols).
+Liquidations are **not backfillable**, so the worker runs as an asyncio task
+inside the server lifespan with auto-reconnect (exponential backoff +
+jitter); every disconnect window is logged at WARN as permanently lost.
+
+Default **OFF** — deploying is inert until the operator sets:
+
+```
+INGEST_LIQUIDATION_STREAM_ENABLED=true      # master switch
+INGEST_LIQUIDATION_WS_URL=...               # optional override
+INGEST_LIQUIDATION_FLUSH_MAX_ROWS=200       # batch insert size trigger
+INGEST_LIQUIDATION_FLUSH_SECONDS=5          # batch insert time trigger
+```
+
+Health: `GET /liquidation/status` returns connected / last_event_at /
+events_written / reconnect_count etc. It is NOT a `/pull/{source}` source
+(no `fetch`), so it does not appear in `GET /sources`.
+
 ## Development
 
 ```powershell
