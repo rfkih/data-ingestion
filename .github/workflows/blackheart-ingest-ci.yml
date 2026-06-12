@@ -121,14 +121,24 @@ jobs:
 
       - name: Pull + recreate ingest container
         run: |
+          # Pull BEFORE rm: a failed pull must not leave the host with no
+          # container (a transient containerd error on 2026-06-12 removed the
+          # old container then failed the pull -> 53-min ingest outage + lost
+          # unbackfillable liquidation events). Pull first, then swap.
+          # Bind publish to loopback + Tailscale ONLY: 0.0.0.0 exposed the
+          # unauthenticated /pull + /compute mutation endpoints to the public
+          # internet (CODE_REVIEW_INGEST_2026-06-12 C1). VPS-local consumers
+          # (orchestrator, trading JVM) reach it by container name over the
+          # docker network; the home box reaches it over Tailscale.
           ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
-            "docker rm -f blackheart-ingest 2>/dev/null || true && \
-             docker pull ghcr.io/rfkih/blackheart-ingest:${NEW_TAG} && \
-             docker run -d --name blackheart-ingest --restart unless-stopped \
-               --network blackheart_default \
-               -p 8001:8001 \
-               --env-file /home/starsky/blackheart/ingest.env \
-               ghcr.io/rfkih/blackheart-ingest:${NEW_TAG}"
+            "docker pull ghcr.io/rfkih/blackheart-ingest:${NEW_TAG} && \
+             { docker rm -f blackheart-ingest 2>/dev/null || true; \
+               docker run -d --name blackheart-ingest --restart unless-stopped \
+                 --network blackheart_default \
+                 -p 127.0.0.1:8001:8001 \
+                 -p 100.112.13.126:8001:8001 \
+                 --env-file /home/starsky/blackheart/ingest.env \
+                 ghcr.io/rfkih/blackheart-ingest:${NEW_TAG}; }"
 
       - name: Ingest healthcheck (with rollback on failure)
         run: |
@@ -143,7 +153,8 @@ jobs:
               ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
                 "docker rm -f blackheart-ingest && docker run -d --name blackheart-ingest --restart unless-stopped \
                  --network blackheart_default \
-                 -p 8001:8001 \
+                 -p 127.0.0.1:8001:8001 \
+                 -p 100.112.13.126:8001:8001 \
                  --env-file /home/starsky/blackheart/ingest.env \
                  ghcr.io/rfkih/blackheart-ingest:${PREV_TAG}"
             fi
