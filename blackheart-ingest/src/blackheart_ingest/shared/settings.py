@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_group_id: str = "blackheart-ingest"
 
+    # Binance USDT-M futures liquidation stream (forceOrder accrual worker).
+    # Liquidations are NOT backfillable -- the worker accrues them live into
+    # macro_raw (source=binance_liquidation, all symbols). Default OFF so
+    # deploying the code is inert; set INGEST_LIQUIDATION_STREAM_ENABLED=true
+    # to start accruing (same pattern as the inference streaming worker).
+    liquidation_stream_enabled: bool = False
+    liquidation_ws_url: str = "wss://fstream.binance.com/ws/!forceOrder@arr"
+    liquidation_flush_max_rows: int = Field(default=200, ge=1, le=10_000)
+    liquidation_flush_seconds: float = Field(default=5.0, ge=0.5, le=300)
+
     def db_kwargs(self) -> dict[str, object]:
         """Connection keyword args for ``psycopg.connect(**kwargs)``.
 
