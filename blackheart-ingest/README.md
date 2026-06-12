@@ -64,7 +64,7 @@ POST /pull/{source}                  # one-shot pull, blocks until complete
 ## Liquidation stream (always-on worker)
 
 `sources/binance_liquidation.py` accrues Binance USDT-M futures force
-liquidations from `wss://fstream.binance.com/ws/!forceOrder@arr` into
+liquidations from `wss://fstream.binance.com/market/ws/!forceOrder@arr` into
 `macro_raw` (source=`binance_liquidation`, series
 `binance_liquidation_<symbol_lower>`, value = notional USDT, ALL symbols).
 Liquidations are **not backfillable**, so the worker runs as an asyncio task
