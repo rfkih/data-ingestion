@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     # deploying the code is inert; set INGEST_LIQUIDATION_STREAM_ENABLED=true
     # to start accruing (same pattern as the inference streaming worker).
     liquidation_stream_enabled: bool = False
-    liquidation_ws_url: str = "wss://fstream.binance.com/ws/!forceOrder@arr"
+    liquidation_ws_url: str = "wss://fstream.binance.com/market/ws/!forceOrder@arr"
     liquidation_flush_max_rows: int = Field(default=200, ge=1, le=10_000)
     liquidation_flush_seconds: float = Field(default=5.0, ge=0.5, le=300)
 

@@ -2,7 +2,7 @@
 
 Always-on accrual worker for the all-market force-liquidation websocket:
 
-    wss://fstream.binance.com/ws/!forceOrder@arr
+    wss://fstream.binance.com/market/ws/!forceOrder@arr
 
 Liquidation events are **not backfillable** -- Binance exposes no historical
 endpoint -- so every hour the stream is down is an hour of history lost
@@ -70,7 +70,10 @@ logger = logging.getLogger(__name__)
 name = "binance_liquidation"
 raw_table = "macro_raw"
 
-DEFAULT_WS_URL = "wss://fstream.binance.com/ws/!forceOrder@arr"
+# /market/ is REQUIRED (2026-04-23 Binance WS migration): forceOrder is a
+# "market"-category stream. The legacy /ws/ path still ACCEPTS connections
+# and acks SUBSCRIBE but pushes NO data -- it fails silently, not loudly.
+DEFAULT_WS_URL = "wss://fstream.binance.com/market/ws/!forceOrder@arr"
 
 # Reconnect backoff: initial x 2^n, capped, +/-50% jitter. Reset on connect.
 _BACKOFF_INITIAL_SECONDS = 1.0
