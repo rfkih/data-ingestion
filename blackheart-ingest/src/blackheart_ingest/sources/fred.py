@@ -60,34 +60,51 @@ _REVISED_SERIES: frozenset[str] = frozenset(
 )
 
 # PIT publication lag — days between a value's observation_date (the date
-# the data describes) and the date it was first publicly released.
-# fredapi.get_series_first_release returns values keyed by observation_date,
-# so we shift event_time forward by this lag to model "when this value
-# became publicly known". A backtest joining on event_time <= bar.start_time
-# would otherwise leak future macro releases backward.
+# FRED keys the value by) and the date it was first publicly released.
+# fredapi keys monthly/quarterly series by the FIRST DAY of the observed
+# period (May CPI -> 2026-05-01; Q1 GDP -> 2026-01-01), so the lag MUST
+# include the observation-period length on top of the agency's release
+# delay. The pre-2026-06-12 constants were estimated from the period END —
+# systematically too small by ~a month (quarterlies: ~a quarter): May CPI
+# got event_time 2026-05-15 while the real BLS release is ~June 10, a
+# ~26-day macro look-ahead leak into every CPI-derived feature.
 #
-# Values are conservative (err high) — actual first-release timing varies
-# month-to-month. For series not in this map, lag=0 means the value is
-# considered public on its observation_date (true for DXY, VIX, daily yields).
+# Values are conservative (err HIGH — a too-late event_time only delays
+# visibility; a too-early one leaks the future).
 #
-# Sources for the lag estimates:
-#   - CPIAUCSL  ~ 14d   BLS Consumer Price Index, mid-month release
-#   - M2SL      ~ 28d   H.6 monthly money supply
-#   - GDPC1/GDP ~ 28d   BEA advance estimate, end of next month
-#   - UNRATE    ~ 7d    BLS Employment Situation, first Friday of next month
-#   - PAYEMS    ~ 7d    same release as UNRATE
-#   - PCE/PCEC96 ~ 28d  BEA Personal Income & Outlays, end of next month
+# Lag anatomy (anchor = period start):
+#   - CPIAUCSL  ~ 45d   month (30d) + BLS CPI release mid-following-month
+#   - M2SL/M2   ~ 56d   month + H.6 release ~4th Tuesday of following month
+#   - GDPC1/GDP ~ 120d  quarter (90d) + BEA advance estimate ~end of next month
+#   - UNRATE    ~ 38d   month + Employment Situation, first Friday next month
+#   - PAYEMS    ~ 38d   same release as UNRATE
+#   - PCE/PCEC96 ~ 60d  month + BEA Personal Income & Outlays, end of next month
+#
+# DAILY series are anchored at midnight of the observation day, but the
+# day-D close is not public until end-of-day — lag 1d. DTWEXBGS is an H.10
+# series published roughly A WEEK in arrears (the old "lag=0 is true for
+# DXY" comment was factually wrong) — lag 7d.
 _PUBLICATION_LAG_DAYS: dict[str, int] = {
-    "CPIAUCSL": 14,
-    "M2SL": 28,
-    "M2": 28,
-    "GDPC1": 28,
-    "GDP": 28,
-    "UNRATE": 7,
-    "PAYEMS": 7,
-    "PCE": 28,
-    "PCEC96": 28,
+    "CPIAUCSL": 45,
+    "M2SL": 56,
+    "M2": 56,
+    "GDPC1": 120,
+    "GDP": 120,
+    "UNRATE": 38,
+    "PAYEMS": 38,
+    "PCE": 60,
+    "PCEC96": 60,
+    "DTWEXBGS": 7,
+    "VIXCLS": 1,
+    "DFII10": 1,
+    "DGS10": 1,
+    "DGS2": 1,
+    "T10Y2Y": 1,
 }
+
+# Unknown series: 1 day, NOT 0 — a daily close is knowable no earlier than
+# end-of-day, and err-high is the safe direction for PIT.
+_DEFAULT_LAG_DAYS = 1
 
 # FRED publishes most series same-day after release. 72h max-backfill-lag is
 # generous — anything older means we missed a tick. Matches V67 seed config.
@@ -95,7 +112,7 @@ _PIT_CONFIG = PitConfig(max_backfill_lag_hours=72)
 
 
 def _publication_lag(series_id: str) -> int:
-    return _PUBLICATION_LAG_DAYS.get(series_id.upper(), 0)
+    return _PUBLICATION_LAG_DAYS.get(series_id.upper(), _DEFAULT_LAG_DAYS)
 
 
 @retry(
@@ -200,7 +217,12 @@ def fetch(request: IngestionRequest) -> IngestionResult:
         update_source_health(name, success=False, error_message=msg)
         raise ValueError(msg)
 
-    use_vintage_global: bool = bool(config.get("use_alfred_vintage", False))
+    # Default TRUE (2026-06-12): the plain-FRED path returns TODAY'S fully
+    # revised values, which a historical backfill then stamps as if they
+    # were first prints — textbook revision leakage. ALFRED first-release
+    # is the PIT-honest default for the revision-prone series; operators
+    # can still opt out per pull via config.
+    use_vintage_global: bool = bool(config.get("use_alfred_vintage", True))
 
     started = time.monotonic()
     now = datetime.utcnow()

@@ -2,16 +2,33 @@
 
 Three steps per feature:
 
-1. **Read** the requested ``series_id`` values from the raw tables in the
-   declared time window. Today only ``macro_raw`` is supported.
+1. **Read** the requested ``series_id`` values from the raw tables over
+   ``[start - lookback, end]`` — the feature's declared ``lookback_hours``
+   pads the read window so rolling transformers see full history at
+   ``start`` (see WARM-UP CONTRACT below).
 2. **Pivot** the long rows into a wide DataFrame indexed by ``event_time``,
    with one column per ``series_id``. Forward-fill per the feature's
    ``ffill_policy`` (capped by ``max_ffill_age_hours`` — older holes stay
    NaN, not silently extended).
-3. **Transform** by invoking the registered transformer, then **PIT
-   validate** the output: no row's ``ts`` may sit earlier than the latest
-   ``ingestion_time`` of its inputs. (Engine doesn't trust the
-   transformer's ``pit_safe`` claim — it checks.)
+3. **Transform** by invoking the registered transformer, then drop NaN and
+   non-finite values and trim the warm-up region (rows before ``start``).
+
+PIT discipline note: the compute layer does NOT re-validate PIT — that is
+enforced at ingest (``shared.pit_guards``) and at query time (downstream
+joins on ``event_time <= bar.start_time``). For revision-prone publishers
+(FRED), ``_pivot_wide`` keeps the FIRST-ingested value per
+``(series_id, event_time)`` so recomputes can't silently bake later
+revisions into history a backtest treats as known-at-event-time.
+
+── WARM-UP CONTRACT (2026-06-12, fixes the truncated-window bug) ──
+Before this contract, every driver read exactly ``[start, end]`` and the
+``ON CONFLICT DO UPDATE`` upsert meant each timestamp's PERMANENT value
+was whatever the most truncated sliding window computed last — e.g.
+``btc_funding_sign_streak`` degenerated to ±1 everywhere and the 90-day
+percentile ranks became 30-day ranks on the live edge. Now ``compute``
+reads ``feat.lookback_hours`` of extra history before ``start`` and
+discards output rows earlier than ``start``, so a 72h incremental window
+produces values IDENTICAL to a full recompute.
 
 Output is a tidy DataFrame ``[ts, value, version, name, family]`` so callers
 can concat across features and write to whatever backend they choose.
@@ -22,6 +39,7 @@ import logging
 import sys
 from datetime import datetime, timedelta
 
+import numpy as np
 import pandas as pd
 import psycopg
 
@@ -181,7 +199,9 @@ def _read_market_data_wide(
     if not rows:
         return pd.DataFrame(columns=list(_MARKET_DATA_COLS))
     df = pd.DataFrame(rows)
-    df["start_time"] = pd.to_datetime(df["start_time"])
+    # Same tz normalization as _read_raw_long: if start_time ever becomes
+    # timestamptz, the index stays naive-UTC per the platform convention.
+    df["start_time"] = pd.to_datetime(df["start_time"], utc=True).dt.tz_convert(None)
     df = df.set_index("start_time").sort_index()
     for col in _MARKET_DATA_COLS:
         if col in df.columns:
@@ -194,11 +214,15 @@ def _pivot_wide(
     feat: FeatureDef,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Pivot to wide ``[event_time × series_id]`` for values and a parallel
-    ``[event_time × series_id]`` of ``ingestion_time`` for PIT validation.
+    ``[event_time × series_id]`` of ``ingestion_time``.
 
     When a series publishes multiple values at the same ``event_time``
-    (revisions), the latest by ``ingestion_time`` wins — that's what an
-    operator looking at the wide table "now" would see.
+    (revisions — e.g. FRED/ALFRED vintages with distinct source_uris), the
+    EARLIEST by ``ingestion_time`` wins. keep="first" is the PIT-correct
+    choice: the first-ingested row approximates the first public print,
+    while keep="last" (the pre-2026-06-12 behaviour) baked the latest
+    revision into history that backtests then treated as known at the
+    original event_time — revision look-ahead.
     """
     if long_df.empty:
         return (
@@ -208,7 +232,7 @@ def _pivot_wide(
 
     long_df = long_df.sort_values(["series_id", "event_time", "ingestion_time"])
     deduped = long_df.drop_duplicates(
-        subset=["series_id", "event_time"], keep="last"
+        subset=["series_id", "event_time"], keep="first"
     )
 
     value_wide = deduped.pivot(index="event_time", columns="series_id", values="value")
@@ -330,13 +354,19 @@ def compute(
         )
     table = feat.raw_tables[0]
 
+    # WARM-UP CONTRACT (module docstring): pad the read window back by the
+    # feature's declared lookback so rolling transformers see full history
+    # at ``start``; the warm-up rows are trimmed from the output below.
+    lookback_hours = getattr(feat, "lookback_hours", 0) or 0
+    read_start = start - timedelta(hours=lookback_hours)
+
     owned = conn is None
     if owned:
         ctx = get_connection()
         conn = ctx.__enter__()
     try:
         if table == "macro_raw":
-            wide_df = _compute_from_macro_raw(conn, feat, start, end)
+            wide_df = _compute_from_macro_raw(conn, feat, read_start, end)
         elif table == "market_data":
             if not symbol or not interval:
                 raise FeatureComputeError(
@@ -352,7 +382,9 @@ def compute(
                     f"OHLCV columns: {bad_cols}. Known columns: "
                     f"{list(_MARKET_DATA_COLS)}"
                 )
-            wide_df = _compute_from_market_data(conn, feat, symbol, interval, start, end)
+            wide_df = _compute_from_market_data(
+                conn, feat, symbol, interval, read_start, end
+            )
         elif table == "orderbook_snapshots":
             if not symbol or not interval:
                 raise FeatureComputeError(
@@ -366,7 +398,7 @@ def compute(
                     f"known OB columns: {bad_cols}. Known columns: "
                     f"{list(_ORDERBOOK_COLS)}"
                 )
-            wide_df = _read_orderbook_wide(conn, symbol, interval, start, end)
+            wide_df = _read_orderbook_wide(conn, symbol, interval, read_start, end)
             if wide_df.empty:
                 wide_df = None
         else:
@@ -405,6 +437,23 @@ def compute(
             "expected pandas.Series"
         )
     output = raw_output.dropna()
+    # Drop +/-inf BEFORE persistence: pd.notna(inf) is True and Postgres
+    # float8 happily stores 'Infinity' — e.g. ofi_momentum on a
+    # zero-taker-volume bar produced (r - 0)/0 = +inf rows that poisoned
+    # inference vectors downstream.
+    finite_mask = np.isfinite(output.to_numpy(dtype="float64", na_value=np.nan))
+    n_nonfinite = int((~finite_mask).sum())
+    if n_nonfinite:
+        logger.warning(
+            "feature=%s dropped %d non-finite (inf) output rows",
+            feat.name, n_nonfinite,
+        )
+        output = output[finite_mask]
+    # Trim the warm-up region: rows before the requested ``start`` were
+    # computed only to give rolling windows full history and must not be
+    # persisted (they themselves sit on truncated history).
+    if lookback_hours:
+        output = output[output.index >= start]
     _validate_pit(output, None, feat)
 
     tidy = pd.DataFrame(

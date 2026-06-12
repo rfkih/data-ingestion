@@ -48,6 +48,14 @@ jobs:
         working-directory: blackheart-ingest
         run: pytest -q --ignore=tests/test_inference.py --ignore=tests/test_train_ingest_equivalence.py
 
+      # H8 (CODE_REVIEW_INGEST_2026-06-12): boot the SERVED app
+      # (workers.server:app) WITH its lifespan so a broken lifespan import /
+      # route table fails CI - the old suite only exercised the dead api/
+      # app, which is how 'CI green, served app broken' kept happening.
+      - name: Smoke-boot served app (lifespan)
+        working-directory: blackheart-ingest
+        run: pytest -q tests/test_server_app.py
+
   build-image:
     name: Build + push GHCR image
     needs: test
@@ -87,7 +95,8 @@ jobs:
   deploy-ingest:
     name: Deploy ingest to VPS (docker)
     needs: build-image
-    if: ${{ vars.DEPLOY_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
+    # L9 fix: manual dispatch used to BYPASS the DEPLOY_ENABLED gate.
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     environment: production-vps
@@ -137,6 +146,7 @@ jobs:
                  --network blackheart_default \
                  -p 127.0.0.1:8001:8001 \
                  -p 100.112.13.126:8001:8001 \
+                 --stop-timeout 120 \
                  --env-file /home/starsky/blackheart/ingest.env \
                  ghcr.io/rfkih/blackheart-ingest:${NEW_TAG}; }"
 
@@ -155,6 +165,7 @@ jobs:
                  --network blackheart_default \
                  -p 127.0.0.1:8001:8001 \
                  -p 100.112.13.126:8001:8001 \
+                 --stop-timeout 120 \
                  --env-file /home/starsky/blackheart/ingest.env \
                  ghcr.io/rfkih/blackheart-ingest:${PREV_TAG}"
             fi

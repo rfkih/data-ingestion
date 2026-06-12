@@ -155,11 +155,18 @@ class FeatureStreamProcessor:
         async with self.producer_client as producer:
             async for message in self.consumer:
                 try:
-                    if not message:
+                    if not message or not message.value:
                         continue
 
-                    # Parse market bar from JSON
-                    bar_data = json.loads(message)
+                    # Parse market bar from JSON. M8 fix (2026-06-12):
+                    # ``async for`` yields a ConsumerRecord — json.loads(message)
+                    # raised TypeError on EVERY message, which the blanket
+                    # except below swallowed: the processor consumed (and
+                    # auto-committed) every bar while publishing nothing,
+                    # forever, with no crash to alert anyone. (Not wired into
+                    # the served app yet; fixed so enabling it doesn't ship
+                    # broken.)
+                    bar_data = json.loads(message.value)
                     bar = MarketBarEvent(**bar_data)
 
                     # Compute features

@@ -57,6 +57,17 @@ class FeatureDef:
     max_ffill_age_hours: int | None = None
     description: str = ""
 
+    # WARM-UP CONTRACT (compute.py module docstring): how many hours of
+    # history BEFORE the requested window start the transformer needs to
+    # produce a correct value AT the window start. The engine pads its read
+    # window by this and trims the warm-up rows from the output. 0 (default)
+    # = point-in-time transform (ratios, spreads) needing no history.
+    # Rolling/cumulative transformers MUST declare this or their values
+    # silently degrade to truncated-window math on incremental runs (the
+    # pre-2026-06-12 bug that flattened btc_funding_sign_streak to ±1 and
+    # turned 90d percentile ranks into 30d ranks on the live edge).
+    lookback_hours: int = 0
+
     # Where the inputs live. ``("macro_raw",)`` (default) is the long-format
     # publisher-event store with ``series_id``/``event_time``/``value`` rows
     # — the engine pivots before calling the transformer.
@@ -147,7 +158,10 @@ def _change_pct(col: str, periods: int) -> Callable[[pd.DataFrame], pd.Series]:
     """
 
     def _impl(df: pd.DataFrame) -> pd.Series:
-        return df[col].astype("float64").pct_change(periods=periods)
+        # fill_method=None: pandas' default pad-fill would forward-fill
+        # NaN holes before differencing, fabricating 0% changes across
+        # gaps the max_ffill_age_hours cap deliberately preserved.
+        return df[col].astype("float64").pct_change(periods=periods, fill_method=None)
 
     return _impl
 
@@ -223,7 +237,7 @@ def _sum_then_change_pct(
 
     def _impl(df: pd.DataFrame) -> pd.Series:
         summed = df[list(cols)].sum(axis=1, min_count=1).astype("float64")
-        return summed.pct_change(periods=periods)
+        return summed.pct_change(periods=periods, fill_method=None)
 
     return _impl
 
@@ -239,7 +253,7 @@ def _ratio_momentum(
         num = df[num_col].astype("float64")
         den = df[den_col].astype("float64")
         ratio = num / den.where(den != 0)
-        return ratio.pct_change(periods=periods)
+        return ratio.pct_change(periods=periods, fill_method=None)
 
     return _impl
 
@@ -353,7 +367,7 @@ def _acceleration(col: str, periods: int) -> Callable[[pd.DataFrame], pd.Series]
 
     def _impl(df: pd.DataFrame) -> pd.Series:
         s = df[col].astype("float64")
-        velocity = s.pct_change(periods=periods)
+        velocity = s.pct_change(periods=periods, fill_method=None)
         return velocity.diff(periods=periods)
 
     return _impl
@@ -451,7 +465,7 @@ def _ofi_momentum(periods: int) -> Callable[[pd.DataFrame], pd.Series]:
         vol = df["volume"].astype("float64")
         buy = df["taker_buy_base_volume"].astype("float64")
         ratio = buy / vol.where(vol > 0)
-        return ratio.pct_change(periods=periods)
+        return ratio.pct_change(periods=periods, fill_method=None)
 
     return _impl
 
@@ -565,6 +579,36 @@ def _ob_spread_rolling_zscore(window: int, min_periods: int) -> Callable[[pd.Dat
         mean = spread.rolling(window, min_periods=min_periods).mean()
         std = spread.rolling(window, min_periods=min_periods).std()
         return (spread - mean) / std.where(std > 0)
+
+    return _impl
+
+
+def _daily_resampled_diff(col: str, days: int) -> Callable[[pd.DataFrame], pd.Series]:
+    """Absolute change of ``col`` over ``days`` CALENDAR days, cadence-proof.
+
+    Resamples to daily-last before differencing so the window means the
+    same thing whether the source published hourly (CoinGecko market_chart
+    windows <= 90d) or daily (deep backfills). Output is on the daily grid.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        daily = df[col].astype("float64").resample("1D").last()
+        return daily.diff(periods=days)
+
+    return _impl
+
+
+def _daily_resampled_ratio_momentum(
+    num_col: str, den_col: str, days: int
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """``days``-calendar-day % change of ``num_col / den_col``, cadence-proof
+    (see _daily_resampled_diff). Zero denominators mask to NaN."""
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        num = df[num_col].astype("float64").resample("1D").last()
+        den = df[den_col].astype("float64").resample("1D").last()
+        ratio = num / den.where(den != 0)
+        return ratio.pct_change(periods=days, fill_method=None)
 
     return _impl
 
@@ -920,6 +964,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="dxy_zscore_30d",
+        lookback_hours=1080,
         version=1,
         family="macro",
         inputs=("DTWEXBGS",),
@@ -943,6 +988,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="real_yield_10y_change_20d",
+        lookback_hours=720,
         version=1,
         family="macro",
         inputs=("DFII10",),
@@ -953,6 +999,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="dxy_zscore_252d",
+        lookback_hours=9000,
         version=1,
         family="macro",
         inputs=("DTWEXBGS",),
@@ -963,6 +1010,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="dxy_momentum_20d",
+        lookback_hours=720,
         version=1,
         family="macro",
         inputs=("DTWEXBGS",),
@@ -973,6 +1021,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="vix_percentile_252d",
+        lookback_hours=9000,
         version=1,
         family="macro",
         inputs=("VIXCLS",),
@@ -1004,6 +1053,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_funding_zscore_30d",
+        lookback_hours=840,
         version=1,
         family="positioning",
         # Funding publishes every 8h -> 30d = 90 rows.
@@ -1015,6 +1065,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_oi_change_24h_pct",
+        lookback_hours=48,
         version=1,
         family="positioning",
         # OI published hourly -> 24h = 24 rows.
@@ -1036,6 +1087,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="topls_ratio_change_24h",
+        lookback_hours=48,
         version=1,
         family="positioning",
         # Top L/S published hourly -> 24h = 24 rows.
@@ -1048,6 +1100,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     # ── funding_regime_v1 features (V121) ─────────────────────────────────
     FeatureDef(
         name="btc_funding_sign_streak",
+        lookback_hours=2160,
         version=1,
         family="positioning",
         inputs=("binance_funding_rate_btcusdt",),
@@ -1061,6 +1114,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_funding_percentile_30d",
+        lookback_hours=840,
         version=1,
         family="positioning",
         # 30 days at 8h cadence = 90 rows.
@@ -1077,6 +1131,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     # ── Blueprint § 5.3: Flows (2 of 4 — exchange netflows need paid CM) ──
     FeatureDef(
         name="stablecoin_supply_change_7d",
+        lookback_hours=240,
         version=1,
         family="flow",
         inputs=("stablecoin_usdt_circulating_usd", "stablecoin_usdc_circulating_usd"),
@@ -1090,6 +1145,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="stablecoin_supply_change_30d",
+        lookback_hours=840,
         version=1,
         family="flow",
         inputs=("stablecoin_usdt_circulating_usd", "stablecoin_usdc_circulating_usd"),
@@ -1104,10 +1160,11 @@ FEATURES: tuple[FeatureDef, ...] = (
     # ── Blueprint § 5.4: Market structure (2 of 4 — perp_basis + realized_vol deferred) ──
     FeatureDef(
         name="btc_dominance_change_7d",
+        lookback_hours=240,
         version=1,
         family="market_structure",
         inputs=("btc_dominance_pct",),
-        transformer=_change_diff("btc_dominance_pct", periods=7),
+        transformer=_daily_resampled_diff("btc_dominance_pct", days=7),
         ffill_policy="last_value",
         max_ffill_age_hours=24,
         description="7-period absolute change in BTC market-cap dominance (% points). "
@@ -1115,10 +1172,13 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="eth_btc_ratio_momentum_20d",
+        lookback_hours=600,
         version=1,
         family="market_structure",
         inputs=("ethereum_price_usd", "bitcoin_price_usd"),
-        transformer=_ratio_momentum("ethereum_price_usd", "bitcoin_price_usd", periods=20),
+        transformer=_daily_resampled_ratio_momentum(
+            "ethereum_price_usd", "bitcoin_price_usd", days=20
+        ),
         ffill_policy="last_value",
         max_ffill_age_hours=24,
         description="20-period % change in the ETH/BTC price ratio. CoinGecko cadence-dependent.",
@@ -1169,6 +1229,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_dvol_zscore_30d",
+        lookback_hours=768,
         version=1,
         family="market_structure",
         # DVOL hourly cadence → 30 days = 720 rows.
@@ -1183,6 +1244,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="eth_dvol_zscore_30d",
+        lookback_hours=768,
         version=1,
         family="market_structure",
         inputs=("deribit_eth_dvol",),
@@ -1196,6 +1258,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     # ── Blueprint § 5.4 (continued): from market_data ─────────────────
     FeatureDef(
         name="btc_realized_vol_30d",
+        lookback_hours=2920,
         version=1,
         family="market_structure",
         # The "input" here is a COLUMN of market_data (close_price) rather
@@ -1225,6 +1288,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     # These match the four entries in DERIVED_FEATURES on the train side.
     FeatureDef(
         name="btc_log_return_24h",
+        lookback_hours=120,
         version=1,
         family="technical",
         inputs=("close_price",),
@@ -1248,6 +1312,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_realized_vol_7d",
+        lookback_hours=700,
         version=1,
         family="technical",
         inputs=("close_price",),
@@ -1274,6 +1339,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_volume_zscore_24h",
+        lookback_hours=120,
         version=1,
         family="technical",
         inputs=("volume",),
@@ -1299,6 +1365,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     # (RUN_SUMMARY a957d7cf). Stamped on BTCUSDT + ETHUSDT 1h bars.
     FeatureDef(
         name="btc_rsi_14_1h",
+        lookback_hours=96,
         version=1,
         family="technical",
         inputs=("close_price",),
@@ -1315,6 +1382,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_atr_ratio_14_24",
+        lookback_hours=192,
         version=1,
         family="technical",
         # _atr_ratio reads high/low/close internally; declare all three
@@ -1332,6 +1400,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_log_return_1h",
+        lookback_hours=24,
         version=1,
         family="technical",
         inputs=("close_price",),
@@ -1346,6 +1415,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_log_return_4h",
+        lookback_hours=48,
         version=1,
         family="technical",
         inputs=("close_price",),
@@ -1360,6 +1430,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_volume_zscore_4h",
+        lookback_hours=48,
         version=1,
         family="technical",
         inputs=("volume",),
@@ -1374,6 +1445,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="eth_btc_corr_24h",
+        lookback_hours=72,
         version=1,
         family="cross_asset",
         inputs=("close_price",),
@@ -1458,6 +1530,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="label_meanrev_24h",
+        lookback_hours=48,
         version=1,
         family="label",
         # Needs OHLC for ATR_14. Declares high_price/low_price/close_price
@@ -1476,6 +1549,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="label_triple_barrier",
+        lookback_hours=48,
         version=1,
         family="label",
         inputs=("close_price", "high_price", "low_price"),
@@ -1502,6 +1576,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     # Rank 4 — Taker imbalance momentum (zero new raw data, highest ROI)
     FeatureDef(
         name="btc_taker_imbalance_momentum_8h",
+        lookback_hours=48,
         version=1,
         family="positioning",
         inputs=("binance_taker_buy_sell_ratio_btcusdt_4h",),
@@ -1528,6 +1603,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     # Rank 3 — OI term-structure acceleration (zero new raw data)
     FeatureDef(
         name="btc_oi_accel_4h",
+        lookback_hours=24,
         version=1,
         family="positioning",
         inputs=("binance_open_interest_btcusdt_1h",),
@@ -1541,6 +1617,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     # Rank 2 — On-chain free metrics (data already in DB via coinmetrics source)
     FeatureDef(
         name="btc_hashrate_momentum_30d",
+        lookback_hours=840,
         version=1,
         family="onchain",
         inputs=("coinmetrics_btc_hashrate",),
@@ -1552,6 +1629,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_active_addr_momentum_14d",
+        lookback_hours=432,
         version=1,
         family="onchain",
         inputs=("coinmetrics_btc_adractcnt",),
@@ -1563,6 +1641,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="btc_txcnt_zscore_30d",
+        lookback_hours=840,
         version=1,
         family="onchain",
         inputs=("coinmetrics_btc_txcnt",),
@@ -1591,6 +1670,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="ofi_zscore_24h",
+        lookback_hours=120,
         version=1,
         family="microstructure",
         inputs=("volume", "taker_buy_base_volume"),
@@ -1606,6 +1686,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="ofi_momentum_8h",
+        lookback_hours=48,
         version=1,
         family="microstructure",
         inputs=("volume", "taker_buy_base_volume"),
@@ -1620,6 +1701,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="cvd_proxy_zscore_24h",
+        lookback_hours=120,
         version=1,
         family="microstructure",
         inputs=("volume", "taker_buy_base_volume"),
@@ -1643,6 +1725,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     #     "cvd_proxy_pctrank_90d"],"incremental":false}
     FeatureDef(
         name="ofi_ratio_pctrank_90d",
+        lookback_hours=8640,
         version=1,
         family="microstructure",
         inputs=("volume", "taker_buy_base_volume"),
@@ -1658,6 +1741,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="cvd_proxy_pctrank_90d",
+        lookback_hours=8640,
         version=1,
         family="microstructure",
         inputs=("volume", "taker_buy_base_volume"),
@@ -1705,6 +1789,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="ob_spread_zscore_24h",
+        lookback_hours=120,
         version=1,
         family="microstructure",
         inputs=("best_bid", "best_ask"),
@@ -1747,6 +1832,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="ob_imbalance_momentum_8h_btc",
+        lookback_hours=96,
         version=1,
         family="microstructure",
         inputs=("binance_ob_imbalance_btcusdt",),
@@ -1780,6 +1866,7 @@ FEATURES: tuple[FeatureDef, ...] = (
     ),
     FeatureDef(
         name="ob_imbalance_momentum_8h_eth",
+        lookback_hours=96,
         version=1,
         family="microstructure",
         inputs=("binance_ob_imbalance_ethusdt",),

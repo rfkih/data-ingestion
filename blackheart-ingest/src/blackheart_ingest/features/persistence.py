@@ -37,6 +37,31 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BY = "blackheart-ingest:compute"
 
 
+def acquire_feature_lock(conn: psycopg.Connection, key: str) -> None:
+    """Blocking SESSION-scoped PG advisory lock keyed by feature identity.
+
+    Serialises the five concurrent writers of the same ``feature_values``
+    rows (auto loop, pull-triggered /compute/incremental, the per-feature
+    endpoint, the CLI, the bar-event consumer) ACROSS processes — without
+    it, a slow reader committing last overwrote fresher values with ones
+    computed from pre-pull raw data (M3, 2026-06-12). Session locks
+    auto-release when the connection closes, so the ``with
+    get_connection()`` pattern every caller uses guarantees release even
+    on crash paths.
+    """
+    with conn.cursor() as cur:
+        # Release any lock this session already holds first: the CLI reuses
+        # ONE connection across its whole feature loop (with many `continue`
+        # paths), and without this it would accumulate session locks on
+        # every feature it has touched — blocking the server-side writers
+        # for the duration of a multi-hour backfill. Server callers open a
+        # fresh connection per feature, so this is a no-op for them.
+        cur.execute("SELECT pg_advisory_unlock_all()")
+        cur.fetchone()
+        cur.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
+        cur.fetchone()
+
+
 def start_run(
     feat: FeatureDef,
     *,

@@ -29,7 +29,7 @@ def test_fetch_dvol_builds_macro_raw_rows():
     candles = [_candle(base, 60.0), _candle(base + hour, 61.0), _candle(base + 2 * hour, 62.0)]
 
     with patch("blackheart_ingest.sources.deribit._http_get", return_value=_page(candles)) as mock_get:
-        rows = deribit._fetch_dvol(None, "BTC", start, end, 3600, now)
+        rows, _truncated = deribit._fetch_dvol(None, "BTC", start, end, 3600, now)
 
     assert mock_get.called
     assert len(rows) == 3
@@ -61,7 +61,7 @@ def test_fetch_dvol_dedupes_and_filters_window():
     candles = [_candle(base, 60.0), _candle(base + hour, 61.0), _candle(base + hour, 61.0)]
 
     with patch("blackheart_ingest.sources.deribit._http_get", return_value=_page(candles)):
-        rows = deribit._fetch_dvol(None, "ETH", start, end, 3600, now)
+        rows, _truncated = deribit._fetch_dvol(None, "ETH", start, end, 3600, now)
 
     assert len(rows) == 1
     assert rows[0]["series_id"] == "deribit_eth_dvol"
@@ -79,7 +79,7 @@ def test_fetch_dvol_pages_backward_until_start():
     page2 = _page([_candle(base, 60.0), _candle(base + hour, 61.0), _candle(base + 2 * hour, 62.0)])
 
     with patch("blackheart_ingest.sources.deribit._http_get", side_effect=[page1, page2]) as mock_get:
-        rows = deribit._fetch_dvol(None, "BTC", start, end, 3600, now)
+        rows, _truncated = deribit._fetch_dvol(None, "BTC", start, end, 3600, now)
 
     # Two pages requested; 4 unique bars after dedup of the overlapping 02:00.
     assert mock_get.call_count == 2
@@ -102,6 +102,6 @@ def test_fetch_dvol_empty_response_stops():
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     end = datetime(2024, 1, 2, tzinfo=timezone.utc)
     with patch("blackheart_ingest.sources.deribit._http_get", return_value=_page([])) as mock_get:
-        rows = deribit._fetch_dvol(None, "BTC", start, end, 3600, now)
+        rows, _truncated = deribit._fetch_dvol(None, "BTC", start, end, 3600, now)
     assert rows == []
     assert mock_get.call_count == 1

@@ -31,6 +31,7 @@ from typing import Any
 
 import httpx
 from tenacity import (
+    retry_if_exception,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
@@ -38,6 +39,7 @@ from tenacity import (
 )
 
 from ..shared.base import IngestionRequest, IngestionResult
+from ..shared.binance_http import binance_should_retry
 from ..shared.db import content_hash, get_connection, update_source_health, write_macro_raw_rows
 from ..shared.pit_guards import PitConfig, partition_by_pit
 
@@ -66,7 +68,11 @@ _MAX_PAGES = 2000  # ~2M bars cap — well above any realistic backfill
     reraise=True,
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=2, min=2, max=30),
-    retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
+    # Ban-safe policy (shared.binance_http): retry transport/5xx only —
+    # HTTPStatusError is a subclass of HTTPError, so the old predicate
+    # blindly retried 429/418 and risked an IP ban on the SAME public IP
+    # the live trading JVM places orders from.
+    retry=retry_if_exception(binance_should_retry),
 )
 def _http_get(client: httpx.Client, params: dict[str, Any]) -> list[Any]:
     response = client.get(f"{_BASE_URL}{_PATH}", params=params)
@@ -77,6 +83,15 @@ def _http_get(client: httpx.Client, params: dict[str, Any]) -> list[Any]:
     if isinstance(payload, dict):
         raise httpx.HTTPError(f"Binance klines error: {payload}")
     return payload
+
+
+def _to_utc_ms(dt: datetime) -> int:
+    """Naive datetime -> epoch ms, treating naive as UTC (project
+    convention). Plain ``.timestamp()`` on a naive value applies the
+    HOST's local timezone — see the H4 fix note at the call sites."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
 
 
 def _fetch_spot_close(
@@ -92,10 +107,16 @@ def _fetch_spot_close(
     step_ms = _INTERVAL_MS.get(interval)
     if step_ms is None:
         raise ValueError(f"binance_spot: unsupported interval {interval!r}")
-    cursor_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
+    # H4 fix: naive .timestamp() applies the HOST's local timezone —
+    # invisible on the UTC container, but on the UTC+7 home backfill
+    # box every window shifted 7h earlier, silently never fetching
+    # the final 7h of each requested window. Coerce naive -> UTC
+    # (project convention, same as binance_macro._to_ms).
+    cursor_ms = _to_utc_ms(start)
+    end_ms = _to_utc_ms(end)
     rows: list[dict[str, Any]] = []
     seen_ts: set[int] = set()
+    truncated = True  # flips False when the loop exits via a stop condition
 
     for _ in range(_MAX_PAGES):
         data = _http_get(
@@ -109,6 +130,7 @@ def _fetch_spot_close(
             },
         )
         if not data:
+            truncated = False
             break
         last_open_ms = cursor_ms
         for k in data:
@@ -147,11 +169,19 @@ def _fetch_spot_close(
         # page returned fewer than a full batch (history exhausted).
         next_cursor = last_open_ms + step_ms
         if next_cursor > end_ms or len(data) < _LIMIT or next_cursor <= cursor_ms:
+            truncated = False
             break
         cursor_ms = next_cursor
         time.sleep(0.2)  # be polite to the public endpoint
 
-    return rows
+    if truncated:
+        # M16 fix: page cap fired mid-window — surface instead of reporting
+        # a healthy, complete pull with silently missing data.
+        logger.warning(
+            "binance_spot pagination cap (%d pages) hit mid-window for %s %s",
+            _MAX_PAGES, symbol, interval,
+        )
+    return rows, truncated
 
 
 def fetch(request: IngestionRequest) -> IngestionResult:
@@ -165,6 +195,7 @@ def fetch(request: IngestionRequest) -> IngestionResult:
 
     all_rows: list[dict[str, Any]] = []
     series_seen: list[str] = []
+    any_truncated = False
     try:
         with httpx.Client(timeout=30.0) as client:
             for i, symbol in enumerate(symbols):
@@ -174,7 +205,10 @@ def fetch(request: IngestionRequest) -> IngestionResult:
                     "binance_spot fetching symbol=%s interval=%s window %s → %s",
                     symbol, interval, request.start, request.end,
                 )
-                rows = _fetch_spot_close(client, symbol, interval, request.start, request.end, now)
+                rows, truncated = _fetch_spot_close(
+                    client, symbol, interval, request.start, request.end, now
+                )
+                any_truncated = any_truncated or truncated
                 all_rows.extend(rows)
                 if rows:
                     series_seen.append(f"binance_spot_close_{symbol.lower()}")
@@ -197,6 +231,11 @@ def fetch(request: IngestionRequest) -> IngestionResult:
                 success=True,
                 rows_inserted=rows_inserted,
                 rows_rejected_pit=len(rejected),
+                force_degraded=any_truncated,
+                error_message=(
+                    f"pagination cap ({_MAX_PAGES} pages) truncated the window"
+                    if any_truncated else None
+                ),
                 conn=conn,
             )
     except Exception as e:  # noqa: BLE001
@@ -216,7 +255,10 @@ def fetch(request: IngestionRequest) -> IngestionResult:
         rows_skipped_duplicate=rows_skipped_duplicate,
         series_seen=series_seen,
         duration_seconds=duration,
-        note=f"interval={interval} symbols={symbols}",
+        note=(
+            f"interval={interval} symbols={symbols}"
+            + (f" TRUNCATED: pagination cap ({_MAX_PAGES} pages) hit" if any_truncated else "")
+        ),
     )
     logger.info(
         "binance_spot fetch complete | series=%d fetched=%d inserted=%d skipped=%d pit_reject=%d duration=%.2fs",

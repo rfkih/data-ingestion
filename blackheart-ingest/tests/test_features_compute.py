@@ -131,21 +131,24 @@ def test_ffill_unknown_policy_raises():
 # ── _pivot_wide ─────────────────────────────────────────────────────────────
 
 
-def test_pivot_revision_keeps_latest_ingestion_time():
-    """When a series has two rows at the same event_time (a revision),
-    the later ``ingestion_time`` wins — that's the operator-now view."""
+def test_pivot_revision_keeps_first_ingestion_time():
+    """When a series has two rows at the same event_time (a revision —
+    e.g. FRED/ALFRED vintages), the EARLIEST ``ingestion_time`` wins
+    (2026-06-12 PIT fix). keep="last" baked later revisions into history
+    that backtests treated as known at the original event_time — the
+    first-ingested row approximates the first public print."""
     long_df = pd.DataFrame(
         {
             "series_id": ["A", "A"],
             "event_time": pd.to_datetime(["2025-01-01", "2025-01-01"]),
             "ingestion_time": pd.to_datetime(["2025-01-02", "2025-01-05"]),
-            "value": [10.0, 11.0],  # revised value
+            "value": [10.0, 11.0],  # revised value must NOT win
         }
     )
     feat = _feat(inputs=("A",))
     value_wide, ing_wide = _pivot_wide(long_df, feat)
-    assert list(value_wide["A"].values) == [11.0]
-    assert ing_wide["A"].iloc[0] == pd.Timestamp("2025-01-05")
+    assert list(value_wide["A"].values) == [10.0]
+    assert ing_wide["A"].iloc[0] == pd.Timestamp("2025-01-02")
 
 
 def test_pivot_empty_long_df_returns_empty_wide_with_columns():

@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -43,13 +44,19 @@ from typing import Any
 from types import ModuleType
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import __version__
 from ..features.compute import compute as compute_feature
 from ..features.definitions import FEATURES, get_feature
-from ..features.persistence import fail_run, finish_run, start_run, write_values
+from ..features.persistence import (
+    acquire_feature_lock,
+    fail_run,
+    finish_run,
+    start_run,
+    write_values,
+)
 from ..shared.base import IngestionRequest
 from ..shared.db import get_connection
 from ..shared.logging_setup import configure as configure_logging
@@ -91,6 +98,21 @@ def _import_source(source: str) -> ModuleType:
     return importlib.import_module(mod_path)
 
 
+def require_token(request: Request) -> None:
+    """Shared-secret gate for mutation routes (C1 defense-in-depth).
+
+    No-op when INGEST_AUTH_TOKEN is unset (backward compatible — the
+    primary boundary is the loopback+Tailscale port binding). When set,
+    callers must send the exact value as ``X-Ingest-Token``.
+    """
+    expected = get_settings().auth_token.get_secret_value()
+    if not expected:
+        return
+    provided = request.headers.get("X-Ingest-Token", "")
+    if not secrets.compare_digest(provided.encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="missing/invalid X-Ingest-Token")
+
+
 class PullRequest(BaseModel):
     """Request body for POST /pull/{source}. Mirrors IngestionRequest but
     expressed in pydantic so FastAPI validates + auto-documents.
@@ -100,6 +122,15 @@ class PullRequest(BaseModel):
     end: datetime = Field(..., description="ISO LocalDateTime, e.g. 2026-05-14T23:59:59")
     symbol: str | None = Field(default=None, description="Optional symbol scope")
     config: dict[str, Any] = Field(default_factory=dict, description="Source-specific params")
+
+
+# Surfaced via /healthz so a dead/stalled loop is visible (H7).
+_COMPUTE_LOOP_STATUS: dict[str, Any] = {
+    "enabled": False,
+    "runs": 0,
+    "last_run_at": None,
+    "last_failures": None,
+}
 
 
 def _compute_all_macro(lookback_hours: int) -> dict[str, Any]:
@@ -121,6 +152,14 @@ def _compute_all_macro(lookback_hours: int) -> dict[str, Any]:
         t0 = time.monotonic()
         try:
             with get_connection() as conn:
+                # M3 fix: auto loop, pull-triggered /compute/incremental,
+                # the per-feature endpoint, the CLI and the bar consumer
+                # all write the same rows with no mutual exclusion — a
+                # slow reader committing LAST overwrote fresher values
+                # with stale ones for up to 4h. Session-scoped advisory
+                # lock (auto-released on connection close) serialises
+                # writers per feature across processes.
+                acquire_feature_lock(conn, feat.name)
                 run_id = start_run(feat, range_start=start, range_end=end, conn=conn)
                 try:
                     df = compute_feature(feat, start=start, end=end, conn=conn)
@@ -134,8 +173,16 @@ def _compute_all_macro(lookback_hours: int) -> dict[str, Any]:
                     results.append({"feature": feat.name, "rows": 0, "status": "empty"})
                     continue
 
-                written = write_values(feat, df, run_id=run_id, conn=conn)
-                finish_run(run_id, rows_written=written, conn=conn)
+                # M5 fix: a write/finish failure used to skip fail_run
+                # entirely (only compute() was wrapped), leaving the
+                # committed run row stuck 'running' forever.
+                try:
+                    written = write_values(feat, df, run_id=run_id, conn=conn)
+                    finish_run(run_id, rows_written=written, conn=conn)
+                except Exception as e:  # noqa: BLE001
+                    conn.rollback()
+                    fail_run(run_id, error_message=f"persist: {e}", conn=conn)
+                    raise
             total_rows += written
             results.append({
                 "feature": feat.name,
@@ -164,20 +211,33 @@ def _compute_all_macro(lookback_hours: int) -> dict[str, Any]:
 
 
 async def _compute_loop(interval_hours: int, lookback_hours: int) -> None:
-    """Background async task: compute all macro features every N hours."""
+    """Background async task: compute all macro features every N hours.
+
+    L5 fix (2026-06-12): the first run fires ~60s after startup instead of
+    a full interval later — each deploy/restart used to reset the timer, so
+    a busy merge cadence silently degraded the effective compute cadence.
+    """
     interval_seconds = interval_hours * 3600
+    _COMPUTE_LOOP_STATUS["enabled"] = True
     logger.info(
         "compute_loop started | interval_h=%d lookback_h=%d",
         interval_hours, lookback_hours,
     )
+    first_run = True
     while True:
         try:
-            await asyncio.sleep(interval_seconds)
+            await asyncio.sleep(60 if first_run else interval_seconds)
+            first_run = False
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
+            summary = await loop.run_in_executor(
                 None,
                 partial(_compute_all_macro, lookback_hours),
             )
+            _COMPUTE_LOOP_STATUS["runs"] = _COMPUTE_LOOP_STATUS["runs"] + 1
+            _COMPUTE_LOOP_STATUS["last_run_at"] = (
+                datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat()
+            )
+            _COMPUTE_LOOP_STATUS["last_failures"] = summary.get("failures")
         except asyncio.CancelledError:
             logger.info("compute_loop cancelled")
             return
@@ -205,7 +265,28 @@ async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
         )
 
     if settings.kafka_enabled:
+        # M9 fix: in-container, the default inference_base_url
+        # (http://127.0.0.1:8000) is the INGEST container's own loopback,
+        # not blackheart-inference — and webhook failures are deliberately
+        # swallowed downstream, so a misconfig silently degrades the
+        # realtime stream path to catchup_scan. Warn LOUDLY at boot.
+        if settings.inference_base_url.startswith("http://127.0.0.1"):
+            logger.warning(
+                "kafka_enabled but inference_base_url=%s is loopback — inside "
+                "a container this points at ingest ITSELF. Set "
+                "INGEST_INFERENCE_BASE_URL to the inference service URL.",
+                settings.inference_base_url,
+            )
+        if not settings.inference_auth_token.get_secret_value():
+            logger.warning(
+                "kafka_enabled but INGEST_INFERENCE_AUTH_TOKEN is empty — "
+                "inference webhooks will be rejected and the stream path "
+                "silently degrades to catchup_scan."
+            )
+
         async def _consumer_with_restart() -> None:
+            from . import bar_event_consumer as _bec
+
             delay = 5
             while True:
                 try:
@@ -222,6 +303,9 @@ async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
                         "ingest bar-event consumer exited cleanly (no cancel), restarting in %ds",
                         delay,
                     )
+                _bec.CONSUMER_STATUS["restarts"] = (
+                    int(_bec.CONSUMER_STATUS["restarts"]) + 1
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
 
@@ -282,18 +366,46 @@ app = FastAPI(
 )
 
 
+def _db_probe() -> bool:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+    return True
+
+
 @app.get("/health")
-def health() -> dict[str, Any]:
-    """Simple health check for Docker healthcheck probes."""
-    return {"status": "healthy"}
+async def health() -> dict[str, Any]:
+    """Docker healthcheck + CI deploy rollback gate.
+
+    H7 fix (2026-06-12): the old static ``{"status":"healthy"}`` verified
+    NOTHING — Postgres could be unreachable and the deploy gate still
+    passed (the structural root of the "CI-green but service broken"
+    trap). Now probes the DB; 503 lets Docker restart the container and
+    the deploy pipeline roll back. async def so liveness never queues
+    behind the sync threadpool that runs multi-minute computes (M6).
+    """
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_db_probe), timeout=8)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"db probe failed: {exc}") from exc
+    return {"status": "healthy", "db": True}
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, Any]:
+async def healthz(request: Request) -> dict[str, Any]:
+    """Liveness + worker visibility. Always 200 (informational — /health
+    is the gating probe); surfaces the bar-consumer restart loop that was
+    previously invisible (a crash-looping consumer looked identical to a
+    healthy one from the outside)."""
+    from . import bar_event_consumer as _bec
+
     return {
         "ok": True,
         "version": __version__,
         "implemented_sources": sorted(s for s, m in _KNOWN_SOURCES.items() if m),
+        "bar_consumer": dict(_bec.CONSUMER_STATUS),
+        "compute_loop": dict(_COMPUTE_LOOP_STATUS),
     }
 
 
@@ -357,7 +469,7 @@ def liquidation_status(request: Request) -> dict[str, Any]:
     }
 
 
-@app.post("/pull/{source}")
+@app.post("/pull/{source}", dependencies=[Depends(require_token)])
 def pull(source: str, body: PullRequest) -> dict[str, Any]:
     started = time.monotonic()
     module = _import_source(source)
@@ -409,7 +521,7 @@ class IncrementalComputeRequest(BaseModel):
     )
 
 
-@app.post("/compute/incremental")
+@app.post("/compute/incremental", dependencies=[Depends(require_token)])
 def compute_incremental(body: IncrementalComputeRequest | None = None) -> dict[str, Any]:
     """Recompute all macro (non-market_data) features over a lookback window.
 
@@ -464,7 +576,7 @@ def list_features_endpoint() -> dict[str, Any]:
     }
 
 
-@app.post("/compute/{feature_name}/v/{version}")
+@app.post("/compute/{feature_name}/v/{version}", dependencies=[Depends(require_token)])
 def compute_endpoint(feature_name: str, version: int, body: ComputeRequest) -> dict[str, Any]:
     """Run one feature compute. Synchronous — caller blocks for the run.
 
