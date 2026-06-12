@@ -31,7 +31,13 @@ except ImportError:
 
 from ..features.compute import compute as compute_feature
 from ..features.definitions import FEATURES, FeatureDef, get_feature
-from ..features.persistence import fail_run, finish_run, start_run, write_values
+from ..features.persistence import (
+    acquire_feature_lock,
+    fail_run,
+    finish_run,
+    start_run,
+    write_values,
+)
 from ..schemas.events import MarketBarEvent
 from ..shared.db import get_connection
 from ..shared.settings import Settings, get_settings
@@ -39,6 +45,19 @@ from ..sources.binance_orderbook import fetch_and_store as _ob_fetch_and_store
 from ..webhooks import notify_inference_batch_ready
 
 logger = logging.getLogger(__name__)
+
+# Surfaced via the server's /healthz so the restart loop and schema-drift
+# parse failures are VISIBLE — a crash-looping or silently-skipping
+# consumer previously looked identical to a healthy one from outside.
+CONSUMER_STATUS: dict[str, object] = {
+    "enabled": False,
+    "started_at": None,
+    "last_bar_at": None,
+    "bars_processed": 0,
+    "parse_failures_total": 0,
+    "consecutive_parse_failures": 0,
+    "restarts": 0,
+}
 
 # Rolling window passed to compute() for per-bar features.
 # 40 days covers btc_realized_vol_30d's 720-bar lookback with slack.
@@ -106,6 +125,11 @@ async def _compute_bar_features(
         try:
             def _run_one(f: FeatureDef) -> int:
                 with get_connection() as conn:
+                    # M3: serialise vs the other four writers of the same
+                    # feature rows (see persistence.acquire_feature_lock).
+                    acquire_feature_lock(
+                        conn, f"{f.name}:{symbol}:{interval}"
+                    )
                     run_id = start_run(
                         f, range_start=start, range_end=now,
                         symbol=symbol, interval=interval, conn=conn,
@@ -122,10 +146,17 @@ async def _compute_bar_features(
                     if df is None or df.empty:
                         finish_run(run_id, rows_written=0, conn=conn)
                         return 0
-                    written = write_values(
-                        f, df, run_id=run_id, symbol=symbol, interval=interval, conn=conn,
-                    )
-                    finish_run(run_id, rows_written=written, conn=conn)
+                    # M5: a write/finish failure used to skip fail_run,
+                    # leaving the run row stuck 'running' forever.
+                    try:
+                        written = write_values(
+                            f, df, run_id=run_id, symbol=symbol, interval=interval, conn=conn,
+                        )
+                        finish_run(run_id, rows_written=written, conn=conn)
+                    except Exception as e:
+                        conn.rollback()
+                        fail_run(run_id, error_message=f"persist: {e}", conn=conn)
+                        raise
                     return written
 
             rows = await loop.run_in_executor(None, partial(_run_one, feat))
@@ -150,6 +181,25 @@ async def _fetch_ob_snapshot(bar: MarketBarEvent) -> None:
     and must not prevent the main feature-compute pipeline from proceeding.
     """
     if bar.symbol not in _OB_SYMBOLS or bar.interval not in _OB_INTERVALS:
+        return
+    # M4 (PIT skew): under a processing backlog the snapshot is fetched
+    # minutes after the bar closed but stored at bar.ts with pit_safe=True
+    # — and the skew grows exactly during cascades, when the queue is
+    # deepest and the microstructure matters most. If we're already more
+    # than half an interval past the close, skip: an honest gap beats a
+    # mislabeled snapshot.
+    interval_s = {"1h": 3600, "4h": 14400}.get(bar.interval, 3600)
+    bar_ts = bar.ts
+    if bar_ts.tzinfo is not None:  # events may carry tz-aware timestamps
+        bar_ts = bar_ts.astimezone(timezone.utc).replace(tzinfo=None)
+    lag_s = (
+        datetime.now(tz=timezone.utc).replace(tzinfo=None) - bar_ts
+    ).total_seconds() - interval_s  # bar.ts is the bar OPEN; close = ts + interval
+    if lag_s > interval_s / 2:
+        logger.warning(
+            "bar_event.ob_snapshot_skipped_stale | symbol=%s interval=%s ts=%s lag_s=%.0f",
+            bar.symbol, bar.interval, bar.ts, lag_s,
+        )
         return
     loop = asyncio.get_event_loop()
 
@@ -259,6 +309,18 @@ async def run_bar_event_consumer(settings: Settings | None = None) -> None:
         group_id=cfg.kafka_group_id,
         value_deserializer=lambda m: m.decode("utf-8") if m else None,
         auto_offset_reset="latest",
+        # H2 fix (2026-06-12): auto-commit made the consumer at-most-once —
+        # offsets committed (background task, <=5s; and again by stop() on
+        # graceful shutdown) while the multi-minute handler was still
+        # running, so every deploy landing mid-bar PERMANENTLY skipped the
+        # bar, including its unrecoverable bar-close L2 snapshot
+        # (ob features are live-only, no backfill). Manual commit AFTER the
+        # handler = at-least-once; the handler is idempotent (UPSERTs).
+        enable_auto_commit=False,
+        # Top-of-hour bursts (1h+4h x all symbols, serial handling, OB HTTP
+        # retries) can exceed the 300s default between polls -> rebalance
+        # churn. 10 min of headroom.
+        max_poll_interval_ms=600_000,
     )
 
     await consumer.start()
@@ -267,21 +329,46 @@ async def run_bar_event_consumer(settings: Settings | None = None) -> None:
         cfg.kafka_bootstrap_servers, cfg.kafka_group_id,
     )
 
+    CONSUMER_STATUS["enabled"] = True
+    CONSUMER_STATUS["started_at"] = (
+        datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat()
+    )
     try:
         async for message in consumer:
             if not message or not message.value:
+                await consumer.commit()
                 continue
             try:
                 data = json.loads(message.value)
                 bar = MarketBarEvent(**data)
                 await _handle_bar_event(bar)
+                CONSUMER_STATUS["bars_processed"] = (
+                    int(CONSUMER_STATUS["bars_processed"]) + 1
+                )
+                CONSUMER_STATUS["last_bar_at"] = (
+                    datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat()
+                )
+                CONSUMER_STATUS["consecutive_parse_failures"] = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                logger.error(
-                    "bar_event_consumer.parse_error | error=%s raw=%s",
-                    e, message.value[:200],
+                # M14: a schema change on market.bars lands here for EVERY
+                # bar — count it loudly so /healthz shows the drift instead
+                # of features silently going stale until MlSignalStale fires.
+                CONSUMER_STATUS["parse_failures_total"] = (
+                    int(CONSUMER_STATUS["parse_failures_total"]) + 1
                 )
+                CONSUMER_STATUS["consecutive_parse_failures"] = (
+                    int(CONSUMER_STATUS["consecutive_parse_failures"]) + 1
+                )
+                logger.error(
+                    "bar_event_consumer.parse_error | consecutive=%s error=%s raw=%s",
+                    CONSUMER_STATUS["consecutive_parse_failures"], e,
+                    message.value[:200],
+                )
+            # At-least-once: commit only after the handler (or a logged
+            # skip decision) — never let a deploy mid-bar lose the bar.
+            await consumer.commit()
     finally:
         await consumer.stop()
         logger.info("bar_event_consumer.stopped")

@@ -431,12 +431,24 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      INGEST_PROFILE: prod
+      # M11 fix (CODE_REVIEW_INGEST_2026-06-12): Settings uses env_prefix
+      # INGEST_ with extra='ignore' - the old unprefixed
+      # KAFKA_BOOTSTRAP_SERVERS (and INGEST_PROFILE, an unknown key) were
+      # silently dropped, so a compose-deployed ingest booted INERT: no
+      # consumer, no compute loop, kafka pointed at localhost.
       INGEST_DB_DSN: postgresql://blackheart_research:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/trading_db
-      KAFKA_BOOTSTRAP_SERVERS: blackheart-kafka:9092
+      INGEST_KAFKA_BOOTSTRAP_SERVERS: blackheart-kafka:9092
+      INGEST_KAFKA_ENABLED: "true"
+      INGEST_COMPUTE_AUTO: "true"
+      # M9: in-container loopback points at ingest ITSELF - the webhook
+      # must target the inference container by service name.
+      INGEST_INFERENCE_BASE_URL: http://blackheart-inference:8000
+      INGEST_INFERENCE_AUTH_TOKEN: ${INFERENCE_AUTH_TOKEN:-}
       PYTHONUNBUFFERED: "1"
     ports:
-      - "8001:8001"
+      # C1: loopback-only on the host - never publish the
+      # unauthenticated mutation surface beyond the box.
+      - "127.0.0.1:8001:8001"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health').read()\" || exit 1"]
       interval: 30s

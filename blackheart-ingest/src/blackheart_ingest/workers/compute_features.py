@@ -21,7 +21,13 @@ from pathlib import Path
 
 from ..features.compute import compute, default_window
 from ..features.definitions import FEATURES, FeatureDef, get_feature
-from ..features.persistence import fail_run, finish_run, start_run, write_values
+from ..features.persistence import (
+    acquire_feature_lock,
+    fail_run,
+    finish_run,
+    start_run,
+    write_values,
+)
 from ..shared.db import get_connection
 from ..shared.logging_setup import configure as configure_logging
 from ..shared.settings import get_settings
@@ -197,6 +203,11 @@ def main() -> int:
                 run_id = None
                 if persist:
                     try:
+                        # M3: serialise vs the server-side writers of the
+                        # same feature rows (see acquire_feature_lock).
+                        acquire_feature_lock(
+                            conn, f"{feat.name}:{sym or ''}:{ivl or ''}"
+                        )
                         run_id = start_run(
                             feat,
                             range_start=start,

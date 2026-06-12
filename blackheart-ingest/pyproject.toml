@@ -72,8 +72,6 @@ kafka = [
 #   heavy       — one-shot historical backfill CLI (home box)
 #   live        — scheduled live-ingest worker (VPS)
 blackheart-ingest-server    = "blackheart_ingest.workers.server:main"
-blackheart-ingest-heavy     = "blackheart_ingest.workers.heavy_ingest:main"
-blackheart-ingest-live      = "blackheart_ingest.workers.live_ingest:main"
 blackheart-ingest-compute   = "blackheart_ingest.workers.compute_features:main"
 # Phase 4 / Phase C — inference sidecar backfill worker. Loads a model
 # artifact, reuses blackheart-train's loader for bit-equivalent feature

@@ -25,7 +25,7 @@ def test_fetch_spot_builds_macro_raw_rows():
     klines = [_k(base, 46000.0), _k(base + hour, 46100.0), _k(base + 2 * hour, 46200.0)]
 
     with patch("blackheart_ingest.sources.binance_spot._http_get", return_value=klines) as mock_get:
-        rows = binance_spot._fetch_spot_close(None, "BTCUSDT", "1h", start, end, now)
+        rows, _truncated = binance_spot._fetch_spot_close(None, "BTCUSDT", "1h", start, end, now)
 
     assert mock_get.called
     assert len(rows) == 3
@@ -56,7 +56,7 @@ def test_fetch_spot_dedupes_and_filters_window():
     klines = [_k(base, 46000.0), _k(base + hour, 46100.0), _k(base + hour, 46100.0)]
 
     with patch("blackheart_ingest.sources.binance_spot._http_get", return_value=klines):
-        rows = binance_spot._fetch_spot_close(None, "ETHUSDT", "1h", start, end, now)
+        rows, _truncated = binance_spot._fetch_spot_close(None, "ETHUSDT", "1h", start, end, now)
 
     assert len(rows) == 1
     assert rows[0]["series_id"] == "binance_spot_close_ethusdt"
@@ -74,7 +74,7 @@ def test_fetch_spot_pages_forward(monkeypatch):
     page2 = [_k(base + 2 * hour, 3.0), _k(base + 3 * hour, 4.0)]  # full batch, then end_ms stops
 
     with patch("blackheart_ingest.sources.binance_spot._http_get", side_effect=[page1, page2]) as mock_get:
-        rows = binance_spot._fetch_spot_close(None, "BTCUSDT", "1h", start, end, now)
+        rows, _truncated = binance_spot._fetch_spot_close(None, "BTCUSDT", "1h", start, end, now)
 
     assert mock_get.call_count == 2
     assert len({r["event_time"] for r in rows}) == 4
@@ -95,7 +95,7 @@ def test_fetch_spot_empty_response_stops():
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     end = datetime(2024, 1, 2, tzinfo=timezone.utc)
     with patch("blackheart_ingest.sources.binance_spot._http_get", return_value=[]) as mock_get:
-        rows = binance_spot._fetch_spot_close(None, "BTCUSDT", "1h", start, end, now)
+        rows, _truncated = binance_spot._fetch_spot_close(None, "BTCUSDT", "1h", start, end, now)
     assert rows == []
     assert mock_get.call_count == 1
 

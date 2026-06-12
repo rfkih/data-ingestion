@@ -48,7 +48,11 @@ notepad .env
 python -m blackheart_ingest.workers.server
 ```
 
-The HTTP server listens on `127.0.0.1:8089` by default (loopback only). The
+The HTTP server listens on `127.0.0.1:8001` by default (loopback only;
+the Docker image overrides host to `0.0.0.0` INSIDE the container and the
+deploy publishes it on loopback + Tailscale only — the mutation routes
+carry no auth unless `INGEST_AUTH_TOKEN` is set, so never publish them
+to a public interface). The
 Trading JVM `BackfillMl*` handlers POST to it.
 
 ## Endpoints

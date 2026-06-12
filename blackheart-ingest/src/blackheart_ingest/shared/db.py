@@ -132,6 +132,7 @@ def update_source_health(
     rows_inserted: int = 0,
     rows_rejected_pit: int = 0,
     error_message: str | None = None,
+    force_degraded: bool = False,
     conn: psycopg.Connection | None = None,
 ) -> None:
     """Apply the outcome of one pull to ``ml_source_health``.
@@ -139,6 +140,9 @@ def update_source_health(
     Health-status rules:
       - success + 0 PIT rejections → 'healthy'
       - success + PIT rejections    → 'degraded' (rows landed but quality flag raised)
+      - success + force_degraded    → 'degraded' (e.g. pagination cap truncated the
+        window — rows landed but the pull is INCOMPLETE; pre-2026-06-12 this case
+        reported 'healthy' with missing data)
       - failure                     → 'failed' on 3+ consecutive failures, else 'degraded'
     """
     now = datetime.utcnow()
@@ -152,10 +156,11 @@ def update_source_health(
                 rows_inserted_total = rows_inserted_total + %(rows_inserted)s,
                 rejected_pit_violations_total = rejected_pit_violations_total + %(rows_rejected_pit)s,
                 health_status = CASE
+                    WHEN %(force_degraded)s THEN 'degraded'
                     WHEN %(rows_rejected_pit)s > 0 THEN 'degraded'
                     ELSE 'healthy'
                 END,
-                health_message = NULL,
+                health_message = %(health_message)s,
                 updated_at = %(now)s,
                 updated_time = %(now)s,
                 updated_by = 'blackheart-ingest'
@@ -166,6 +171,8 @@ def update_source_health(
             "source": source,
             "rows_inserted": rows_inserted,
             "rows_rejected_pit": rows_rejected_pit,
+            "force_degraded": force_degraded,
+            "health_message": error_message if force_degraded else None,
         }
     else:
         sql = """

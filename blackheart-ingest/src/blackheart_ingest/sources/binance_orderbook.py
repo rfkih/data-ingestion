@@ -42,12 +42,14 @@ from typing import Any
 
 import httpx
 from tenacity import (
+    retry_if_exception,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
 
+from ..shared.binance_http import binance_should_retry
 from ..shared.db import content_hash, get_connection, write_macro_raw_rows
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,11 @@ _IMBALANCE_LEVELS = 5
     reraise=True,
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
+    # Ban-safe policy (shared.binance_http): retry transport/5xx only —
+    # HTTPStatusError is a subclass of HTTPError, so the old predicate
+    # blindly retried 429/418 and risked an IP ban on the SAME public IP
+    # the live trading JVM places orders from.
+    retry=retry_if_exception(binance_should_retry),
 )
 def _http_get(client: httpx.Client, path: str, params: dict[str, Any]) -> Any:
     response = client.get(
@@ -165,12 +171,16 @@ def _store_snapshot(
              %(depth)s)
         ON CONFLICT (symbol, interval, bar_ts)
         DO UPDATE SET
-            best_bid      = EXCLUDED.best_bid,
-            best_ask      = EXCLUDED.best_ask,
-            bid_depth_sum = EXCLUDED.bid_depth_sum,
-            ask_depth_sum = EXCLUDED.ask_depth_sum,
+            best_bid      = COALESCE(EXCLUDED.best_bid,      orderbook_snapshots.best_bid),
+            best_ask      = COALESCE(EXCLUDED.best_ask,      orderbook_snapshots.best_ask),
+            bid_depth_sum = COALESCE(EXCLUDED.bid_depth_sum, orderbook_snapshots.bid_depth_sum),
+            ask_depth_sum = COALESCE(EXCLUDED.ask_depth_sum, orderbook_snapshots.ask_depth_sum),
             snapshot_depth = EXCLUDED.snapshot_depth
     """
+    # COALESCE quality gate (2026-06-12): _parse_depth_response returns
+    # partial/all-None dicts on malformed payloads, and a degraded re-fetch
+    # for the same (symbol, interval, bar_ts) used to overwrite a previously
+    # GOOD snapshot with NULLs. Never replace a real value with NULL.
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -269,6 +279,14 @@ def fetch_and_store(
     # V137: also emit the two derived series to macro_raw so the registered
     # ob_spread_bps_* / ob_imbalance_* / ob_imbalance_momentum_8h_* features fill.
     _store_macro_series(symbol, bar_ts, snapshot, conn=conn)
+    # Commit fix (2026-06-12): with a borrowed conn, the ONLY commit used to
+    # come from write_macro_raw_rows inside _store_macro_series — which is
+    # skipped entirely when both derived series parse to None. The caller's
+    # ``with get_connection()`` then closed the connection, ROLLING BACK the
+    # orderbook_snapshots row while the log below still claimed
+    # "snapshot_stored". Commit explicitly so the snapshot survives.
+    if conn is not None:
+        conn.commit()
     logger.info(
         "binance_orderbook.snapshot_stored | symbol=%s interval=%s bar_ts=%s "
         "best_bid=%s best_ask=%s elapsed=%.2fs",

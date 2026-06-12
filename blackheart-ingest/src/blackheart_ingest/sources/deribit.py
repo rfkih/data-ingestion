@@ -75,12 +75,20 @@ def _http_get(client: httpx.Client, params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _to_utc_ms(dt: datetime) -> int:
+    """Naive datetime -> epoch ms, treating naive as UTC (project
+    convention). Plain ``.timestamp()`` applies the host's local TZ."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
 def _fetch_dvol(
     client: httpx.Client,
     currency: str,
     start: datetime,
     end: datetime,
-    resolution: int,
+    resolution: int | str,
     now: datetime,
 ) -> list[dict[str, Any]]:
     """Page DVOL OHLC candles for ``currency`` over [start, end].
@@ -92,11 +100,14 @@ def _fetch_dvol(
     harmless.
     """
     series_id = f"deribit_{currency.lower()}_dvol"
-    start_ms = int(start.timestamp() * 1000)
-    cursor_ms = int(end.timestamp() * 1000)
+    # H4 fix: naive .timestamp() applies the HOST's local timezone —
+    # on the UTC+7 home backfill box every window shifted 7h earlier.
+    start_ms = _to_utc_ms(start)
+    cursor_ms = _to_utc_ms(end)
     ingestion_time = now
     rows: list[dict[str, Any]] = []
     seen_ts: set[int] = set()
+    truncated = True  # flips False when the loop exits via a stop condition
 
     for _ in range(_MAX_PAGES):
         payload = _http_get(
@@ -110,6 +121,7 @@ def _fetch_dvol(
         )
         data = (payload.get("result") or {}).get("data") or []
         if not data:
+            truncated = False
             break
 
         earliest_ms = cursor_ms
@@ -151,31 +163,50 @@ def _fetch_dvol(
 
         # Reached the start of the window or the index history — stop.
         if earliest_ms <= start_ms or earliest_ms >= cursor_ms:
+            truncated = False
             break
-        cursor_ms = earliest_ms - (resolution * 1000)
+        step_seconds = 86400 if resolution == "1D" else int(resolution)
+        cursor_ms = earliest_ms - (step_seconds * 1000)
         time.sleep(0.2)  # be polite to the public endpoint
 
-    return rows
+    if truncated:
+        # M16 fix: the page cap fired mid-window. The old behaviour exited
+        # silently and reported a healthy, complete pull — green with
+        # missing data. Surface it so health degrades and the note says so.
+        logger.warning(
+            "deribit pagination cap (%d pages) hit mid-window for %s — "
+            "window truncated at cursor=%s",
+            _MAX_PAGES, series_id, cursor_ms,
+        )
+    return rows, truncated
 
 
 def fetch(request: IngestionRequest) -> IngestionResult:
     started = time.monotonic()
     now = datetime.utcnow()  # naive UTC — matches request.start / macro_raw convention
     currencies = request.config.get("currencies") or _DEFAULT_CURRENCIES
-    resolution = int(request.config.get("resolution") or _DEFAULT_RESOLUTION)
+    raw_resolution = request.config.get("resolution") or _DEFAULT_RESOLUTION
+    # Deribit's documented resolutions are 60/3600/43200 (seconds) and
+    # the string "1D". int("1D") raised ValueError BEFORE the try-block,
+    # bypassing source-health bookkeeping entirely (L4 fix).
+    resolution = "1D" if str(raw_resolution).upper() == "1D" else int(raw_resolution)
 
     all_rows: list[dict[str, Any]] = []
     series_seen: list[str] = []
+    any_truncated = False
     try:
         with httpx.Client(timeout=30.0) as client:
             for i, currency in enumerate(currencies):
                 if i > 0:
                     time.sleep(0.5)
                 logger.info(
-                    "deribit fetching DVOL currency=%s resolution=%ds window %s → %s",
+                    "deribit fetching DVOL currency=%s resolution=%ss window %s → %s",
                     currency, resolution, request.start, request.end,
                 )
-                rows = _fetch_dvol(client, currency, request.start, request.end, resolution, now)
+                rows, truncated = _fetch_dvol(
+                    client, currency, request.start, request.end, resolution, now
+                )
+                any_truncated = any_truncated or truncated
                 all_rows.extend(rows)
                 if rows:
                     series_seen.append(f"deribit_{currency.lower()}_dvol")
@@ -198,6 +229,11 @@ def fetch(request: IngestionRequest) -> IngestionResult:
                 success=True,
                 rows_inserted=rows_inserted,
                 rows_rejected_pit=len(rejected),
+                force_degraded=any_truncated,
+                error_message=(
+                    f"pagination cap ({_MAX_PAGES} pages) truncated the window"
+                    if any_truncated else None
+                ),
                 conn=conn,
             )
     except Exception as e:  # noqa: BLE001
@@ -217,7 +253,10 @@ def fetch(request: IngestionRequest) -> IngestionResult:
         rows_skipped_duplicate=rows_skipped_duplicate,
         series_seen=series_seen,
         duration_seconds=duration,
-        note=None,
+        note=(
+            f"TRUNCATED: pagination cap ({_MAX_PAGES} pages) hit mid-window"
+            if any_truncated else None
+        ),
     )
     logger.info(
         "deribit fetch complete | series=%d fetched=%d inserted=%d skipped=%d pit_reject=%d duration=%.2fs",

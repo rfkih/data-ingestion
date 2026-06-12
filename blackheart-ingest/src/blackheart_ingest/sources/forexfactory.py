@@ -173,6 +173,17 @@ def fetch(request: IngestionRequest) -> IngestionResult:
     impact_filter = [
         str(i).strip().lower() for i in (config.get("impact_filter") or []) if str(i).strip()
     ]
+    # M15 fix: series_id carries no country component, so without a filter
+    # US/UK/EU/AU "CPI y/y" prints all interleave in ONE series and the
+    # downstream reader (series_id-only select) can't tell them apart.
+    # Default USD-only — the consuming macro features are dollar-regime
+    # features. config.countries widens it deliberately (and anyone doing so
+    # must also widen series identity).
+    countries_filter = {
+        str(c).strip().upper()
+        for c in (config.get("countries") or ["USD"])
+        if str(c).strip()
+    }
 
     started = time.monotonic()
     now = datetime.utcnow()
@@ -239,13 +250,25 @@ def fetch(request: IngestionRequest) -> IngestionResult:
             continue
         if event_time < request.start or event_time > request.end:
             continue
+        # L2 fix (2026-06-12): future-dated events used to flow into the PIT
+        # guard, which rejected every not-yet-occurred forecast/previous row —
+        # leaving the source PERMANENTLY 'degraded' during the week (alarm
+        # fatigue: a real degradation was indistinguishable). Filter them
+        # here; post-event re-pulls capture actual+forecast together.
+        if event_time > now:
+            filtered_count += 1
+            continue
+
+        country = str(ev.get("country") or "").upper()
+        if countries_filter and country not in countries_filter:
+            filtered_count += 1
+            continue
 
         slug = _slugify_event(title)
         if not slug:
             continue
 
         iso_ts = event_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        country = str(ev.get("country") or "").upper()
 
         for metric_kind, raw_val in (
             ("actual", ev.get("actual")),

@@ -212,6 +212,14 @@ def _emit_series(
     window_end: datetime,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    # CoinGecko's market_chart appends the CURRENT live price stamped at
+    # request time as the final point — an off-grid, non-close sample. Its
+    # seconds-precision timestamp lands in source_uri, so ON CONFLICT never
+    # dedups it: every scheduled pull accumulated one junk row per series
+    # between the real grid points (L1 fix, 2026-06-12). Drop the final
+    # point; the next pull re-fetches that period's true grid value.
+    if raw_points:
+        raw_points = raw_points[:-1]
     for entry in raw_points:
         # Each point is [unix_ms, value].
         if not isinstance(entry, (list, tuple)) or len(entry) < 2:

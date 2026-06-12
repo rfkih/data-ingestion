@@ -46,6 +46,7 @@ from typing import Any, Iterable
 
 import httpx
 from tenacity import (
+    retry_if_exception,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
@@ -53,6 +54,7 @@ from tenacity import (
 )
 
 from ..shared.base import IngestionRequest, IngestionResult
+from ..shared.binance_http import binance_should_retry, raise_on_error_payload
 from ..shared.db import content_hash, get_connection, update_source_health, write_macro_raw_rows
 from ..shared.pit_guards import PitConfig, partition_by_pit
 
@@ -98,7 +100,11 @@ _PIT_CONFIG = PitConfig(max_backfill_lag_hours=24)
     reraise=True,
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=2, max=30),
-    retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
+    # Ban-safe policy (shared.binance_http): retry transport/5xx only —
+    # HTTPStatusError is a subclass of HTTPError, so the old predicate
+    # blindly retried 429/418 and risked an IP ban on the SAME public IP
+    # the live trading JVM places orders from.
+    retry=retry_if_exception(binance_should_retry),
 )
 def _http_get(client: httpx.Client, path: str, params: dict[str, Any]) -> Any:
     response = client.get(
@@ -107,7 +113,10 @@ def _http_get(client: httpx.Client, path: str, params: dict[str, Any]) -> Any:
         timeout=30.0,
     )
     response.raise_for_status()
-    return response.json()
+    # H3 fix: HTTP-200 error dicts must raise, not read as end-of-data
+    # — _paginate treated them as a clean empty page, silently ending
+    # the window mid-backfill with health left green.
+    return raise_on_error_payload(response.json(), context=path)
 
 
 def _to_float(value: Any) -> float | None:
@@ -137,6 +146,7 @@ def _paginate(
     end_ms: int,
     limit: int,
     ts_key: str,
+    state: dict[str, Any] | None = None,
 ) -> Iterable[list[dict[str, Any]]]:
     """Walk forward through a Binance time-series endpoint.
 
@@ -165,6 +175,11 @@ def _paginate(
         cursor = int(last_ts) + 1
         pages += 1
     if pages >= _PAGINATION_CAP:
+        # M16 fix: record the truncation on the shared state so fetch()
+        # degrades source health + notes it, instead of reporting a
+        # healthy, complete pull with silently missing data.
+        if state is not None:
+            state["truncated"] = True
         logger.warning(
             "binance_macro pagination cap reached at page=%d path=%s — truncating",
             pages,
@@ -179,6 +194,7 @@ def _fetch_funding_rate(
     start_ms: int,
     end_ms: int,
     now: datetime,
+    state: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     series_id = f"binance_funding_rate_{symbol.lower()}"
     rows: list[dict[str, Any]] = []
@@ -189,6 +205,7 @@ def _fetch_funding_rate(
         start_ms=start_ms,
         end_ms=end_ms,
         limit=_FUNDING_RATE_LIMIT,
+        state=state,
         ts_key="fundingTime",
     ):
         for entry in page:
@@ -229,6 +246,7 @@ def _fetch_period_series(
     start_ms: int,
     end_ms: int,
     now: datetime,
+    state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for page in _paginate(
@@ -239,6 +257,7 @@ def _fetch_period_series(
         end_ms=end_ms,
         limit=_FUTURES_DATA_LIMIT,
         ts_key="timestamp",
+        state=state,
     ):
         for entry in page:
             if not isinstance(entry, dict):
@@ -314,6 +333,7 @@ def fetch(request: IngestionRequest) -> IngestionResult:
     symbol = request.symbol.upper()
 
     started = time.monotonic()
+    pagination_state: dict[str, Any] = {}
     now = datetime.utcnow()
     start_ms = _to_ms(request.start)
     end_ms = _to_ms(request.end)
@@ -356,7 +376,8 @@ def fetch(request: IngestionRequest) -> IngestionResult:
                     symbol, request.start, request.end,
                 )
                 rows, sid = _fetch_funding_rate(
-                    client, symbol, start_ms=start_ms, end_ms=end_ms, now=now
+                    client, symbol, start_ms=start_ms, end_ms=end_ms, now=now,
+                    state=pagination_state,
                 )
                 _record(rows, sid)
 
@@ -379,6 +400,7 @@ def fetch(request: IngestionRequest) -> IngestionResult:
                         start_ms=period_start_ms,
                         end_ms=period_end_ms,
                         now=now,
+                        state=pagination_state,
                     )
                     _record(rows, sid)
 
@@ -399,6 +421,7 @@ def fetch(request: IngestionRequest) -> IngestionResult:
                         start_ms=period_start_ms,
                         end_ms=period_end_ms,
                         now=now,
+                        state=pagination_state,
                     )
                     _record(rows, sid)
 
@@ -419,6 +442,7 @@ def fetch(request: IngestionRequest) -> IngestionResult:
                         start_ms=period_start_ms,
                         end_ms=period_end_ms,
                         now=now,
+                        state=pagination_state,
                     )
                     _record(rows, sid)
     except Exception as e:  # noqa: BLE001
@@ -442,6 +466,11 @@ def fetch(request: IngestionRequest) -> IngestionResult:
                 success=True,
                 rows_inserted=rows_inserted,
                 rows_rejected_pit=len(rejected),
+                force_degraded=bool(pagination_state.get("truncated")),
+                error_message=(
+                    f"pagination cap ({_PAGINATION_CAP} pages) truncated a feed window"
+                    if pagination_state.get("truncated") else None
+                ),
                 conn=conn,
             )
     except Exception as e:  # noqa: BLE001
@@ -451,6 +480,10 @@ def fetch(request: IngestionRequest) -> IngestionResult:
 
     duration = time.monotonic() - started
     note_parts: list[str] = [f"feeds={feeds} intervals={intervals}"]
+    if pagination_state.get("truncated"):
+        note_parts.append(
+            f"TRUNCATED: pagination cap ({_PAGINATION_CAP} pages) hit on >=1 feed"
+        )
     if period_window_clamped:
         note_parts.append(
             f"Period feeds (OI/LSR/Taker) clamped to last {_FUTURES_DATA_RETENTION_DAYS}d — "

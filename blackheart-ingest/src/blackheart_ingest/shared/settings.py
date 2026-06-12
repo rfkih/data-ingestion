@@ -30,8 +30,19 @@ class Settings(BaseSettings):
     db_user: str = "blackheart_trading"
     db_password: str = ""
 
+    # 8001 matches the Dockerfile EXPOSE/HEALTHCHECK and the deployed
+    # container; the old 8089 default made the image internally
+    # inconsistent (healthcheck curled a dead port) unless ingest.env
+    # happened to override both host and port (M10 fix, 2026-06-12).
     server_host: str = "127.0.0.1"
-    server_port: int = 8089
+    server_port: int = 8001
+
+    # Shared-secret for the mutation routes (POST /pull, /compute/*).
+    # Empty (default) = auth disabled for backward compatibility with the
+    # loopback/Tailscale-only deployment — the port rebind is the primary
+    # boundary (C1 fix); this token is defense-in-depth when set. Callers
+    # send it as ``X-Ingest-Token``.
+    auth_token: SecretStr = SecretStr("")
 
     fred_api_key: str = ""
 
