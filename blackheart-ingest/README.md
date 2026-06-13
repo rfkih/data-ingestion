@@ -18,6 +18,8 @@ Part of Phase 1 / M2 of the ML/sentiment integration. See
 | `defillama` | ✅ live | None | Per-stablecoin (USDT/USDC/…) circulating USD + per-chain TVL |
 | `coinmetrics` | ✅ live | None | Community tier daily on-chain metrics (FlowOutNative, AdrActCnt, etc.) |
 | `binance_macro` | ✅ live | None | Public futures macro: funding rate + open interest + L/S ratio + taker buy/sell |
+| `deribit` | ✅ live | None | DVOL 30d option-implied vol index (BTC/ETH); deep free history via `get_volatility_index_data` |
+| `deribit_options` | ✅ live (forward-accumulating) | None | Option-surface SKEW + term structure (BTC/ETH): 25Δ risk reversal, ATM IV near/30d, term spread. **No free historical backfill** — plant-and-accumulate hourly snapshot. Behind `INGEST_DERIBIT_OPTIONS_ENABLED` (default OFF). |
 | `forexfactory` | ✅ live (MVP) | None | faireconomy.media current-week JSON mirror; historical lookups deferred |
 
 Stub sources have Java handlers that simulate progress but don't call this
@@ -87,6 +89,43 @@ INGEST_LIQUIDATION_FLUSH_SECONDS=5          # batch insert time trigger
 Health: `GET /liquidation/status` returns connected / last_event_at /
 events_written / reconnect_count etc. It is NOT a `/pull/{source}` source
 (no `fetch`), so it does not appear in `GET /sources`.
+
+## Deribit options skew (forward-accumulating snapshot)
+
+`sources/deribit_options.py` snapshots the live Deribit option surface each
+hour and writes its *shape* into `macro_raw` (source=`deribit_options`). Unlike
+the DVOL index (source=`deribit`, deep free history), **per-strike option IV has
+no free historical backfill** — each hourly snapshot is the only copy we will
+ever have, so this is a plant-and-accumulate feed: research history starts
+building the moment it is enabled. DVOL's behaviour is untouched.
+
+Series written per currency (BTC, ETH), `symbol=NULL`, hourly cadence:
+
+```
+deribit_rr25_<cur>_30d     25Δ risk reversal (put-wing IV − call-wing IV), ~30d expiry. >0 = downside fear
+deribit_atm_iv_<cur>_near  ATM mark_iv, nearest expiry >= ~1 day out
+deribit_atm_iv_<cur>_30d   ATM mark_iv, expiry nearest 30 days
+deribit_term_spread_<cur>  atm_iv_30d − atm_iv_near (vol term-structure slope)
+```
+
+It is a normal `/pull/{source}` source (appears in `GET /sources`), so it is
+**scheduled exactly like DVOL** — an hourly `ml_ingest_schedule` row for
+`source=deribit_options` driven by the trading JVM's `MlIngestScheduleRefresher`
+calls `POST /pull/deribit_options`. The `[start, end]` window is ignored (a live
+snapshot always captures "now", floored to the hour).
+
+Default **OFF** — deploying the code is inert until the operator sets:
+
+```
+INGEST_DERIBIT_OPTIONS_ENABLED=true     # master switch; until set, /pull writes nothing
+```
+
+The 25Δ strikes are approximated geometrically (`F·exp(±0.6745·σ_atm·√T)`) and
+snapped to the nearest listed strike per wing — `get_book_summary_by_currency`
+returns no per-instrument greeks. If a wing is too thin or an expiry illiquid,
+that series is skipped for the run (nothing written) rather than zeroed. See the
+module docstring for the full derivation and Deribit's single-IV-per-strike
+quirk.
 
 ## Development
 

@@ -78,6 +78,16 @@ class Settings(BaseSettings):
     liquidation_flush_max_rows: int = Field(default=200, ge=1, le=10_000)
     liquidation_flush_seconds: float = Field(default=5.0, ge=0.5, le=300)
 
+    # Deribit OPTIONS implied-vol skew / term-structure snapshot feed
+    # (sources/deribit_options.py). Per-strike option IV has NO free historical
+    # backfill -- this is a forward-accumulating "plant-and-accumulate" feed, so
+    # deploying the code is INERT until the operator flips this on AND adds the
+    # hourly ml_ingest_schedule row for source=deribit_options. Default OFF so
+    # an accidental schedule row can't silently start writing (same "deploy is
+    # inert" convention as the liquidation stream). Separate from DVOL --
+    # deribit.py's behaviour is unchanged.
+    deribit_options_enabled: bool = False
+
     def db_kwargs(self) -> dict[str, object]:
         """Connection keyword args for ``psycopg.connect(**kwargs)``.
 
