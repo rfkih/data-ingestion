@@ -23,7 +23,12 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_INFERENCE: ${{ github.repository_owner }}/blackheart-inference
+  # Repo-scoped package name (rfkih/data-ingestion/blackheart-inference):
+  # the legacy user-level rfkih/blackheart-inference package was created
+  # by the retired rfkih/inference repo's Actions, so THIS repo's
+  # GITHUB_TOKEN gets permission_denied: write_package on it. A package
+  # first created by this workflow is automatically writable here.
+  IMAGE_INFERENCE: ${{ github.repository }}/blackheart-inference
 
 jobs:
   test:
@@ -65,17 +70,17 @@ jobs:
         id: tag
         run: echo "sha_tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.6.1
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0 (Node 24)
 
       - name: Log in to GHCR
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0 (Node 24)
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build + push inference image
-        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0 (Node 24)
         with:
           context: ./blackheart-inference
           file: ./blackheart-inference/Dockerfile
@@ -89,7 +94,8 @@ jobs:
   deploy-inference:
     name: Deploy inference to VPS (docker)
     needs: build-image
-    if: ${{ vars.DEPLOY_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
+    # Manual dispatch must NOT bypass the DEPLOY_ENABLED gate (ingest L9 parity).
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     environment: production-vps
@@ -107,11 +113,13 @@ jobs:
           SSH_USER=$(printf '%s' "${{ vars.VPS_USER }}" | tr -d '[:space:]')
           echo "SSH_USER=${SSH_USER}" >> "$GITHUB_ENV"
 
-      - name: Capture rollback tag
+      - name: Capture rollback image
         run: |
-          PREV=$(ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" "docker inspect blackheart-inference --format '{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' || echo NONE")
-          echo "PREV_TAG=${PREV:-NONE}" >> "$GITHUB_ENV"
-          echo "Previous inference tag: ${PREV}"
+          # FULL image ref, not just the tag: the pre-CI container ran a
+          # locally-built image; a ghcr.io re-prefix would be unpullable.
+          PREV=$(ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" "docker inspect blackheart-inference --format '{{.Config.Image}}' 2>/dev/null || echo NONE")
+          echo "PREV_IMAGE=${PREV:-NONE}" >> "$GITHUB_ENV"
+          echo "Previous inference image: ${PREV}"
 
       - name: Pin new tag in /home/starsky/blackheart/.env
         env:
@@ -123,21 +131,24 @@ jobs:
 
       - name: Pull + recreate inference container
         run: |
+          # Pull BEFORE rm (the rm-first ordering caused the 53-min ingest
+          # outage on 2026-06-12). Secrets live in the host-side
+          # /home/starsky/blackheart/inference.env (mode 600), NOT inline -
+          # the previous version committed the prod auth token and DB
+          # password to the repo. Loopback-only publish matches the live
+          # secured binding; container-network consumers use the service
+          # name. Artifacts path is /home/starsky/blackheart-artifacts (the
+          # old blackheart-train/artifacts path was wrong - empty dir).
           ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
-            "docker rm -f blackheart-inference 2>/dev/null || true && \
-             docker pull ghcr.io/rfkih/blackheart-inference:${NEW_TAG} && \
-             docker run -d --name blackheart-inference --restart unless-stopped \
-               --network blackheart_default \
-               -p 8000:8000 \
-               -v /home/starsky/blackheart-train/artifacts:/artifacts:ro \
-               -e INFERENCE_PROFILE=prod \
-               -e INFERENCE_HOST=0.0.0.0 \
-               -e INFERENCE_PORT=8000 \
-               -e INFERENCE_AUTH_TOKEN=prod-inference-token \
-               -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:CLjj505OEU5emM5aaLCmHJlRrwcx@postgres:5432/trading_db' \
-               -e INFERENCE_ARTIFACT_DIR=/artifacts \
-               -e INFERENCE_STREAMING_ENABLED=true \
-               ghcr.io/rfkih/blackheart-inference:${NEW_TAG}"
+            "docker pull ghcr.io/${{ env.IMAGE_INFERENCE }}:${NEW_TAG} && \
+             { docker rm -f blackheart-inference 2>/dev/null || true; \
+               docker run -d --name blackheart-inference --restart unless-stopped \
+                 --network blackheart_default \
+                 -p 127.0.0.1:8000:8000 \
+                 --stop-timeout 60 \
+                 -v /home/starsky/blackheart-artifacts:/artifacts:ro \
+                 --env-file /home/starsky/blackheart/inference.env \
+                 ghcr.io/${{ env.IMAGE_INFERENCE }}:${NEW_TAG}; }"
 
       - name: Inference healthcheck (with rollback on failure)
         run: |
@@ -147,21 +158,16 @@ jobs:
           HEALTH=$?
           set -e
           if [ "$HEALTH" -ne 0 ]; then
-            echo "::error::Inference healthcheck failed. Rolling back to ${PREV_TAG}."
-            if [ "${PREV_TAG}" != "NONE" ]; then
+            echo "::error::Inference healthcheck failed. Rolling back to ${PREV_IMAGE}."
+            if [ "${PREV_IMAGE}" != "NONE" ]; then
               ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
                 "docker rm -f blackheart-inference && docker run -d --name blackheart-inference --restart unless-stopped \
                  --network blackheart_default \
-                 -p 8000:8000 \
-                 -v /home/starsky/blackheart-train/artifacts:/artifacts:ro \
-                 -e INFERENCE_PROFILE=prod \
-                 -e INFERENCE_HOST=0.0.0.0 \
-                 -e INFERENCE_PORT=8000 \
-                 -e INFERENCE_AUTH_TOKEN=prod-inference-token \
-                 -e 'INFERENCE_DB_DSN=postgresql://blackheart_research:CLjj505OEU5emM5aaLCmHJlRrwcx@postgres:5432/trading_db' \
-                 -e INFERENCE_ARTIFACT_DIR=/artifacts \
-                 -e INFERENCE_STREAMING_ENABLED=true \
-                 ghcr.io/rfkih/blackheart-inference:${PREV_TAG}"
+                 -p 127.0.0.1:8000:8000 \
+                 --stop-timeout 60 \
+                 -v /home/starsky/blackheart-artifacts:/artifacts:ro \
+                 --env-file /home/starsky/blackheart/inference.env \
+                 ${PREV_IMAGE}"
             fi
             exit 1
           fi
@@ -170,7 +176,7 @@ jobs:
       - name: Verify ML artifacts present on VPS
         run: |
           COUNT=$(ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
-            "find /home/starsky/blackheart-train/artifacts -name '*.pkl' 2>/dev/null | wc -l")
+            "find /home/starsky/blackheart-artifacts -name '*.pkl' 2>/dev/null | wc -l")
           echo "VPS artifact count: ${COUNT}"
           if [ "${COUNT:-0}" -eq 0 ]; then
             echo "::error::Artifact directory on VPS is empty — inference will 502 on every backfill call."
