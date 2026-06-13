@@ -79,6 +79,7 @@ _KNOWN_SOURCES: dict[str, str | None] = {
     "binance_macro": "blackheart_ingest.sources.binance_macro",
     "forexfactory": "blackheart_ingest.sources.forexfactory",
     "deribit": "blackheart_ingest.sources.deribit",
+    "deribit_options": "blackheart_ingest.sources.deribit_options",
     "binance_spot": "blackheart_ingest.sources.binance_spot",
 }
 
