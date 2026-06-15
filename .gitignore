@@ -17,10 +17,23 @@ screenshot/
 # Agent scratch files (quant-researcher working files at project root)
 tmp_*
 .tmp_*
+.research_run_state.json.archived.*
+.wt-*/
 **/.next/
 **/node_modules/
 **/build/
 **/.gradle/
+
+# Ad-hoc analysis scripts + exported research data at project root (kept on disk, untracked)
+.alloc_*.py
+.earn_*.py
+.eth_*.py
+.dbq.py
+.mint_jwt.py
+.research_*.py
+.btc_*.csv
+.eth_*.csv
+.carry_validation/
 
 # Secrets — these MUST never be committed
 .env
@@ -58,3 +71,6 @@ Thumbs.db
 # Large analysis outputs — optional. Comment if you actually want them tracked.
 # (kept tracked for now since they're plain text and audit-useful)
 # db-analysis/
+
+# Brainstorming visual-companion mockups
+.superpowers/
