@@ -166,6 +166,50 @@ def _change_pct(col: str, periods: int) -> Callable[[pd.DataFrame], pd.Series]:
     return _impl
 
 
+def _monthly_change_pct(col: str, months: int) -> Callable[[pd.DataFrame], pd.Series]:
+    """Calendar-MONTH % change of ``col`` over ``months`` months.
+
+    Unlike :func:`_change_pct` (a ROW-count change), this is robust to a
+    missing monthly print. The macro compute engine pivots monthly FRED
+    series (CPIAUCSL/M2SL) on their native publication ``event_time`` index
+    with NO calendar resample, so a dropped month makes a row-count
+    ``pct_change(12)`` silently step over the gap and report a 13-month
+    change as YoY for ~12 months (verified hazard: CPIAUCSL is missing one
+    obs as of 2026-06). This transformer reindexes onto a COMPLETE monthly
+    grid so ``months`` always means calendar months.
+
+    PIT-safe: the output keeps each print's ORIGINAL publication
+    ``event_time`` (the value became public on its release date, not on the
+    1st of the month) — it deliberately does NOT re-anchor to month-start,
+    which would leak the value ~2 weeks early. A genuinely-missing month
+    yields NaN (dropped) rather than a fabricated carry-forward; the
+    consumer's own ``last_value`` ffill (max_ffill_age_hours) carries the
+    prior value across the gap at join time.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        s = df[col].astype("float64").dropna()
+        if s.empty:
+            return pd.Series(dtype="float64")
+        frame = pd.DataFrame(
+            {"v": s.to_numpy(), "ts": s.index},
+            index=s.index.to_period("M"),
+        )
+        # One print per calendar month; keep the latest-published if a month
+        # somehow has two (e.g. a revision print at a distinct event_time).
+        frame = frame[~frame.index.duplicated(keep="last")]
+        full = pd.period_range(frame.index.min(), frame.index.max(), freq="M")
+        frame = frame.reindex(full)
+        frame["chg"] = frame["v"].pct_change(periods=months, fill_method=None)
+        present = frame["ts"].notna() & frame["chg"].notna()
+        return pd.Series(
+            frame.loc[present, "chg"].to_numpy(),
+            index=pd.DatetimeIndex(frame.loc[present, "ts"]),
+        )
+
+    return _impl
+
+
 def _change_diff(col: str, periods: int) -> Callable[[pd.DataFrame], pd.Series]:
     """Absolute change of ``col`` over ``periods`` rows. See note on
     :func:`_change_pct` for the cadence semantics.
@@ -1133,6 +1177,142 @@ FEATURES: tuple[FeatureDef, ...] = (
         ffill_policy="last_value",
         max_ffill_age_hours=72,
         description="252-business-day rolling z-score of US HY credit spread (BAMLH0A0HYM2).",
+    ),
+    # ── FRED inflation / liquidity macro axes (V181) ──────────────────
+    #   CPIAUCSL + M2SL are MONTHLY series (one macro_raw row per month, dated
+    #   at first-release publication via the FRED ALFRED vintage + 45/56d lag).
+    #   compute._compute_from_macro_raw pivots on the NATIVE event_time cadence
+    #   (no daily resample), so `periods` here is in MONTHS, not business days:
+    #   YoY = 12, MoM = 1. max_ffill_age_hours is bumped to 1488h (62d) so a
+    #   monthly value carries across the ~30d inter-publication gap at the
+    #   consumer's join (the 72h cap used for daily series would null them out
+    #   for most of each month).
+    FeatureDef(
+        name="cpi_yoy",
+        lookback_hours=14000,
+        version=1,
+        family="macro",
+        inputs=("CPIAUCSL",),
+        transformer=_monthly_change_pct("CPIAUCSL", months=12),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=1488,
+        description="US CPI year-over-year inflation rate (CPIAUCSL, 12 CALENDAR-month % change, missing-month robust). MONTHLY cadence.",
+    ),
+    FeatureDef(
+        name="cpi_mom",
+        lookback_hours=2200,
+        version=1,
+        family="macro",
+        inputs=("CPIAUCSL",),
+        transformer=_monthly_change_pct("CPIAUCSL", months=1),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=1488,
+        description="US CPI month-over-month inflation (CPIAUCSL, 1 CALENDAR-month % change, missing-month robust). MONTHLY cadence.",
+    ),
+    FeatureDef(
+        name="m2_yoy",
+        lookback_hours=14000,
+        version=1,
+        family="macro",
+        inputs=("M2SL",),
+        transformer=_monthly_change_pct("M2SL", months=12),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=1488,
+        description="US M2 money-supply year-over-year growth (M2SL, 12 CALENDAR-month % change, missing-month robust) — liquidity proxy. MONTHLY cadence.",
+    ),
+    # ── US equity-index macro axes (V181) — risk-on/off regime ────────
+    #   SP500 (S&P 500) + NASDAQCOM (NASDAQ Composite), DAILY business-day
+    #   close from FRED (lag 1d). Crypto is positively, regime-dependently
+    #   correlated with US equities (strengthened post-2020), so these are
+    #   risk-regime CONTEXT inputs, not standalone alphas. `periods`/window are
+    #   in business days. NOTE: a true BTC-equity correlation/beta feature
+    #   needs a macro_raw×market_data join the single-table compute engine
+    #   does not support — research computes that at join time from these +
+    #   the BTC return stream.
+    FeatureDef(
+        name="sp500_level",
+        version=1,
+        family="macro",
+        inputs=("SP500",),
+        transformer=_passthrough("SP500"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=72,
+        description="S&P 500 index close (FRED SP500). Passthrough. NOTE: FRED serves only ~10yr of SP500.",
+    ),
+    FeatureDef(
+        name="sp500_return_20d",
+        lookback_hours=960,
+        version=1,
+        family="macro",
+        inputs=("SP500",),
+        transformer=_change_pct("SP500", periods=20),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=72,
+        description="S&P 500 20-business-day % return — ~1-month risk-on/off trend.",
+    ),
+    FeatureDef(
+        name="sp500_return_60d",
+        lookback_hours=2400,
+        version=1,
+        family="macro",
+        inputs=("SP500",),
+        transformer=_change_pct("SP500", periods=60),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=72,
+        description="S&P 500 60-business-day % return — ~1-quarter trend.",
+    ),
+    FeatureDef(
+        name="sp500_realized_vol_20d",
+        lookback_hours=960,
+        version=1,
+        family="macro",
+        inputs=("SP500",),
+        transformer=_rolling_realized_vol("SP500", window_bars=20, min_periods=10, annualize_factor=252),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=72,
+        description="S&P 500 20-day annualized realized vol (252 trading days). Pairs with VIX for equity VRP.",
+    ),
+    FeatureDef(
+        name="nasdaq_level",
+        version=1,
+        family="macro",
+        inputs=("NASDAQCOM",),
+        transformer=_passthrough("NASDAQCOM"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=72,
+        description="NASDAQ Composite index close (FRED NASDAQCOM). Passthrough. Highest equity correlation to crypto.",
+    ),
+    FeatureDef(
+        name="nasdaq_return_20d",
+        lookback_hours=960,
+        version=1,
+        family="macro",
+        inputs=("NASDAQCOM",),
+        transformer=_change_pct("NASDAQCOM", periods=20),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=72,
+        description="NASDAQ Composite 20-business-day % return — tech/risk-beta trend.",
+    ),
+    FeatureDef(
+        name="nasdaq_return_60d",
+        lookback_hours=2400,
+        version=1,
+        family="macro",
+        inputs=("NASDAQCOM",),
+        transformer=_change_pct("NASDAQCOM", periods=60),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=72,
+        description="NASDAQ Composite 60-business-day % return — ~1-quarter tech/risk trend.",
     ),
     # ── Blueprint § 5.2: Positioning (5 features) ─────────────────────
     FeatureDef(
