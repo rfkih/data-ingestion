@@ -119,6 +119,37 @@ def _publication_lag(series_id: str) -> int:
     return _PUBLICATION_LAG_DAYS.get(series_id.upper(), _DEFAULT_LAG_DAYS)
 
 
+# Series with a publication lag above this (days) are treated as "lagged"
+# (monthly/quarterly) and get a widened observation read — see
+# _effective_window_start. Daily/real-time series (lag 1-7) are untouched.
+_LAGGED_LAG_THRESHOLD_DAYS = 7
+# Extra observation history (on top of the publication lag) to read for lagged
+# series, so even a delayed release (e.g. the 2025 shutdown CPI gap) is caught.
+_LAGGED_EXTRA_LOOKBACK_DAYS = 60
+
+
+def _effective_window_start(
+    series_id: str, req_start: datetime, req_end: datetime
+) -> datetime:
+    """Observation-window start to actually read for this series.
+
+    A scheduled tick pulls a SHORT window (ml_ingest_schedule.lookback_hours,
+    capped at 720h/30d by a CHECK). FRED keys values by OBSERVATION date, and
+    publication-lagged series (CPI 45d, M2 56d, GDP 120d) only become public
+    ~lag days AFTER their observation date — so a 30d obs window never overlaps
+    a freshly-published monthly print and the tick would never fetch it. Widen
+    the read back by the publication lag + a margin for those series (never
+    narrower than what the caller asked for). Daily/real-time series keep the
+    requested window. The PIT filter is given THIS same widened start per series
+    so the re-read older prints are de-duplicated, not PIT-rejected.
+    """
+    lag = _publication_lag(series_id)
+    if lag <= _LAGGED_LAG_THRESHOLD_DAYS:
+        return req_start
+    widened = req_end - timedelta(days=lag + _LAGGED_EXTRA_LOOKBACK_DAYS)
+    return min(req_start, widened)
+
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(3),
@@ -234,27 +265,33 @@ def fetch(request: IngestionRequest) -> IngestionResult:
     client = Fred(api_key=settings.fred_api_key)
 
     all_rows: list[dict[str, Any]] = []
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
     series_seen: list[str] = []
 
     for series_id in series_ids:
         use_vintage = use_vintage_global and series_id.upper() in _REVISED_SERIES
+        # Lagged (monthly/quarterly) series read further back than the caller's
+        # window so a short scheduled tick still catches a freshly-published
+        # print whose observation date is already `lag` days old.
+        eff_start = _effective_window_start(series_id, request.start, request.end)
 
         logger.info(
             "fred fetching series=%s vintage=%s start=%s end=%s",
             series_id,
             use_vintage,
-            request.start.date(),
+            eff_start.date(),
             request.end.date(),
         )
 
         try:
             if use_vintage:
                 series_data = _alfred_get_series_first_release(
-                    client, series_id, request.start.date(), request.end.date()
+                    client, series_id, eff_start.date(), request.end.date()
                 )
             else:
                 series_data = _fred_get_series(
-                    client, series_id, request.start.date(), request.end.date()
+                    client, series_id, eff_start.date(), request.end.date()
                 )
         except Exception as e:  # noqa: BLE001
             logger.exception("fred series fetch failed | series=%s", series_id)
@@ -267,12 +304,15 @@ def fetch(request: IngestionRequest) -> IngestionResult:
 
         rows = _build_rows(series_id, series_data, use_vintage=use_vintage, now=now)
         all_rows.extend(rows)
+        # PIT per series with THIS series' effective window start: the extra
+        # history read for lagged series is then de-duplicated at write rather
+        # than PIT-rejected (which would noise the health metric every tick).
+        acc, rej = partition_by_pit(
+            rows, config=_PIT_CONFIG, now=now, request_start=eff_start
+        )
+        accepted.extend(acc)
+        rejected.extend(rej)
         series_seen.append(series_id)
-
-    # PIT filter --------------------------------------------------------------
-    accepted, rejected = partition_by_pit(
-        all_rows, config=_PIT_CONFIG, now=now, request_start=request.start
-    )
 
     # Write -------------------------------------------------------------------
     rows_inserted = 0
