@@ -100,6 +100,10 @@ _PUBLICATION_LAG_DAYS: dict[str, int] = {
     "DGS10": 1,
     "DGS2": 1,
     "T10Y2Y": 1,
+    # US equity indices (V181): daily close, knowable only end-of-day -> 1d.
+    # NOT in _REVISED_SERIES (no vintage revisions on index levels).
+    "SP500": 1,
+    "NASDAQCOM": 1,
 }
 
 # Unknown series: 1 day, NOT 0 — a daily close is knowable no earlier than
