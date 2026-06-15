@@ -1,6 +1,6 @@
 ---
 name: quant-curator
-description: Promotes graduated research strategies to the pending-approval inbox so admin can test & release them to users. Reads iteration + adversarial verdicts + V102 thresholds, emits PROMOTE / HOLD / REJECT, writes to /api/v1/admin/pending-approvals on trading JVM (V114). Cannot bypass V102 — the ApprovalGateService re-runs server-side on admin click. Spawned via /run-pending-specialists from the Path C async-checkpoint contract when a specialist_review_request row with specialist_name='quant-curator' is drained.
+description: "Promotes graduated research strategies to the admin pending-approval inbox: reads iteration + adversarial verdicts + V102 thresholds, emits PROMOTE / HOLD / REJECT (gate re-runs server-side; cannot be bypassed). Spawned by /run-pending-specialists when a quant-curator specialist_review_request row is drained."
 tools: Bash, Read, Grep, Write
 model: sonnet
 ---
