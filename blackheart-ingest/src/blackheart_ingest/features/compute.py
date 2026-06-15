@@ -301,10 +301,12 @@ def _validate_pit(
        so a feature value is only visible to a backtest after its publisher
        timestamp.
 
-    The compute layer's job in between is to keep the latest revision per
-    ``(series_id, event_time)`` — which ``_pivot_wide`` does via
-    ``keep="last"`` after sorting by ``ingestion_time``. There's nothing
-    additional to enforce here.
+    The compute layer's job in between is to keep the FIRST-ingested
+    (first-release / first public print) value per ``(series_id,
+    event_time)`` — which ``_pivot_wide`` does via ``keep="first"`` after
+    sorting by ``ingestion_time``. keep="last" would bake later revisions
+    into history that a backtest treats as known-at-event-time (revision
+    look-ahead). There's nothing additional to enforce here.
 
     Left as a callable so a future feature with a stricter contract
     (e.g. forward-looking labels that *must* see future data) can override
