@@ -58,7 +58,22 @@ sshkey*.pem
 Thumbs.db
 .vscode/
 .idea/
-.claude/
+
+# Claude Code config: track the SHARED agent/command/workflow/hook config + base settings,
+# ignore machine-local settings and session/scratch state.
+.claude/*
+!.claude/agents/
+!.claude/commands/
+!.claude/workflows/
+!.claude/hooks/
+!.claude/settings.json
+.claude/settings.local.json
+.claude/skills/
+.claude/worktrees/
+.claude/projects/
+
+# Research/agent scratch workspace (working files, archived checkpoints) — keep out of git
+research-scratch/
 
 # Compose project-name state (created by docker compose)
 .docker-compose-name

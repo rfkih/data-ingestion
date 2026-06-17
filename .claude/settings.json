@@ -1,0 +1,143 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Project\\.claude\\hooks\\superpowers-session-start.cmd"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+
+      "Bash(./gradlew compileJava *)",
+      "Bash(./gradlew compileTestJava *)",
+      "Bash(./gradlew researchBootJar *)",
+      "Bash(./gradlew tradingBootJar *)",
+
+      "Bash(python -m pytest *)",
+      "Bash(python3 -m pytest *)",
+      "Bash(PYTHONPATH=src python -m pytest *)",
+      "Bash(PYTHONPATH=src python3 -m pytest *)",
+      "Bash(python -m py_compile *)",
+      "Bash(python3 -m py_compile *)",
+
+      "Bash(python3 research/scripts/fetch-run.py *)",
+      "Bash(python3 research/scripts/analyze-run.py *)",
+
+      "Bash(jar tf *)",
+      "Bash(unzip -l *)",
+      "Bash(unzip -p *)",
+      "Bash(tasklist *)",
+
+      "Bash(./scripts/queue-status.sh:*)",
+      "Bash(research-orchestrator/scripts/queue-status.sh:*)",
+      "Bash(scripts/queue-status.sh:*)",
+      "Bash(./scripts/journal-read.sh:*)",
+      "Bash(research-orchestrator/scripts/journal-read.sh:*)",
+      "Bash(scripts/journal-read.sh:*)",
+      "Bash(./scripts/orch.sh:*)",
+      "Bash(research-orchestrator/scripts/orch.sh:*)",
+      "Bash(scripts/orch.sh:*)",
+      "Bash(/c/Project/blackheart-research-orchestrator/scripts/orch.sh:*)",
+      "Bash(C:/Project/blackheart-research-orchestrator/scripts/orch.sh:*)",
+      "Bash(/c/Project/blackheart-research-orchestrator/scripts/orch.sh GET *)",
+      "Bash(/c/Project/blackheart-research-orchestrator/scripts/orch.sh HEAD *)",
+      "Bash(/c/Project/blackheart-research-orchestrator/scripts/orch.sh POST *)",
+      "Bash(research-orchestrator/scripts/orch.sh GET *)",
+      "Bash(research-orchestrator/scripts/orch.sh HEAD *)",
+      "Bash(research-orchestrator/scripts/orch.sh POST *)",
+      "Bash(scripts/orch.sh GET *)",
+      "Bash(scripts/orch.sh HEAD *)",
+      "Bash(scripts/orch.sh POST *)",
+      "Bash(LOGIN_RESP=$\\(curl *http://127.0.0.1:8081/*)",
+      "Bash(JVM_TOKEN=$\\(curl *http://127.0.0.1:8081/*)",
+      "Bash(JVM_TOKEN=$\\(echo *)",
+
+      "Bash(TOKEN=$\\(grep *)",
+      "Bash(ORCH_BASE=http://*)",
+      "Bash(PLAN_REQUEST=$\\(curl *)",
+      "Bash(GRAD_REQUEST=$\\(curl *)",
+      "Bash(HYPOTHESIS_REQUEST=$\\(curl *)",
+      "Bash(QUEUE_RESP=$\\(curl *)",
+      "Bash(TICK_RESP=$\\(curl *)",
+      "Bash(WF_RESP=$\\(curl *)",
+      "Bash(RESP=$\\(curl *)",
+      "Bash(TARGET_ID=$\\(echo *)",
+      "Bash(GRAD_TARGET_ID=$\\(echo *)",
+      "Bash(HYPOTHESIS_JOURNAL_ID=$\\(echo *)",
+      "Bash(HYPOTHESIS_JOURNAL_ID=$\\(curl *)",
+      "Bash(ITERATION_ID=$\\(echo *)",
+      "Bash(VERDICT=$\\(echo *)",
+      "Bash(QUEUE_ID=$\\(echo *)",
+      "Bash(PENDING_ROWS=$\\(psql *)",
+      "Bash(PENDING_ROWS=$\\(PGPASSWORD=*)",
+      "Bash(LOG_AGE_SEC=$\\(date *)",
+      "Bash(PGPASSWORD=blackheart psql *)",
+      "Bash(PGPASSWORD=trading_app psql *)",
+      "Bash(PGPASSWORD=research_app psql *)",
+      "Bash(PGPASSWORD=blackheart_research psql *)",
+      "Bash(PGPASSWORD=blackheart_research psql:*)",
+      "Bash(PGPASSWORD=blackheart psql:*)",
+      "Bash(PGPASSWORD=trading_app psql:*)",
+      "Bash(PGPASSWORD=research_app psql:*)",
+
+      "Edit(**/research-orchestrator/src/**)",
+      "Edit(**/research-orchestrator/tests/**)",
+      "Edit(**/research-orchestrator/pyproject.toml)",
+      "Edit(**/research-orchestrator/README.md)",
+      "Write(**/research-orchestrator/src/**)",
+      "Write(**/research-orchestrator/tests/**)",
+      "MultiEdit(**/research-orchestrator/src/**)",
+      "MultiEdit(**/research-orchestrator/tests/**)",
+
+      "Edit(**/research/specs/*.yml)",
+      "Edit(**/research/specs/*.yaml)",
+      "Write(**/research/specs/*.yml)",
+      "Write(**/research/specs/*.yaml)",
+
+      "Read(C:/Users/rifki/.claude/projects/C--Project/memory/**)",
+      "Glob(C:/Users/rifki/.claude/projects/C--Project/memory/**)",
+      "Edit(C:/Users/rifki/.claude/projects/C--Project/memory/**)",
+      "Write(C:/Users/rifki/.claude/projects/C--Project/memory/**)",
+      "Bash(ls /c/Users/rifki/.claude/projects/C--Project/memory*)",
+      "Bash(ls C:/Users/rifki/.claude/projects/C--Project/memory*)",
+
+      "Read(/tmp/**)",
+      "Read(\\tmp\\**)",
+      "Glob(/tmp/**)",
+      "Write(/tmp/**)",
+      "Edit(/tmp/**)",
+      "Bash(ls /tmp/*)",
+      "Bash(ls -la /tmp/*)",
+      "Bash(cat /tmp/*)",
+      "Bash(rm /tmp/*)",
+
+      "Write(C:/Users/rifki/AppData/Local/Temp/**)",
+      "Write(/c/Users/rifki/AppData/Local/Temp/**)",
+      "Edit(C:/Users/rifki/AppData/Local/Temp/**)",
+      "Edit(/c/Users/rifki/AppData/Local/Temp/**)",
+      "Read(C:/Users/rifki/AppData/Local/Temp/**)",
+      "Read(/c/Users/rifki/AppData/Local/Temp/**)",
+
+      "Write(/tmp/queue-*.json)",
+      "Write(/tmp/tick-*.json)",
+      "Write(/tmp/journal-*.json)",
+      "Write(/tmp/wf-*.json)",
+      "Write(/tmp/body-*.json)",
+      "Write(/tmp/review-*.json)",
+      "Write(/tmp/hypothesis-*.json)",
+      "Write(/tmp/plan-*.json)",
+      "Write(/tmp/*.json)",
+      "Write(/tmp/*.py)",
+      "Write(/tmp/*.txt)",
+      "Edit(/tmp/*.json)",
+      "Edit(/tmp/*.py)"
+    ]
+  }
+}
