@@ -6,10 +6,12 @@ on:
     branches: [master, main]
     paths:
       - 'blackheart-ingest/**'
+      - '!blackheart-ingest/**/*.md'   # docs-only changes don't trigger a deploy
       - '.github/workflows/blackheart-ingest-ci.yml'
   pull_request:
     paths:
       - 'blackheart-ingest/**'
+      - '!blackheart-ingest/**/*.md'
   workflow_dispatch:
 
 concurrency:

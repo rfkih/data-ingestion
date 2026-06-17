@@ -6,10 +6,12 @@ on:
     branches: [master, main]
     paths:
       - 'blackheart-inference/**'
+      - '!blackheart-inference/**/*.md'   # docs-only changes don't trigger a deploy
       - '.github/workflows/blackheart-inference-ci.yml'
   pull_request:
     paths:
       - 'blackheart-inference/**'
+      - '!blackheart-inference/**/*.md'
   workflow_dispatch:
 
 concurrency:
