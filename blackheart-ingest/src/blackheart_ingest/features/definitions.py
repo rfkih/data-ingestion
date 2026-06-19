@@ -1529,6 +1529,116 @@ FEATURES: tuple[FeatureDef, ...] = (
         description="30-day rolling z-score of Deribit ETH DVOL (hourly, window=720 rows). "
         "Step 4 alt-data — orthogonal vol-risk-premium input.",
     ),
+    # ── Blueprint § 5.4 (skew): Deribit option-surface skew + term structure ──
+    # New `deribit_options` source (sources/deribit_options.py → macro_raw, hourly,
+    # plant-and-accumulate from 2026-06-15). Orthogonal NON-PRICE demand signal:
+    # 25-delta risk reversal (downside-vs-upside protection demand) + ATM IV level +
+    # vol term-structure slope. DVOL (above) gives the IV LEVEL; these give the skew
+    # TILT and slope. Mirrors the DVOL plumbing exactly (market_structure, symbol=NULL,
+    # hourly cadence, 12h ffill). Matching feature_registry rows: trading-engine V187.
+    FeatureDef(
+        name="btc_rr25_skew_30d",
+        version=1,
+        family="market_structure",
+        inputs=("deribit_rr25_btc_30d",),
+        transformer=_passthrough("deribit_rr25_btc_30d"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="Deribit BTC 25-delta risk reversal at ~30d expiry (put-wing IV - "
+        "call-wing IV, %). Passthrough of macro_raw series deribit_rr25_btc_30d (hourly). "
+        "Positive = downside-protection bid; orthogonal non-price sentiment. Step 4 alt-data.",
+    ),
+    FeatureDef(
+        name="eth_rr25_skew_30d",
+        version=1,
+        family="market_structure",
+        inputs=("deribit_rr25_eth_30d",),
+        transformer=_passthrough("deribit_rr25_eth_30d"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="Deribit ETH 25-delta risk reversal at ~30d expiry (put-wing IV - "
+        "call-wing IV, %). Passthrough of macro_raw series deribit_rr25_eth_30d (hourly). "
+        "Step 4 alt-data.",
+    ),
+    FeatureDef(
+        name="btc_rr25_skew_zscore_30d",
+        lookback_hours=768,
+        version=1,
+        family="market_structure",
+        # deribit_options hourly cadence → 30 days = 720 rows (same as DVOL z-score).
+        inputs=("deribit_rr25_btc_30d",),
+        transformer=_rolling_zscore("deribit_rr25_btc_30d", window=720, min_periods=240),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="30-day rolling z-score of Deribit BTC 25Δ risk reversal (hourly, "
+        "window=720 rows). Regime-normalized skew: high = crowded downside hedging. "
+        "Step 4 alt-data — orthogonal options-demand signal.",
+    ),
+    FeatureDef(
+        name="eth_rr25_skew_zscore_30d",
+        lookback_hours=768,
+        version=1,
+        family="market_structure",
+        inputs=("deribit_rr25_eth_30d",),
+        transformer=_rolling_zscore("deribit_rr25_eth_30d", window=720, min_periods=240),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="30-day rolling z-score of Deribit ETH 25Δ risk reversal (hourly, "
+        "window=720 rows). Step 4 alt-data — orthogonal options-demand signal.",
+    ),
+    FeatureDef(
+        name="btc_atm_iv_30d",
+        version=1,
+        family="market_structure",
+        inputs=("deribit_atm_iv_btc_30d",),
+        transformer=_passthrough("deribit_atm_iv_btc_30d"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="Deribit BTC ATM implied vol at ~30d expiry (%). Passthrough of "
+        "macro_raw series deribit_atm_iv_btc_30d (hourly). Step 4 alt-data.",
+    ),
+    FeatureDef(
+        name="eth_atm_iv_30d",
+        version=1,
+        family="market_structure",
+        inputs=("deribit_atm_iv_eth_30d",),
+        transformer=_passthrough("deribit_atm_iv_eth_30d"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="Deribit ETH ATM implied vol at ~30d expiry (%). Passthrough of "
+        "macro_raw series deribit_atm_iv_eth_30d (hourly). Step 4 alt-data.",
+    ),
+    FeatureDef(
+        name="btc_vol_term_spread",
+        version=1,
+        family="market_structure",
+        inputs=("deribit_term_spread_btc",),
+        transformer=_passthrough("deribit_term_spread_btc"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="Deribit BTC vol term-structure slope (ATM IV 30d - near, %). "
+        "Passthrough of macro_raw series deribit_term_spread_btc (hourly). Positive = "
+        "contango (forward vol > spot vol). Step 4 alt-data.",
+    ),
+    FeatureDef(
+        name="eth_vol_term_spread",
+        version=1,
+        family="market_structure",
+        inputs=("deribit_term_spread_eth",),
+        transformer=_passthrough("deribit_term_spread_eth"),
+        pit_safe=True,
+        ffill_policy="last_value",
+        max_ffill_age_hours=12,
+        description="Deribit ETH vol term-structure slope (ATM IV 30d - near, %). "
+        "Passthrough of macro_raw series deribit_term_spread_eth (hourly). Step 4 alt-data.",
+    ),
     # ── Blueprint § 5.4 (continued): from market_data ─────────────────
     FeatureDef(
         name="btc_realized_vol_30d",
