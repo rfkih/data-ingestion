@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from .api.batch import router as batch_router
+from .api.drift_monitoring import router as drift_router
 from .api.health import router as health_router
 from .api.inference import router as inference_router
 from .api.metrics import router as metrics_router
@@ -102,6 +103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(streaming_router)
     app.include_router(batch_router)
     app.include_router(metrics_router)
+    app.include_router(drift_router)
     return app
 
 

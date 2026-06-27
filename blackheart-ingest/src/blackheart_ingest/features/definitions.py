@@ -37,6 +37,42 @@ FeatureTransformer = Callable[
     [Union[pd.DataFrame, dict[str, pd.DataFrame]]], pd.Series
 ]
 
+# Aggregation function for the OPT-IN raw-aggregation mode (see RawAggregation
+# and compute._aggregate_raw_long). "sum" totals ``value`` per bucket; "count"
+# counts the events per bucket (ignores ``value``).
+RawAggFunc = Literal["sum", "count"]
+
+
+@dataclass(frozen=True)
+class RawAggregation:
+    """Opt-in spec: resample event-level ``macro_raw`` rows onto a regular
+    time grid BEFORE the wide pivot.
+
+    Why this exists: the standard ``macro_raw`` read path
+    (``compute._pivot_wide``) dedupes long rows by ``(series_id, event_time)``
+    keeping the FIRST -- correct for revision-prone publisher series (one
+    logical value per timestamp, later prints are revisions) but CATASTROPHIC
+    for event-level streams where MANY genuine rows share an ``event_time``
+    (e.g. ``binance_liquidation`` -- one row per force-order, dozens per
+    second in a cascade). Deduping would silently drop all-but-one event.
+
+    When a FeatureDef sets ``raw_aggregation``, the engine instead resamples
+    each input series into ``freq`` buckets with ``func`` (sum/count) so every
+    event contributes, producing a regular grid the rolling transformer then
+    consumes. Bucketing is ``closed="left", label="right"`` -- a bucket spans
+    ``[t, t+freq)`` stamped at its RIGHT edge ``t+freq`` (the first instant the
+    aggregate is fully observable; PIT-conservative, no peeking into a
+    half-formed bucket). Empty buckets are 0 (a quiet hour genuinely had $0 /
+    0 liquidations), so the grid stays contiguous and rolling windows count
+    real elapsed hours.
+
+    Default (``raw_aggregation=None``) leaves the legacy dedupe-first path
+    byte-identical for every existing feature.
+    """
+
+    func: RawAggFunc
+    freq: str = "1h"
+
 
 @dataclass(frozen=True)
 class FeatureDef:
@@ -98,6 +134,11 @@ class FeatureDef:
     # compute the correlation. required_symbols=("BTCUSDT", "ETHUSDT").
     required_symbols: tuple[str, ...] = field(default=())
 
+    # OPT-IN: resample event-level macro_raw rows onto a regular grid BEFORE
+    # the pivot (see RawAggregation). None (default) keeps the legacy
+    # dedupe-first path byte-identical. Only valid for raw_tables=("macro_raw",).
+    raw_aggregation: RawAggregation | None = None
+
     def __post_init__(self) -> None:
         if bool(self.symbols) != bool(self.intervals):
             raise ValueError(
@@ -124,6 +165,14 @@ class FeatureDef:
                 f"label_direction='forward' filter can exclude them from inputs. "
                 f"If this is intentional, set family='label' and add "
                 f"label_direction='forward' to the corresponding SQL migration."
+            )
+        if self.raw_aggregation is not None and self.raw_tables != ("macro_raw",):
+            raise ValueError(
+                f"FeatureDef '{self.name}' v{self.version}: raw_aggregation is "
+                f"only supported for macro_raw features (got "
+                f"raw_tables={self.raw_tables!r}). The aggregation step runs in "
+                f"the long-format read path before the pivot; market_data / "
+                f"orderbook_snapshots are already read wide."
             )
 
 
@@ -413,6 +462,45 @@ def _acceleration(col: str, periods: int) -> Callable[[pd.DataFrame], pd.Series]
         s = df[col].astype("float64")
         velocity = s.pct_change(periods=periods, fill_method=None)
         return velocity.diff(periods=periods)
+
+    return _impl
+
+
+def _rolling_sum(
+    col: str, window: int, min_periods: int
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """Rolling sum of ``col`` over ``window`` rows.
+
+    Used by liq_event_count_4h_*: the input column is an hourly EVENT COUNT
+    (produced by RawAggregation func='count'), so a 4-row rolling sum is the
+    count of liquidation events over the trailing 4h. ``min_periods`` guards
+    the warm-up edge so a partial window doesn't masquerade as a full one.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        s = df[col].astype("float64")
+        return s.rolling(window, min_periods=min_periods).sum()
+
+    return _impl
+
+
+def _second_difference(
+    col: str, periods: int = 1
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """Discrete second difference of ``col``: ``diff(periods).diff(periods)``.
+
+    The acceleration (2nd derivative) of a LEVEL series. Unlike
+    :func:`_acceleration` (which differences a pct_change and therefore blows
+    up to +/-inf whenever the denominator bucket is 0 -- routine for hourly
+    liquidation buckets, many of which are exactly $0), this uses ABSOLUTE
+    differences, so a quiet bucket contributes 0 rather than poisoning the
+    output with inf. Used by liq_usd_rate_accel_1h_* over the hourly summed
+    liquidation-USD rate (RawAggregation func='sum').
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        s = df[col].astype("float64")
+        return s.diff(periods=periods).diff(periods=periods)
 
     return _impl
 
@@ -980,6 +1068,252 @@ def _forward_triple_barrier(
 
 
 # ── Starter feature set ───────────────────────────────────────────────────────
+
+# ── US macro-event static schedules (EVENT_PROXIMITY, V202) ──────────────────
+#
+# There is NO free historical economic-calendar source (the faireconomy.media
+# mirror used by sources/forexfactory.py is current-week only; forexfactory.com
+# HTML is CloudFlare-blocked), so these features run off a STATIC, embedded
+# schedule of pre-scheduled US macro-event release datetimes. This is PIT-SAFE:
+# FOMC/CPI/NFP dates are PUBLISHED IN ADVANCE (the Fed posts its FOMC calendar
+# ~1-2 years out; the BLS posts CPI + Employment-Situation release schedules a
+# year ahead), so knowing them on any past bar is not look-ahead. The schedule
+# deliberately encodes the PRE-SCHEDULED datetime (what was knowable in advance),
+# NOT ex-post actual release time -- this is also the correct anchor for an
+# "event proximity" feature, and it sidesteps the few historical deviations
+# (the unscheduled 2020-03-15 emergency FOMC cut; the late-2025 government-
+# shutdown BLS delays), which were NOT knowable in advance.
+#
+# TIMEZONE CONVENTION: market_data's wide-frame index is tz-naive UTC (compute
+# _read_market_data_wide does tz_convert(None) after utc=True), so every
+# datetime below is a tz-naive UTC wall-clock Timestamp. We use a single fixed
+# UTC hour per event class rather than tracking US daylight-saving transitions:
+#   * FOMC statement is 2:00pm ET == 19:00 UTC (EST, Nov-Mar) / 18:00 UTC
+#     (EDT, Mar-Nov); we stamp 19:00 UTC for all (the <=1h DST wobble is
+#     immaterial to hours-to-next / days-since / +/-24h-window features).
+#   * CPI + NFP release at 8:30am ET == 13:30 UTC (EST) / 12:30 UTC (EDT);
+#     we stamp 12:30 UTC for all (same <=1h immateriality argument).
+#
+# ACCURACY / PROVENANCE (see also the V202 trading-engine migration):
+#   * FOMC 2018-2026 = the Fed's actual published decision-day dates (2nd day
+#     of each two-day meeting). 2027 = the Fed's TENTATIVE schedule and is
+#     APPROXIMATED (pattern-projected) -- flagged below.
+#   * CPI 2018-2025 = BLS actual scheduled release dates; 2026-2027 are
+#     BLS-pattern best-effort and may be +/-1-2 days at the day level.
+#   * NFP 2018-2025 best-effort actuals; 2026-2027 pattern-projected. NFP is
+#     embedded for completeness + a v2 feature -- NO v1 FeatureDef consumes it.
+# Bars before the first / after the last scheduled event yield NaN (the engine
+# dropna handles it) rather than an error.
+
+_FOMC_HOUR_UTC = 19           # 2:00pm ET statement, stamped 19:00 UTC (see note)
+_RELEASE_HOUR_UTC = 12        # 8:30am ET CPI/NFP release ...
+_RELEASE_MIN_UTC = 30         # ... stamped 12:30 UTC (see note)
+
+
+def _utc_dt(year: int, month: int, day: int, hour: int, minute: int = 0) -> pd.Timestamp:
+    """A tz-naive UTC wall-clock Timestamp (matches market_data's index)."""
+    return pd.Timestamp(year=year, month=month, day=day, hour=hour, minute=minute)
+
+
+def _fomc(year: int, month: int, day: int) -> pd.Timestamp:
+    return _utc_dt(year, month, day, _FOMC_HOUR_UTC, 0)
+
+
+def _rel(year: int, month: int, day: int) -> pd.Timestamp:
+    return _utc_dt(year, month, day, _RELEASE_HOUR_UTC, _RELEASE_MIN_UTC)
+
+
+# FOMC interest-rate DECISION datetimes (8/year). Source: federalreserve.gov
+# FOMC meeting calendar; date = the 2nd (statement) day. 2018-2026 actual;
+# 2027 = Fed tentative schedule (APPROXIMATED).
+FOMC_DECISIONS: tuple[pd.Timestamp, ...] = (
+    _fomc(2018, 1, 31), _fomc(2018, 3, 21), _fomc(2018, 5, 2), _fomc(2018, 6, 13),
+    _fomc(2018, 8, 1), _fomc(2018, 9, 26), _fomc(2018, 11, 8), _fomc(2018, 12, 19),
+    _fomc(2019, 1, 30), _fomc(2019, 3, 20), _fomc(2019, 5, 1), _fomc(2019, 6, 19),
+    _fomc(2019, 7, 31), _fomc(2019, 9, 18), _fomc(2019, 10, 30), _fomc(2019, 12, 11),
+    # 2020-03-18 = the SCHEDULED March meeting (the 2020-03-15 cut was unscheduled
+    # and not knowable in advance, so the PIT calendar keeps the scheduled date).
+    _fomc(2020, 1, 29), _fomc(2020, 3, 18), _fomc(2020, 4, 29), _fomc(2020, 6, 10),
+    _fomc(2020, 7, 29), _fomc(2020, 9, 16), _fomc(2020, 11, 5), _fomc(2020, 12, 16),
+    _fomc(2021, 1, 27), _fomc(2021, 3, 17), _fomc(2021, 4, 28), _fomc(2021, 6, 16),
+    _fomc(2021, 7, 28), _fomc(2021, 9, 22), _fomc(2021, 11, 3), _fomc(2021, 12, 15),
+    _fomc(2022, 1, 26), _fomc(2022, 3, 16), _fomc(2022, 5, 4), _fomc(2022, 6, 15),
+    _fomc(2022, 7, 27), _fomc(2022, 9, 21), _fomc(2022, 11, 2), _fomc(2022, 12, 14),
+    _fomc(2023, 2, 1), _fomc(2023, 3, 22), _fomc(2023, 5, 3), _fomc(2023, 6, 14),
+    _fomc(2023, 7, 26), _fomc(2023, 9, 20), _fomc(2023, 11, 1), _fomc(2023, 12, 13),
+    _fomc(2024, 1, 31), _fomc(2024, 3, 20), _fomc(2024, 5, 1), _fomc(2024, 6, 12),
+    _fomc(2024, 7, 31), _fomc(2024, 9, 18), _fomc(2024, 11, 7), _fomc(2024, 12, 18),
+    _fomc(2025, 1, 29), _fomc(2025, 3, 19), _fomc(2025, 5, 7), _fomc(2025, 6, 18),
+    _fomc(2025, 7, 30), _fomc(2025, 9, 17), _fomc(2025, 10, 29), _fomc(2025, 12, 10),
+    _fomc(2026, 1, 28), _fomc(2026, 3, 18), _fomc(2026, 4, 29), _fomc(2026, 6, 17),
+    _fomc(2026, 7, 29), _fomc(2026, 9, 16), _fomc(2026, 10, 28), _fomc(2026, 12, 9),
+    # 2027 = Fed TENTATIVE schedule -- APPROXIMATED (pattern-projected).
+    _fomc(2027, 1, 27), _fomc(2027, 3, 17), _fomc(2027, 4, 28), _fomc(2027, 6, 16),
+    _fomc(2027, 7, 28), _fomc(2027, 9, 22), _fomc(2027, 11, 3), _fomc(2027, 12, 15),
+)
+
+# US CPI release datetimes (monthly, prior-month data). Source: BLS CPI release
+# schedule. 2018-2025 actual scheduled dates; 2026-2027 BLS-pattern best-effort.
+CPI_RELEASES: tuple[pd.Timestamp, ...] = (
+    _rel(2018, 1, 12), _rel(2018, 2, 14), _rel(2018, 3, 13), _rel(2018, 4, 11),
+    _rel(2018, 5, 10), _rel(2018, 6, 12), _rel(2018, 7, 12), _rel(2018, 8, 10),
+    _rel(2018, 9, 13), _rel(2018, 10, 11), _rel(2018, 11, 14), _rel(2018, 12, 12),
+    _rel(2019, 1, 11), _rel(2019, 2, 13), _rel(2019, 3, 12), _rel(2019, 4, 10),
+    _rel(2019, 5, 10), _rel(2019, 6, 12), _rel(2019, 7, 11), _rel(2019, 8, 13),
+    _rel(2019, 9, 12), _rel(2019, 10, 10), _rel(2019, 11, 13), _rel(2019, 12, 11),
+    _rel(2020, 1, 14), _rel(2020, 2, 13), _rel(2020, 3, 11), _rel(2020, 4, 10),
+    _rel(2020, 5, 12), _rel(2020, 6, 10), _rel(2020, 7, 14), _rel(2020, 8, 12),
+    _rel(2020, 9, 11), _rel(2020, 10, 13), _rel(2020, 11, 12), _rel(2020, 12, 10),
+    _rel(2021, 1, 13), _rel(2021, 2, 10), _rel(2021, 3, 10), _rel(2021, 4, 13),
+    _rel(2021, 5, 12), _rel(2021, 6, 10), _rel(2021, 7, 13), _rel(2021, 8, 11),
+    _rel(2021, 9, 14), _rel(2021, 10, 13), _rel(2021, 11, 10), _rel(2021, 12, 10),
+    _rel(2022, 1, 12), _rel(2022, 2, 10), _rel(2022, 3, 10), _rel(2022, 4, 12),
+    _rel(2022, 5, 11), _rel(2022, 6, 10), _rel(2022, 7, 13), _rel(2022, 8, 10),
+    _rel(2022, 9, 13), _rel(2022, 10, 13), _rel(2022, 11, 10), _rel(2022, 12, 13),
+    _rel(2023, 1, 12), _rel(2023, 2, 14), _rel(2023, 3, 14), _rel(2023, 4, 12),
+    _rel(2023, 5, 10), _rel(2023, 6, 13), _rel(2023, 7, 12), _rel(2023, 8, 10),
+    _rel(2023, 9, 13), _rel(2023, 10, 12), _rel(2023, 11, 14), _rel(2023, 12, 12),
+    _rel(2024, 1, 11), _rel(2024, 2, 13), _rel(2024, 3, 12), _rel(2024, 4, 10),
+    _rel(2024, 5, 15), _rel(2024, 6, 12), _rel(2024, 7, 11), _rel(2024, 8, 14),
+    _rel(2024, 9, 11), _rel(2024, 10, 10), _rel(2024, 11, 13), _rel(2024, 12, 11),
+    _rel(2025, 1, 15), _rel(2025, 2, 12), _rel(2025, 3, 12), _rel(2025, 4, 10),
+    _rel(2025, 5, 13), _rel(2025, 6, 11), _rel(2025, 7, 15), _rel(2025, 8, 12),
+    _rel(2025, 9, 11), _rel(2025, 10, 15), _rel(2025, 11, 13), _rel(2025, 12, 10),
+    # 2026-2027 BLS-pattern best-effort (APPROXIMATED at the day level).
+    _rel(2026, 1, 13), _rel(2026, 2, 11), _rel(2026, 3, 11), _rel(2026, 4, 10),
+    _rel(2026, 5, 12), _rel(2026, 6, 10), _rel(2026, 7, 14), _rel(2026, 8, 12),
+    _rel(2026, 9, 11), _rel(2026, 10, 13), _rel(2026, 11, 13), _rel(2026, 12, 10),
+    _rel(2027, 1, 13), _rel(2027, 2, 10), _rel(2027, 3, 10), _rel(2027, 4, 13),
+    _rel(2027, 5, 12), _rel(2027, 6, 10), _rel(2027, 7, 13), _rel(2027, 8, 11),
+    _rel(2027, 9, 14), _rel(2027, 10, 13), _rel(2027, 11, 10), _rel(2027, 12, 10),
+)
+
+# US NFP / Employment-Situation release datetimes (monthly). Source: BLS
+# Employment Situation schedule (~first Friday). 2018-2025 best-effort actuals;
+# 2026-2027 pattern-projected (APPROXIMATED). EMBEDDED FOR COMPLETENESS + a v2
+# feature -- NO v1 FeatureDef consumes this tuple.
+NFP_RELEASES: tuple[pd.Timestamp, ...] = (
+    _rel(2018, 1, 5), _rel(2018, 2, 2), _rel(2018, 3, 9), _rel(2018, 4, 6),
+    _rel(2018, 5, 4), _rel(2018, 6, 1), _rel(2018, 7, 6), _rel(2018, 8, 3),
+    _rel(2018, 9, 7), _rel(2018, 10, 5), _rel(2018, 11, 2), _rel(2018, 12, 7),
+    _rel(2019, 1, 4), _rel(2019, 2, 1), _rel(2019, 3, 8), _rel(2019, 4, 5),
+    _rel(2019, 5, 3), _rel(2019, 6, 7), _rel(2019, 7, 5), _rel(2019, 8, 2),
+    _rel(2019, 9, 6), _rel(2019, 10, 4), _rel(2019, 11, 1), _rel(2019, 12, 6),
+    _rel(2020, 1, 10), _rel(2020, 2, 7), _rel(2020, 3, 6), _rel(2020, 4, 3),
+    _rel(2020, 5, 8), _rel(2020, 6, 5), _rel(2020, 7, 2), _rel(2020, 8, 7),
+    _rel(2020, 9, 4), _rel(2020, 10, 2), _rel(2020, 11, 6), _rel(2020, 12, 4),
+    _rel(2021, 1, 8), _rel(2021, 2, 5), _rel(2021, 3, 5), _rel(2021, 4, 2),
+    _rel(2021, 5, 7), _rel(2021, 6, 4), _rel(2021, 7, 2), _rel(2021, 8, 6),
+    _rel(2021, 9, 3), _rel(2021, 10, 8), _rel(2021, 11, 5), _rel(2021, 12, 3),
+    _rel(2022, 1, 7), _rel(2022, 2, 4), _rel(2022, 3, 4), _rel(2022, 4, 1),
+    _rel(2022, 5, 6), _rel(2022, 6, 3), _rel(2022, 7, 8), _rel(2022, 8, 5),
+    _rel(2022, 9, 2), _rel(2022, 10, 7), _rel(2022, 11, 4), _rel(2022, 12, 2),
+    _rel(2023, 1, 6), _rel(2023, 2, 3), _rel(2023, 3, 10), _rel(2023, 4, 7),
+    _rel(2023, 5, 5), _rel(2023, 6, 2), _rel(2023, 7, 7), _rel(2023, 8, 4),
+    _rel(2023, 9, 1), _rel(2023, 10, 6), _rel(2023, 11, 3), _rel(2023, 12, 8),
+    _rel(2024, 1, 5), _rel(2024, 2, 2), _rel(2024, 3, 8), _rel(2024, 4, 5),
+    _rel(2024, 5, 3), _rel(2024, 6, 7), _rel(2024, 7, 5), _rel(2024, 8, 2),
+    _rel(2024, 9, 6), _rel(2024, 10, 4), _rel(2024, 11, 1), _rel(2024, 12, 6),
+    _rel(2025, 1, 10), _rel(2025, 2, 7), _rel(2025, 3, 7), _rel(2025, 4, 4),
+    _rel(2025, 5, 2), _rel(2025, 6, 6), _rel(2025, 7, 3), _rel(2025, 8, 1),
+    _rel(2025, 9, 5), _rel(2025, 10, 3), _rel(2025, 11, 7), _rel(2025, 12, 5),
+    # 2026-2027 pattern-projected (APPROXIMATED).
+    _rel(2026, 1, 9), _rel(2026, 2, 6), _rel(2026, 3, 6), _rel(2026, 4, 3),
+    _rel(2026, 5, 8), _rel(2026, 6, 5), _rel(2026, 7, 3), _rel(2026, 8, 7),
+    _rel(2026, 9, 4), _rel(2026, 10, 2), _rel(2026, 11, 6), _rel(2026, 12, 4),
+    _rel(2027, 1, 8), _rel(2027, 2, 5), _rel(2027, 3, 5), _rel(2027, 4, 2),
+    _rel(2027, 5, 7), _rel(2027, 6, 4), _rel(2027, 7, 2), _rel(2027, 8, 6),
+    _rel(2027, 9, 3), _rel(2027, 10, 1), _rel(2027, 11, 5), _rel(2027, 12, 3),
+)
+
+
+def _event_schedule_array(schedule: tuple[pd.Timestamp, ...]) -> np.ndarray:
+    """Sorted datetime64[ns] array from a schedule tuple (for searchsorted)."""
+    return np.array(sorted(schedule), dtype="datetime64[ns]")
+
+
+def _hours_to_next_event(
+    schedule: tuple[pd.Timestamp, ...],
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """Hours from each bar ts to the NEXT scheduled event at or after ts.
+
+    Pure function of the DatetimeIndex (the OHLCV columns of the wide
+    market_data frame are ignored). At a bar exactly on an event the value is
+    0.0; one bar later it jumps to the gap to the FOLLOWING event. Bars after
+    the last scheduled event yield NaN (no next event is knowable) -- the
+    engine's dropna drops them.
+    """
+
+    events = _event_schedule_array(schedule)
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        idx = np.asarray(df.index.values, dtype="datetime64[ns]")
+        out = np.full(idx.shape[0], np.nan, dtype="float64")
+        if events.size:
+            pos = np.searchsorted(events, idx, side="left")
+            valid = pos < events.size
+            out[valid] = (events[pos[valid]] - idx[valid]) / np.timedelta64(1, "h")
+        return pd.Series(out, index=df.index)
+
+    return _impl
+
+
+def _days_since_last_event(
+    schedule: tuple[pd.Timestamp, ...],
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """Days since the MOST RECENT scheduled event at or before ts.
+
+    Pure function of the DatetimeIndex. Resets to 0.0 at each event and grows
+    until the next one. Bars before the first scheduled event yield NaN (no
+    prior event is knowable).
+    """
+
+    events = _event_schedule_array(schedule)
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        idx = np.asarray(df.index.values, dtype="datetime64[ns]")
+        out = np.full(idx.shape[0], np.nan, dtype="float64")
+        if events.size:
+            pos = np.searchsorted(events, idx, side="right") - 1
+            valid = pos >= 0
+            out[valid] = (idx[valid] - events[pos[valid]]) / np.timedelta64(1, "D")
+        return pd.Series(out, index=df.index)
+
+    return _impl
+
+
+def _event_window_flag(
+    schedule: tuple[pd.Timestamp, ...], pre_h: float, post_h: float
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """1.0 if ts is within ``pre_h`` hours BEFORE or ``post_h`` hours AFTER any
+    scheduled event, else 0.0.
+
+    Pure function of the DatetimeIndex. Defined only within the schedule's
+    coverage [first_event, last_event]; bars outside that span yield NaN (we
+    cannot assert "not near an event" beyond the known schedule).
+    """
+
+    events = _event_schedule_array(schedule)
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        idx = np.asarray(df.index.values, dtype="datetime64[ns]")
+        out = np.full(idx.shape[0], np.nan, dtype="float64")
+        if events.size:
+            covered = (idx >= events[0]) & (idx <= events[-1])
+            nxt = np.searchsorted(events, idx, side="left")
+            prv = np.searchsorted(events, idx, side="right") - 1
+            d_next = np.full(idx.shape[0], np.inf, dtype="float64")
+            has_next = nxt < events.size
+            d_next[has_next] = (events[nxt[has_next]] - idx[has_next]) / np.timedelta64(1, "h")
+            d_prev = np.full(idx.shape[0], np.inf, dtype="float64")
+            has_prev = prv >= 0
+            d_prev[has_prev] = (idx[has_prev] - events[prv[has_prev]]) / np.timedelta64(1, "h")
+            within = (d_next <= pre_h) | (d_prev <= post_h)
+            out[covered] = within[covered].astype("float64")
+        return pd.Series(out, index=df.index)
+
+    return _impl
+
 
 FEATURES: tuple[FeatureDef, ...] = (
     # ── Starter / debug passthroughs (kept for backwards compat with the
@@ -2275,6 +2609,409 @@ FEATURES: tuple[FeatureDef, ...] = (
         description="Horizon-scaled forward Sharpe ratio over the next 24 bars. "
         "Continuous regression target — preserves magnitude that binary risk-on/off discards. "
         "NaN for last 24 rows (future data unavailable). label_direction='forward'. V138.",
+    ),
+    # ── LIQ_FADE: Binance force-liquidation intensity features (V201) ──
+    # Source: binance_liquidation lifespan worker -> macro_raw series
+    # binance_liquidation_<sym> (ONE row per force-order; many share an
+    # event_time -> the standard dedupe-first pivot would drop all but one).
+    # These declare raw_aggregation=RawAggregation(...) so the engine
+    # resamples events into hourly sum/count buckets BEFORE the pivot
+    # (compute._aggregate_raw_long). All BACKWARD-looking => pit_safe=True,
+    # family='liquidation'. ffill_policy=None: empty buckets are 0 (a quiet
+    # hour genuinely had $0 / 0 liquidations), so the grid is already
+    # contiguous. Live data accrues from 2026-06-12 (not backfillable).
+    # Matching feature_registry rows: trading-engine V201.
+    # TODO(v2): side-split (SELL=long-liq, BUY=short-liq) needs value_text
+    # JSON parsing in the read path -- v1 is total intensity only.
+    # BTCUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_btcusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_btcusdt",),
+        transformer=_rolling_zscore("binance_liquidation_btcusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed BTCUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_btcusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_btcusdt",),
+        transformer=_rolling_sum("binance_liquidation_btcusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of BTCUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_btcusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_btcusdt",),
+        transformer=_second_difference("binance_liquidation_btcusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly BTCUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
+    ),
+    # ETHUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_ethusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_ethusdt",),
+        transformer=_rolling_zscore("binance_liquidation_ethusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed ETHUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_ethusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_ethusdt",),
+        transformer=_rolling_sum("binance_liquidation_ethusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of ETHUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_ethusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_ethusdt",),
+        transformer=_second_difference("binance_liquidation_ethusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly ETHUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
+    ),
+    # SOLUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_solusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_solusdt",),
+        transformer=_rolling_zscore("binance_liquidation_solusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed SOLUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_solusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_solusdt",),
+        transformer=_rolling_sum("binance_liquidation_solusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of SOLUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_solusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_solusdt",),
+        transformer=_second_difference("binance_liquidation_solusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly SOLUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
+    ),
+    # BNBUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_bnbusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_bnbusdt",),
+        transformer=_rolling_zscore("binance_liquidation_bnbusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed BNBUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_bnbusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_bnbusdt",),
+        transformer=_rolling_sum("binance_liquidation_bnbusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of BNBUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_bnbusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_bnbusdt",),
+        transformer=_second_difference("binance_liquidation_bnbusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly BNBUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
+    ),
+    # XRPUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_xrpusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_xrpusdt",),
+        transformer=_rolling_zscore("binance_liquidation_xrpusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed XRPUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_xrpusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_xrpusdt",),
+        transformer=_rolling_sum("binance_liquidation_xrpusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of XRPUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_xrpusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_xrpusdt",),
+        transformer=_second_difference("binance_liquidation_xrpusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly XRPUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
+    ),
+    # ── EVENT_PROXIMITY: US macro-event proximity features (V202) ────
+    # Per-bar calendar distance to embedded static FOMC/CPI schedules (see
+    # the FOMC_DECISIONS / CPI_RELEASES module constants + transformers
+    # above). raw_tables=market_data: the engine passes the wide OHLCV frame
+    # and the transformer reads ONLY df.index (the bar ts); inputs=
+    # ("close_price",) is decorative, present only so the market_data
+    # inputs-vs-columns check passes. Value is symbol-agnostic but stamped
+    # per (symbol, interval) so research joins by (symbol, interval, ts).
+    # All pit_safe (schedule public in advance), family='event',
+    # lookback_hours=0 (pointwise). Matching feature_registry rows: V202.
+    FeatureDef(
+        name="hours_to_next_fomc_btcusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_hours_to_next_event(FOMC_DECISIONS),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT",),
+        intervals=("1h",),
+        description="Hours from the bar timestamp to the next scheduled FOMC rate decision (at or after ts), from the embedded static FOMC calendar (UTC, 2018-2027). Pointwise (lookback_hours=0); value is symbol-agnostic, stamped on BTCUSDT 1h bars so research joins by (symbol,interval,ts). pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="days_since_last_cpi_btcusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_days_since_last_event(CPI_RELEASES),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT",),
+        intervals=("1h",),
+        description="Days since the most recent scheduled US CPI release (at or before ts), from the embedded static CPI calendar (UTC, 2018-2027). Pointwise; value is symbol-agnostic, stamped on BTCUSDT 1h bars. pit_safe -- the BLS CPI release schedule is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="fomc_event_window_flag_btcusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_event_window_flag(FOMC_DECISIONS, 24, 24),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BTCUSDT",),
+        intervals=("1h",),
+        description="1.0 if the bar timestamp is within +/-24h of any scheduled FOMC decision, else 0.0 (NaN outside the calendar's coverage). Pointwise; value is symbol-agnostic, stamped on BTCUSDT 1h bars. pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="hours_to_next_fomc_ethusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_hours_to_next_event(FOMC_DECISIONS),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("ETHUSDT",),
+        intervals=("1h",),
+        description="Hours from the bar timestamp to the next scheduled FOMC rate decision (at or after ts), from the embedded static FOMC calendar (UTC, 2018-2027). Pointwise (lookback_hours=0); value is symbol-agnostic, stamped on ETHUSDT 1h bars so research joins by (symbol,interval,ts). pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="days_since_last_cpi_ethusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_days_since_last_event(CPI_RELEASES),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("ETHUSDT",),
+        intervals=("1h",),
+        description="Days since the most recent scheduled US CPI release (at or before ts), from the embedded static CPI calendar (UTC, 2018-2027). Pointwise; value is symbol-agnostic, stamped on ETHUSDT 1h bars. pit_safe -- the BLS CPI release schedule is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="fomc_event_window_flag_ethusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_event_window_flag(FOMC_DECISIONS, 24, 24),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("ETHUSDT",),
+        intervals=("1h",),
+        description="1.0 if the bar timestamp is within +/-24h of any scheduled FOMC decision, else 0.0 (NaN outside the calendar's coverage). Pointwise; value is symbol-agnostic, stamped on ETHUSDT 1h bars. pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="hours_to_next_fomc_solusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_hours_to_next_event(FOMC_DECISIONS),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("SOLUSDT",),
+        intervals=("1h",),
+        description="Hours from the bar timestamp to the next scheduled FOMC rate decision (at or after ts), from the embedded static FOMC calendar (UTC, 2018-2027). Pointwise (lookback_hours=0); value is symbol-agnostic, stamped on SOLUSDT 1h bars so research joins by (symbol,interval,ts). pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="days_since_last_cpi_solusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_days_since_last_event(CPI_RELEASES),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("SOLUSDT",),
+        intervals=("1h",),
+        description="Days since the most recent scheduled US CPI release (at or before ts), from the embedded static CPI calendar (UTC, 2018-2027). Pointwise; value is symbol-agnostic, stamped on SOLUSDT 1h bars. pit_safe -- the BLS CPI release schedule is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="fomc_event_window_flag_solusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_event_window_flag(FOMC_DECISIONS, 24, 24),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("SOLUSDT",),
+        intervals=("1h",),
+        description="1.0 if the bar timestamp is within +/-24h of any scheduled FOMC decision, else 0.0 (NaN outside the calendar's coverage). Pointwise; value is symbol-agnostic, stamped on SOLUSDT 1h bars. pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="hours_to_next_fomc_bnbusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_hours_to_next_event(FOMC_DECISIONS),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BNBUSDT",),
+        intervals=("1h",),
+        description="Hours from the bar timestamp to the next scheduled FOMC rate decision (at or after ts), from the embedded static FOMC calendar (UTC, 2018-2027). Pointwise (lookback_hours=0); value is symbol-agnostic, stamped on BNBUSDT 1h bars so research joins by (symbol,interval,ts). pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="days_since_last_cpi_bnbusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_days_since_last_event(CPI_RELEASES),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BNBUSDT",),
+        intervals=("1h",),
+        description="Days since the most recent scheduled US CPI release (at or before ts), from the embedded static CPI calendar (UTC, 2018-2027). Pointwise; value is symbol-agnostic, stamped on BNBUSDT 1h bars. pit_safe -- the BLS CPI release schedule is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="fomc_event_window_flag_bnbusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_event_window_flag(FOMC_DECISIONS, 24, 24),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("BNBUSDT",),
+        intervals=("1h",),
+        description="1.0 if the bar timestamp is within +/-24h of any scheduled FOMC decision, else 0.0 (NaN outside the calendar's coverage). Pointwise; value is symbol-agnostic, stamped on BNBUSDT 1h bars. pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="hours_to_next_fomc_xrpusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_hours_to_next_event(FOMC_DECISIONS),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("XRPUSDT",),
+        intervals=("1h",),
+        description="Hours from the bar timestamp to the next scheduled FOMC rate decision (at or after ts), from the embedded static FOMC calendar (UTC, 2018-2027). Pointwise (lookback_hours=0); value is symbol-agnostic, stamped on XRPUSDT 1h bars so research joins by (symbol,interval,ts). pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="days_since_last_cpi_xrpusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_days_since_last_event(CPI_RELEASES),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("XRPUSDT",),
+        intervals=("1h",),
+        description="Days since the most recent scheduled US CPI release (at or before ts), from the embedded static CPI calendar (UTC, 2018-2027). Pointwise; value is symbol-agnostic, stamped on XRPUSDT 1h bars. pit_safe -- the BLS CPI release schedule is published in advance. V202 EVENT_PROXIMITY.",
+    ),
+    FeatureDef(
+        name="fomc_event_window_flag_xrpusdt",
+        version=1,
+        family="event",
+        inputs=("close_price",),
+        transformer=_event_window_flag(FOMC_DECISIONS, 24, 24),
+        pit_safe=True,
+        ffill_policy=None,
+        raw_tables=("market_data",),
+        symbols=("XRPUSDT",),
+        intervals=("1h",),
+        description="1.0 if the bar timestamp is within +/-24h of any scheduled FOMC decision, else 0.0 (NaN outside the calendar's coverage). Pointwise; value is symbol-agnostic, stamped on XRPUSDT 1h bars. pit_safe -- the FOMC calendar is published in advance. V202 EVENT_PROXIMITY.",
     ),
 )
 
