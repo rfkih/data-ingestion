@@ -332,7 +332,11 @@ def compute(
 
     * ``"macro_raw"`` — long-format publisher events. Engine pivots to wide
       ``[event_time × series_id]`` and applies the declared ffill policy
-      before invoking the transformer.
+      before invoking the transformer. If the feature sets
+      ``raw_aggregation`` (opt-in), event-level rows are first resampled into
+      a regular sum/count grid (``_aggregate_raw_long``) so event streams
+      where many rows share an ``event_time`` (e.g. binance_liquidation) are
+      not silently deduped to one row per timestamp by the pivot.
     * ``"market_data"`` — per-bar OHLCV. Engine reads wide directly
       (one row per bar, OHLCV columns) and skips pivot/ffill since
       market_data is gapless by construction. ``symbol`` and ``interval``
@@ -476,12 +480,77 @@ def compute(
     return tidy
 
 
+def _aggregate_raw_long(long_df: pd.DataFrame, feat: FeatureDef) -> pd.DataFrame:
+    """Resample event-level macro_raw rows onto a regular grid BEFORE the pivot.
+
+    Opt-in via ``feat.raw_aggregation`` (see definitions.RawAggregation). The
+    standard path (``_pivot_wide``) dedupes long rows by
+    ``(series_id, event_time)`` keeping FIRST — correct for revision-prone
+    publisher series but wrong for event-level streams (e.g.
+    ``binance_liquidation``) where MANY genuine rows share an ``event_time``;
+    deduping would silently drop all but one. This resamples each input series
+    into ``freq`` buckets with the declared ``func`` (sum/count) so every event
+    contributes, returning a long DataFrame with one row per
+    ``(series_id, bucket)`` that the standard pivot/ffill path then consumes
+    unchanged (the dedupe becomes a no-op).
+
+    Bucketing: ``closed="left", label="right"`` — bucket ``[t, t+freq)`` is
+    stamped at its RIGHT edge ``t+freq`` (the first instant the aggregate is
+    fully observable, so no look-ahead into a partially-formed bucket). Empty
+    buckets are 0 for both sum and count (a quiet hour genuinely had $0 / 0
+    events), keeping the grid contiguous so rolling windows count real hours.
+    """
+    spec = feat.raw_aggregation
+    if spec is None:  # defensive; the caller already guards on this
+        return long_df
+    frames: list[pd.DataFrame] = []
+    for series_id, group in long_df.groupby("series_id", sort=False):
+        s = pd.Series(
+            group["value"].to_numpy(dtype="float64"),
+            index=pd.DatetimeIndex(group["event_time"]),
+        ).sort_index()
+        resampler = s.resample(spec.freq, closed="left", label="right")
+        if spec.func == "sum":
+            agg = resampler.sum()
+        elif spec.func == "count":
+            agg = resampler.count().astype("float64")
+        else:
+            raise FeatureComputeError(
+                f"feature={feat.name}: unknown raw_aggregation func "
+                f"{spec.func!r} (expected 'sum' or 'count')"
+            )
+        frames.append(
+            pd.DataFrame(
+                {
+                    "series_id": series_id,
+                    "event_time": agg.index,
+                    # bucket close = observability instant; ingestion_time is
+                    # unused downstream for aggregated series (ffill_policy=None)
+                    # but _pivot_wide requires the column to exist.
+                    "ingestion_time": agg.index,
+                    "value": agg.to_numpy(dtype="float64"),
+                }
+            )
+        )
+    if not frames:
+        return long_df.iloc[0:0]
+    return pd.concat(frames, ignore_index=True)
+
+
 def _compute_from_macro_raw(
     conn: psycopg.Connection, feat: FeatureDef, start: datetime, end: datetime
 ) -> pd.DataFrame:
     long_df = _read_raw_long(conn, "macro_raw", feat.inputs, start, end)
     if long_df.empty:
         return pd.DataFrame(columns=list(feat.inputs))
+    if feat.raw_aggregation is not None:
+        # Event-level sources (e.g. binance_liquidation) must be resampled into
+        # a regular grid BEFORE the pivot: _pivot_wide dedupes by
+        # (series_id, event_time) keeping FIRST, which would silently drop all
+        # but one of the many force-orders sharing a timestamp. After
+        # aggregation there is one row per (series_id, bucket), so the dedupe
+        # is a no-op and the standard pivot/ffill path is reused as-is.
+        long_df = _aggregate_raw_long(long_df, feat)
     value_wide, _ing_wide = _pivot_wide(long_df, feat)
     return _apply_ffill(value_wide, feat)
 

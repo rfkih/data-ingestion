@@ -37,6 +37,42 @@ FeatureTransformer = Callable[
     [Union[pd.DataFrame, dict[str, pd.DataFrame]]], pd.Series
 ]
 
+# Aggregation function for the OPT-IN raw-aggregation mode (see RawAggregation
+# and compute._aggregate_raw_long). "sum" totals ``value`` per bucket; "count"
+# counts the events per bucket (ignores ``value``).
+RawAggFunc = Literal["sum", "count"]
+
+
+@dataclass(frozen=True)
+class RawAggregation:
+    """Opt-in spec: resample event-level ``macro_raw`` rows onto a regular
+    time grid BEFORE the wide pivot.
+
+    Why this exists: the standard ``macro_raw`` read path
+    (``compute._pivot_wide``) dedupes long rows by ``(series_id, event_time)``
+    keeping the FIRST -- correct for revision-prone publisher series (one
+    logical value per timestamp, later prints are revisions) but CATASTROPHIC
+    for event-level streams where MANY genuine rows share an ``event_time``
+    (e.g. ``binance_liquidation`` -- one row per force-order, dozens per
+    second in a cascade). Deduping would silently drop all-but-one event.
+
+    When a FeatureDef sets ``raw_aggregation``, the engine instead resamples
+    each input series into ``freq`` buckets with ``func`` (sum/count) so every
+    event contributes, producing a regular grid the rolling transformer then
+    consumes. Bucketing is ``closed="left", label="right"`` -- a bucket spans
+    ``[t, t+freq)`` stamped at its RIGHT edge ``t+freq`` (the first instant the
+    aggregate is fully observable; PIT-conservative, no peeking into a
+    half-formed bucket). Empty buckets are 0 (a quiet hour genuinely had $0 /
+    0 liquidations), so the grid stays contiguous and rolling windows count
+    real elapsed hours.
+
+    Default (``raw_aggregation=None``) leaves the legacy dedupe-first path
+    byte-identical for every existing feature.
+    """
+
+    func: RawAggFunc
+    freq: str = "1h"
+
 
 @dataclass(frozen=True)
 class FeatureDef:
@@ -98,6 +134,11 @@ class FeatureDef:
     # compute the correlation. required_symbols=("BTCUSDT", "ETHUSDT").
     required_symbols: tuple[str, ...] = field(default=())
 
+    # OPT-IN: resample event-level macro_raw rows onto a regular grid BEFORE
+    # the pivot (see RawAggregation). None (default) keeps the legacy
+    # dedupe-first path byte-identical. Only valid for raw_tables=("macro_raw",).
+    raw_aggregation: RawAggregation | None = None
+
     def __post_init__(self) -> None:
         if bool(self.symbols) != bool(self.intervals):
             raise ValueError(
@@ -124,6 +165,14 @@ class FeatureDef:
                 f"label_direction='forward' filter can exclude them from inputs. "
                 f"If this is intentional, set family='label' and add "
                 f"label_direction='forward' to the corresponding SQL migration."
+            )
+        if self.raw_aggregation is not None and self.raw_tables != ("macro_raw",):
+            raise ValueError(
+                f"FeatureDef '{self.name}' v{self.version}: raw_aggregation is "
+                f"only supported for macro_raw features (got "
+                f"raw_tables={self.raw_tables!r}). The aggregation step runs in "
+                f"the long-format read path before the pivot; market_data / "
+                f"orderbook_snapshots are already read wide."
             )
 
 
@@ -413,6 +462,45 @@ def _acceleration(col: str, periods: int) -> Callable[[pd.DataFrame], pd.Series]
         s = df[col].astype("float64")
         velocity = s.pct_change(periods=periods, fill_method=None)
         return velocity.diff(periods=periods)
+
+    return _impl
+
+
+def _rolling_sum(
+    col: str, window: int, min_periods: int
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """Rolling sum of ``col`` over ``window`` rows.
+
+    Used by liq_event_count_4h_*: the input column is an hourly EVENT COUNT
+    (produced by RawAggregation func='count'), so a 4-row rolling sum is the
+    count of liquidation events over the trailing 4h. ``min_periods`` guards
+    the warm-up edge so a partial window doesn't masquerade as a full one.
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        s = df[col].astype("float64")
+        return s.rolling(window, min_periods=min_periods).sum()
+
+    return _impl
+
+
+def _second_difference(
+    col: str, periods: int = 1
+) -> Callable[[pd.DataFrame], pd.Series]:
+    """Discrete second difference of ``col``: ``diff(periods).diff(periods)``.
+
+    The acceleration (2nd derivative) of a LEVEL series. Unlike
+    :func:`_acceleration` (which differences a pct_change and therefore blows
+    up to +/-inf whenever the denominator bucket is 0 -- routine for hourly
+    liquidation buckets, many of which are exactly $0), this uses ABSOLUTE
+    differences, so a quiet bucket contributes 0 rather than poisoning the
+    output with inf. Used by liq_usd_rate_accel_1h_* over the hourly summed
+    liquidation-USD rate (RawAggregation func='sum').
+    """
+
+    def _impl(df: pd.DataFrame) -> pd.Series:
+        s = df[col].astype("float64")
+        return s.diff(periods=periods).diff(periods=periods)
 
     return _impl
 
@@ -2275,6 +2363,204 @@ FEATURES: tuple[FeatureDef, ...] = (
         description="Horizon-scaled forward Sharpe ratio over the next 24 bars. "
         "Continuous regression target — preserves magnitude that binary risk-on/off discards. "
         "NaN for last 24 rows (future data unavailable). label_direction='forward'. V138.",
+    ),
+    # ── LIQ_FADE: Binance force-liquidation intensity features (V201) ──
+    # Source: binance_liquidation lifespan worker -> macro_raw series
+    # binance_liquidation_<sym> (ONE row per force-order; many share an
+    # event_time -> the standard dedupe-first pivot would drop all but one).
+    # These declare raw_aggregation=RawAggregation(...) so the engine
+    # resamples events into hourly sum/count buckets BEFORE the pivot
+    # (compute._aggregate_raw_long). All BACKWARD-looking => pit_safe=True,
+    # family='liquidation'. ffill_policy=None: empty buckets are 0 (a quiet
+    # hour genuinely had $0 / 0 liquidations), so the grid is already
+    # contiguous. Live data accrues from 2026-06-12 (not backfillable).
+    # Matching feature_registry rows: trading-engine V201.
+    # TODO(v2): side-split (SELL=long-liq, BUY=short-liq) needs value_text
+    # JSON parsing in the read path -- v1 is total intensity only.
+    # BTCUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_btcusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_btcusdt",),
+        transformer=_rolling_zscore("binance_liquidation_btcusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed BTCUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_btcusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_btcusdt",),
+        transformer=_rolling_sum("binance_liquidation_btcusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of BTCUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_btcusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_btcusdt",),
+        transformer=_second_difference("binance_liquidation_btcusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly BTCUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
+    ),
+    # ETHUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_ethusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_ethusdt",),
+        transformer=_rolling_zscore("binance_liquidation_ethusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed ETHUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_ethusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_ethusdt",),
+        transformer=_rolling_sum("binance_liquidation_ethusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of ETHUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_ethusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_ethusdt",),
+        transformer=_second_difference("binance_liquidation_ethusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly ETHUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
+    ),
+    # SOLUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_solusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_solusdt",),
+        transformer=_rolling_zscore("binance_liquidation_solusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed SOLUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_solusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_solusdt",),
+        transformer=_rolling_sum("binance_liquidation_solusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of SOLUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_solusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_solusdt",),
+        transformer=_second_difference("binance_liquidation_solusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly SOLUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
+    ),
+    # BNBUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_bnbusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_bnbusdt",),
+        transformer=_rolling_zscore("binance_liquidation_bnbusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed BNBUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_bnbusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_bnbusdt",),
+        transformer=_rolling_sum("binance_liquidation_bnbusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of BNBUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_bnbusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_bnbusdt",),
+        transformer=_second_difference("binance_liquidation_bnbusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly BNBUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
+    ),
+    # XRPUSDT liquidation intensity
+    FeatureDef(
+        name="liq_usd_rate_zscore_24h_xrpusdt",
+        lookback_hours=48,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_xrpusdt",),
+        transformer=_rolling_zscore("binance_liquidation_xrpusdt", window=24, min_periods=12),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="24h rolling z-score of hourly-summed XRPUSDT force-liquidation notional (USD). RawAggregation sums event-level macro_raw rows into 1h buckets (window=24 rows = 24h). High = liquidation USD this hour is extreme vs the trailing day; a capitulation/cascade proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_event_count_4h_xrpusdt",
+        lookback_hours=8,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_xrpusdt",),
+        transformer=_rolling_sum("binance_liquidation_xrpusdt", window=4, min_periods=4),
+        raw_aggregation=RawAggregation(func="count", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Count of XRPUSDT force-liquidation events in the trailing 4h. RawAggregation counts event-level macro_raw rows per 1h bucket; window=4 rows sums 4 hourly counts. Liquidation breadth/clustering proxy. V201 LIQ_FADE.",
+    ),
+    FeatureDef(
+        name="liq_usd_rate_accel_1h_xrpusdt",
+        lookback_hours=6,
+        version=1,
+        family="liquidation",
+        inputs=("binance_liquidation_xrpusdt",),
+        transformer=_second_difference("binance_liquidation_xrpusdt", periods=1),
+        raw_aggregation=RawAggregation(func="sum", freq="1h"),
+        pit_safe=True,
+        ffill_policy=None,
+        description="Acceleration (2nd difference) of the hourly XRPUSDT force-liquidation USD rate. RawAggregation sums event-level rows into 1h buckets; second difference = inflection in liquidation flow (positive = cascade accelerating). Absolute diff (not pct) so $0 buckets stay finite. V201 LIQ_FADE.",
     ),
 )
 
