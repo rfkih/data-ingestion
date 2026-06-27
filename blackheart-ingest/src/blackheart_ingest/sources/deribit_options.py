@@ -338,13 +338,50 @@ def _snapshot_currency(
 ) -> list[dict[str, Any]]:
     """Fetch the live option book for ``currency`` and build the skew/term rows.
 
-    Returns the (possibly empty) list of macro_raw rows. Any series whose inputs
-    are insufficient is skipped with a log line; never writes a garbage value.
+    Thin live-path wrapper: HTTP-fetch the book summary, then delegate the pure
+    surface maths to ``_build_currency_rows`` (shared with the historical Tardis
+    loader). Live ``ingestion_time`` is the wall clock (== ``now``). Returns the
+    (possibly empty) list of macro_raw rows.
+    """
+    cur = currency.upper()
+    payload = _http_get(client, {"currency": cur, "kind": "option"})
+    result = payload.get("result") or []
+    return _build_currency_rows(
+        result,
+        currency,
+        now,
+        snapshot_time,
+        target_days,
+        min_strikes_per_wing,
+        ingestion_time=now,
+    )
+
+
+def _build_currency_rows(
+    result: list[dict[str, Any]],
+    currency: str,
+    now: datetime,
+    snapshot_time: datetime,
+    target_days: int,
+    min_strikes_per_wing: int,
+    *,
+    ingestion_time: datetime,
+) -> list[dict[str, Any]]:
+    """Pure compute: build the skew / term-structure macro_raw rows from a
+    result-list (no HTTP, no DB).
+
+    ``result`` is a list of dicts each carrying ``instrument_name``, ``mark_iv``
+    (in PERCENT) and ``underlying_price`` -- exactly the shape
+    ``_parse_instruments`` consumes. Factored out of ``_snapshot_currency`` so
+    BOTH the live HTTP snapshot and the historical Tardis loader build
+    byte-identical series from one code path. ``now`` is the point-in-time used
+    for expiry selection and the RR25 year-fraction (wall clock for the live
+    path; the historical hour for the loader); ``snapshot_time`` is the
+    event_time stamped on every row; ``ingestion_time`` is our server clock when
+    the row is created.
     """
     cur = currency.upper()
     lc = cur.lower()
-    payload = _http_get(client, {"currency": cur, "kind": "option"})
-    result = (payload.get("result") or [])
     if not isinstance(result, list) or not result:
         logger.warning("deribit_options: empty option book for %s — skipping run", cur)
         return []
@@ -365,7 +402,7 @@ def _snapshot_currency(
         forward = strikes[0]["underlying"]
         atm_near = _atm_iv(_unique_strikes(strikes), forward)
         if atm_near is not None:
-            rows.append(_build_row(f"deribit_atm_iv_{lc}_near", snapshot_time, atm_near, now))
+            rows.append(_build_row(f"deribit_atm_iv_{lc}_near", snapshot_time, atm_near, ingestion_time))
         else:
             logger.warning("deribit_options: %s near expiry %s has no ATM IV — skipping near", cur, near_exp.date())
     else:
@@ -380,7 +417,7 @@ def _snapshot_currency(
 
         atm_target = _atm_iv(_unique_strikes(strikes), forward)
         if atm_target is not None:
-            rows.append(_build_row(f"deribit_atm_iv_{lc}_30d", snapshot_time, atm_target, now))
+            rows.append(_build_row(f"deribit_atm_iv_{lc}_30d", snapshot_time, atm_target, ingestion_time))
         else:
             logger.warning("deribit_options: %s target expiry %s has no ATM IV — skipping atm_30d", cur, target_exp.date())
 
@@ -388,7 +425,7 @@ def _snapshot_currency(
             strikes, forward, year_fraction, min_strikes_per_wing=min_strikes_per_wing
         )
         if rr25 is not None:
-            rows.append(_build_row(f"deribit_rr25_{lc}_30d", snapshot_time, rr25, now))
+            rows.append(_build_row(f"deribit_rr25_{lc}_30d", snapshot_time, rr25, ingestion_time))
         else:
             logger.warning(
                 "deribit_options: %s target expiry %s has too few strikes per wing for RR25 — skipping",
@@ -408,7 +445,7 @@ def _snapshot_currency(
         and near_exp != target_exp
     ):
         rows.append(
-            _build_row(f"deribit_term_spread_{lc}", snapshot_time, atm_target - atm_near, now)
+            _build_row(f"deribit_term_spread_{lc}", snapshot_time, atm_target - atm_near, ingestion_time)
         )
     else:
         logger.info(

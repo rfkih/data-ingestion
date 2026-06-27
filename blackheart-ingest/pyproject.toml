@@ -77,6 +77,9 @@ blackheart-ingest-compute   = "blackheart_ingest.workers.compute_features:main"
 # artifact, reuses blackheart-train's loader for bit-equivalent feature
 # assembly, runs booster.predict, upserts signal_history rows.
 blackheart-ingest-inference = "blackheart_ingest.workers.inference_backfill:main"
+# Historical Deribit options-surface loader (Tardis.dev options_chain CSV).
+# Reuses deribit_options._build_currency_rows so live + backfill series match.
+blackheart-ingest-deribit-history = "blackheart_ingest.sources.deribit_options_history:main"
 
 [build-system]
 requires = ["hatchling"]
