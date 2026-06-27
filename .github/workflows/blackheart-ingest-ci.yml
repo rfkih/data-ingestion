@@ -16,7 +16,8 @@ on:
 
 concurrency:
   group: ingest-ci-${{ github.ref }}
-  cancel-in-progress: false
+  # Cancel superseded PR/branch runs; never cancel a master build (deploy every commit).
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 permissions:
   contents: write
