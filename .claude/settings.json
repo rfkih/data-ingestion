@@ -19,6 +19,8 @@
       "Bash(./gradlew compileTestJava *)",
       "Bash(./gradlew researchBootJar *)",
       "Bash(./gradlew tradingBootJar *)",
+      "Bash(./gradlew test*)",
+      "Bash(./gradlew check*)",
 
       "Bash(python -m pytest *)",
       "Bash(python3 -m pytest *)",
@@ -137,7 +139,16 @@
       "Write(/tmp/*.py)",
       "Write(/tmp/*.txt)",
       "Edit(/tmp/*.json)",
-      "Edit(/tmp/*.py)"
+      "Edit(/tmp/*.py)",
+
+      "Edit(**/blackheart-trading-engine/src/**)",
+      "Write(**/blackheart-trading-engine/src/**)",
+      "MultiEdit(**/blackheart-trading-engine/src/**)",
+      "Edit(**/blackheart-ingest/src/**)",
+      "Write(**/blackheart-ingest/src/**)",
+      "MultiEdit(**/blackheart-ingest/src/**)",
+      "Edit(**/*.sql)",
+      "Write(**/*.sql)"
     ]
   }
 }
