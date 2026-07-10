@@ -38,11 +38,15 @@ Once invoked, **you do not pause for confirmation, ask the operator anything, or
       exit 0
     fi
     STARTED_TS=$(python -c "import json; print(json.load(open('$MARKER'))['started_ts'])")
-    echo "RESUMING RUN started_ts=$STARTED_TS elapsed=$(( NOW - STARTED_TS ))"
+    # Backfill v2 loop-engineering state onto an ACTIVE marker (setdefault = idempotent migration;
+    # v1 failure_ledger migrates into dead_ends) + session-scoped retry budget resets EVERY session start.
+    python -c "import json; p='$MARKER'; d=json.load(open(p)); [d.setdefault(k,v) for k,v in {'iteration_count':0,'recent_outcomes':[],'families':{},'warm_leads':[],'dead_ends':d.get('failure_ledger',[]),'max_iterations':60}.items()]; d['session_retry_budget']=6; json.dump(d, open(p,'w'))"
+    LOOPSTATE=$(python -c "import json; d=json.load(open('$MARKER')); f=d.get('families',{}); e=sum(1 for x in f.values() if x.get('status')=='EXHAUSTED'); print('iter=%d leads=%d families=%d(open)/%d(exh) retry=%d/6 recent=%s' % (d.get('iteration_count',0), len(d.get('warm_leads',[])), len(f)-e, e, d.get('session_retry_budget',6), ''.join(w[0] for w in d.get('recent_outcomes',[])) or '-'))")
+    echo "RESUMING RUN started_ts=$STARTED_TS elapsed=$(( NOW - STARTED_TS )) loop-state: $LOOPSTATE"
   else
     STARTED_TS=$NOW
-    python -c "import json; json.dump({'started_ts': $NOW, 'status': 'ACTIVE', 'last_heartbeat_ts': $NOW}, open('$MARKER', 'w'))"
-    echo "NEW RUN started_ts=$STARTED_TS"
+    python -c "import json; json.dump({'started_ts': $NOW, 'status': 'ACTIVE', 'last_heartbeat_ts': $NOW, 'iteration_count': 0, 'recent_outcomes': [], 'families': {}, 'warm_leads': [], 'dead_ends': [], 'session_retry_budget': 6, 'max_iterations': 60}, open('$MARKER', 'w'))"
+    echo "NEW RUN started_ts=$STARTED_TS (loop-state: iter=0 leads=0 families=0 retry=6/6)"
   fi
   # Stamp heartbeat (used by cron prompt to detect concurrent-running researcher)
   python -c "import json, time; p='C:/Project/.research_run_state.json'; d=json.load(open(p)); d['last_heartbeat_ts']=int(time.time()); json.dump(d, open(p,'w'))"
@@ -84,6 +88,119 @@ Once invoked, **you do not pause for confirmation, ask the operator anything, or
 
 - **Seven exit conditions only.** GOAL_HIT, SPECIALIST_REVIEW_PENDING, WALL_CLOCK_CAP, INFRA_HARD_FAIL, HARD_RULE_VIOLATION, ARCHETYPE_EXHAUSTION, OPERATOR_ESCALATION. There is no "stop and ask" branch outside the bounded OPERATOR_ESCALATION conditions. SPECIALIST_REVIEW_PENDING is the normal Path-C async-checkpoint exit at step 9d — not an error. WALL_CLOCK_CAP now means *cumulative run complete* (8.5h reached), not "this session is too long" — sessions can end at any time via crash, marker file carries continuity.
 
+## Loop engineering (warmth-driven search + self-directed convergence)
+
+The search loop is a **search optimizer first, termination governor second**: every result is graded by *distance-to-gate* (warmth), near-misses form a revisit queue that gets the next hour before any fresh idea, and exhaustion is diagnosed **per family** (archetype), never from a global failure count. State lives in the marker file (`C:/Project/.research_run_state.json`) alongside `started_ts`, so it survives session death and cron-resume for free. **Every exit maps onto the existing seven terminals — no eighth exit.**
+
+**Marker loop-control fields** (backfilled onto older ACTIVE markers via `setdefault` on resume; legacy v1 fields `consecutive_unproductive` / `retry_budget_remaining` / `dry_round_cap` are inert if present, and a v1 `failure_ledger` migrates into `dead_ends`):
+
+| Field | Init | Meaning |
+|---|---|---|
+| `iteration_count` | 0 | attempts this run — info + runaway backstop only; **wall-clock is the real budget** |
+| `recent_outcomes` | `[]` | trailing window (≤8) of warmth grades — the convergence evidence |
+| `families` | `{}` | per-archetype region state: `attempts`, `dead`, `dims_tried`, `status` OPEN/EXHAUSTED, `pursuits`, `lead_banned` |
+| `warm_leads` | `[]` | priority queue (≤10) of near-misses to revisit — the highest-EV next work |
+| `dead_ends` | `[]` | last ≤20 DEAD attempts — differentiation memory for fresh designs |
+| `session_retry_budget` | 6 | infra retry budget, **reset to 6 at every session start** — transient noise never accumulates across sessions into a spurious hard-fail |
+| `max_iterations` | 60 | pure runaway backstop; a healthy run never reaches it |
+
+### Warmth taxonomy — grade EVERY /tick/drain terminal; never binary
+
+A near-miss is the most informative outcome the loop produces — it says "alpha is near, move along a new axis" (the trailing-stop exit win was found exactly this way). Grading it identically to a total failure throws the search gradient away.
+
+| Grade | Definition | Marker effect |
+|---|---|---|
+| **HOT** | GRADUATE, or any iteration verdict SIGNIFICANT_EDGE | pursue (step 9); clears `recent_outcomes` |
+| **WARM** | real edge, one gate short — any of: PF lower-CI > 1.0 with n < 100 · DSR ∈ [0.70, 0.90) with PF ≥ 1.2 · regime-analysis `is_promising=true` · annualized ≥ 10 with exactly one V11 gate missed | push a `warm_leads` row naming the **next_axis** (interval / exit / regime-gate / sizing / window). Never counts toward exhaustion. |
+| **COLD_POWER** | INSUFFICIENT_EVIDENCE where n < 100 is the *binding* failure and point PF > 1.0 — a power problem, not a signal problem | push a lower-priority lead (next_axis = interval/window change to raise n). Does NOT count as dead — one insufficient interval is never terminal (persistence doctrine). |
+| **DEAD** | NO_EDGE · point PF ≤ 1.0 after cost · cost-killed · null-screen NO_EDGE_DETECTED | `families[fam].dead += 1`; append a `dead_ends` row |
+
+### Scheduler — warmth-first allocation (run at the top of step 2)
+
+Priority order (the snippet prints exactly one GUARD line):
+1. `RETRY_BUDGET_EXHAUSTED` → **INFRA_HARD_FAIL** terminal (marker stays ACTIVE — next session retries with a fresh session budget).
+2. `RUNAWAY_BACKSTOP` → ARCHETYPE_EXHAUSTION diagnosis.
+3. **`PURSUE_LEAD`** (warm_leads non-empty) → re-run with `MODE=pop` to claim the warmest lead (WARM outranks COLD_POWER), design the follow-up along its `next_axis`. Full HYPOTHESIS + plan + review as usual — no gate bypass — but it is an **anchored continuation**: exempt from the novelty clause; instead state which lead it extends and why the new axis can clear the *specific* missed gate. Leads outrank fresh ideas because a near-miss neighborhood has strictly higher P(gate-clear) than an unsampled one. **Anti-knife-edge pursuit cap:** popping increments `families[fam].pursuits`; at **3 pursuits without a HOT** the family is `lead_banned` for the rest of the run and its remaining leads are purged — a surface that stays perpetually WARM but never clears the gate is a knife-edge spike, not an edge (the DCB 5.0×3.5 lesson: only the spike passes, the whole neighborhood is worse). A HOT resets `pursuits` and lifts the ban.
+4. `CONVERGED` (zero leads AND ≥ 2 families tried AND — last 5 outcomes all DEAD **OR** every family EXHAUSTED) → ARCHETYPE_EXHAUSTION diagnosis; existing first/second-in-7d semantics unchanged. The all-exhausted arm prevents the stuck state where a stale WARM in the window blocks the 5×DEAD test forever while nothing is left to try. **On the FIRST (soft) fire: journal STRATEGY_OUTCOME, run the soft-fire reset one-liner (clears `recent_outcomes`), and continue with a genuinely new family.** Without the reset, the very next DEAD re-fires the diagnosis and silently collapses the two-strike design into a hair-trigger.
+5. `CONTINUE_FRESH` → fresh hypothesis in an OPEN family or a credible new one. The novelty clause applies here only: one sentence differentiating from each relevant `dead_ends` row plus the FALSIFIED graveyard.
+
+Past cumulative 7h, prefer `PURSUE_LEAD` over `CONTINUE_FRESH` — remaining-hour EV favors known-warm neighborhoods. WIND_DOWN rules unchanged (no new hypotheses at all).
+
+### Family exhaustion — region-scoped, never global
+
+`families[fam].status=EXHAUSTED` only when ALL three hold: `dead ≥ 3` **AND** `len(dims_tried) ≥ 3` (entry / exit / interval / regime / sizing — a family may not be declared dead until ≥ 3 distinct dimensions were traversed, mirroring hard-rule 7 and the full-alpha-surface doctrine) **AND** no outstanding lead for that family. Three failures across three *different* families is three samples, not convergence — only same-region evidence exhausts a region.
+
+### Cross-run lead inheritance — runs compound, never restart cold
+
+Outstanding `warm_leads` are the run's most valuable residue. On every run-ending terminal (WALL_CLOCK_CAP, GOAL_HIT, ARCHETYPE_EXHAUSTION), copy the marker's `warm_leads` array into the RUN_SUMMARY row's `structured_data.warm_leads`. On a **fresh** run (marker just created this session), at step 1 read `last_run_summary.structured_data.warm_leads` from `/agent/state` and seed the new marker's `warm_leads` with any entries not already re-tested (skip leads whose family is in the FALSIFIED graveyard). The new run then starts at the prior run's frontier instead of re-deriving it.
+
+**Helper — classify + update after every /tick/drain terminal:**
+```bash
+# WARMTH=HOT|WARM|COLD_POWER|DEAD   FAMILY=<archetype, e.g. DCB>
+# DETAIL='{"surface":"ETHUSDT-1h","why":"PF_CI_low 1.08 n=82","next_axis":"4h interval","dims":["entry","interval"],"iteration_id":123}'
+python - "$WARMTH" "$FAMILY" "${DETAIL:-}" <<'PY'
+import json, sys, time
+p='C:/Project/.research_run_state.json'; d=json.load(open(p))
+w,fam=sys.argv[1],sys.argv[2]; det=json.loads(sys.argv[3]) if len(sys.argv)>3 and sys.argv[3] else {}
+d['iteration_count']=d.get('iteration_count',0)+1
+f=d.setdefault('families',{}).setdefault(fam,{'attempts':0,'dead':0,'dims_tried':[],'status':'OPEN','pursuits':0,'lead_banned':False})
+f['attempts']+=1
+f['dims_tried']=sorted(set(f['dims_tried'])|set(det.get('dims',[])))
+ro=d.get('recent_outcomes',[]); ro.append(w)
+d['recent_outcomes']=[] if w=='HOT' else ro[-8:]
+if w=='HOT':
+    f['status']='OPEN'; f['pursuits']=0; f['lead_banned']=False
+if w in ('WARM','COLD_POWER') and not f.get('lead_banned'):
+    wl=d.get('warm_leads',[])
+    key=(fam,det.get('surface'),det.get('next_axis'))
+    if key not in [(l.get('family'),l.get('surface'),l.get('next_axis')) for l in wl]:
+        wl.append({**det,'family':fam,'warmth':w}); d['warm_leads']=wl[-10:]
+if w=='DEAD':
+    f['dead']+=1
+    de=d.get('dead_ends',[]); de.append({**det,'family':fam}); d['dead_ends']=de[-20:]
+if f['dead']>=3 and len(f['dims_tried'])>=3 and not any(l.get('family')==fam for l in d.get('warm_leads',[])):
+    f['status']='EXHAUSTED'
+d['last_heartbeat_ts']=int(time.time()); json.dump(d, open(p,'w'))
+print('iter=%d %s:%s dead=%d dims=%d pursuits=%d%s leads=%d recent=%s'%(d['iteration_count'],fam,f['status'],f['dead'],len(f['dims_tried']),f.get('pursuits',0),' BANNED' if f.get('lead_banned') else '',len(d.get('warm_leads',[])),''.join(x[0] for x in d['recent_outcomes']) or '-'))
+PY
+```
+
+**Helper — scheduler gate (MODE empty = peek; MODE=pop claims the top lead when you commit to pursuing it):**
+```bash
+python - "${MODE:-}" <<'PY'
+import json, sys
+p='C:/Project/.research_run_state.json'; d=json.load(open(p))
+rb=d.get('session_retry_budget',6); it=d.get('iteration_count',0); maxit=d.get('max_iterations',60)
+wl=sorted(d.get('warm_leads',[]), key=lambda l: 0 if l.get('warmth')=='WARM' else 1)
+ro=d.get('recent_outcomes',[]); fams=d.get('families',{})
+all_exh=len(fams)>=2 and all(x.get('status')=='EXHAUSTED' for x in fams.values())
+if rb<=0: print('GUARD=RETRY_BUDGET_EXHAUSTED -> INFRA_HARD_FAIL')
+elif it>=maxit: print('GUARD=RUNAWAY_BACKSTOP(%d/%d) -> ARCHETYPE_EXHAUSTION diagnosis'%(it,maxit))
+elif wl:
+    lead=wl[0]
+    if sys.argv[1]=='pop':
+        fam=lead.get('family'); f=fams.setdefault(fam,{'attempts':0,'dead':0,'dims_tried':[],'status':'OPEN','pursuits':0,'lead_banned':False})
+        f['pursuits']=f.get('pursuits',0)+1
+        rest=wl[1:]
+        if f['pursuits']>=3:
+            f['lead_banned']=True; rest=[l for l in rest if l.get('family')!=fam]
+        d['warm_leads']=rest; json.dump(d,open(p,'w'))
+        print('GUARD=PURSUE_LEAD pursuit=%d/3 %s'%(f['pursuits'],json.dumps(lead)))
+    else:
+        print('GUARD=PURSUE_LEAD '+json.dumps(lead))
+elif all_exh or (len(fams)>=2 and len(ro)>=5 and all(x=='DEAD' for x in ro[-5:])):
+    print('GUARD=CONVERGED (families=%d all_exhausted=%s last5=%s, 0 leads) -> ARCHETYPE_EXHAUSTION diagnosis'%(len(fams),all_exh,''.join(x[0] for x in ro[-5:]) or '-'))
+else:
+    print('GUARD=CONTINUE_FRESH open_families=%s recent=%s'%([k for k,f in fams.items() if f.get('status')!='EXHAUSTED'], ''.join(x[0] for x in ro) or '-'))
+PY
+```
+
+**One-liners** — soft-fire reset (run on the FIRST exhaustion diagnosis before continuing) and session retry decrement (run when a per-call 3× backoff is exhausted, just before journaling INFRA_FAILURE):
+```bash
+python -c "import json,time; p='C:/Project/.research_run_state.json'; d=json.load(open(p)); d['recent_outcomes']=[]; d['exhaustion_soft_ts']=int(time.time()); json.dump(d,open(p,'w')); print('soft-exhaustion window reset')"
+python -c "import json; p='C:/Project/.research_run_state.json'; d=json.load(open(p)); d['session_retry_budget']=d.get('session_retry_budget',6)-1; json.dump(d,open(p,'w')); print('session_retry_budget=%d'%d['session_retry_budget'])"
+```
+
 ## Loop outline
 
 Full HTTP recipes (bodies, idempotency keys, response branches) live in `research/agent-playbooks/quant-researcher-workflow.md` §"Workflow". Read it at step 0; every step below maps 1-to-1 to a `### Step N` heading there.
@@ -91,7 +208,10 @@ Full HTTP recipes (bodies, idempotency keys, response branches) live in `researc
 ```
 STARTED_TS = read or create C:/Project/.research_run_state.json (first Bash call)
 
-while goal_not_achieved AND cumulative_elapsed < 8.5h:
+while goal_not_achieved AND cumulative_elapsed < 8.5h AND scheduler_not_terminal:
+  # scheduler_not_terminal = §"Loop engineering" scheduler returns PURSUE_LEAD or
+  # CONTINUE_FRESH. RETRY_BUDGET_EXHAUSTED -> INFRA_HARD_FAIL; CONVERGED /
+  # RUNAWAY_BACKSTOP -> ARCHETYPE_EXHAUSTION diagnosis (soft fire = reset + continue).
   0. Read research/agent-playbooks/quant-researcher-workflow.md (once per session).
      If the read fails, exit on INFRA_HARD_FAIL — the playbook is load-bearing.
      TOKEN DISCIPLINE: the playbook is the CORE only. Three satellites in the
@@ -101,6 +221,10 @@ while goal_not_achieved AND cumulative_elapsed < 8.5h:
        - quant-researcher-reference.md — only when an inline recipe is
          insufficient (exact endpoint shapes, raw-curl recipes, craft notes)
   1. GET /agent/state — one-call digest. Write a 3-line session brief.
+     If the marker was FRESHLY created this session (NEW RUN), seed the
+     marker's warm_leads from last_run_summary.structured_data.warm_leads
+     (§"Cross-run lead inheritance") — skip leads whose family is in the
+     FALSIFIED graveyard.
   1a. RESUME PROTOCOL (priority-ordered branch tree — see playbook §"Resume
       protocol mechanics" for the full algorithm):
          1. Standing terminal lockout check (ARCHETYPE_EXHAUSTION 24h /
@@ -121,13 +245,24 @@ while goal_not_achieved AND cumulative_elapsed < 8.5h:
          4. ML-training-pending → poll until terminal, then resume step 3
          5. Active-hypothesis non-falsified → new plan at step 3
          6. Else → fresh hypothesis at step 2
-  2. GRAVEYARD CHECK then pre-register HYPOTHESIS journal entry
-     (status=ACTIVE) with required structured_data.kind ∈ {ALGO, ML,
-     HYBRID} (Phase D). For ML/HYBRID, structured_data.model_specs_to_
-     train[] is required. Per playbook §2: pull FALSIFIED hypotheses +
-     null-screen cache first; the HYPOTHESIS content must state in one
-     sentence why it is NOT a re-skin of a falsified family; no XS
-     designs on the 5-name universe; one conditioning retry per dead
+  2. SCHEDULER GATE (§"Loop engineering") — run the scheduler snippet:
+       RETRY_BUDGET_EXHAUSTED → INFRA_HARD_FAIL terminal.
+       RUNAWAY_BACKSTOP / CONVERGED → ARCHETYPE_EXHAUSTION diagnosis
+         (FIRST/soft fire: STRATEGY_OUTCOME + soft-fire reset one-liner +
+          continue with a new family; second-in-7d: terminal).
+       PURSUE_LEAD → re-run with MODE=pop to claim the lead; design the
+         follow-up along its next_axis (anchored continuation — state
+         which lead it extends and why the new axis clears the specific
+         missed gate; novelty clause does NOT apply).
+       CONTINUE_FRESH → GRAVEYARD CHECK + DEAD-ENDS CHECK: the HYPOTHESIS
+         content MUST state in one sentence how it differs from each
+         relevant `dead_ends` row and why it is NOT a re-skin of a
+         FALSIFIED family.
+     Then pre-register the HYPOTHESIS journal entry (status=ACTIVE) with
+     required structured_data.kind ∈ {ALGO, ML, HYBRID} (Phase D). For
+     ML/HYBRID, structured_data.model_specs_to_train[] is required. Per
+     playbook §2: pull FALSIFIED hypotheses + null-screen cache first; no
+     XS designs on the 5-name universe; one conditioning retry per dead
      family max; sanity-check the firing condition can reach n≥100.
   2.5. ML/HYBRID branch: train models BEFORE writing the plan. POST
        /ml/training-runs per spec, poll to terminal, record model_ids.
@@ -146,13 +281,22 @@ while goal_not_achieved AND cumulative_elapsed < 8.5h:
      (round 1) → address findings, back to step 4. REJECTED (round 2) →
      pivot archetype, back to step 1. Max 2 review rounds per hypothesis.
   7. POST /queue (gate enforces APPROVED verdict).
-  8. POST /tick/drain — orchestrator loops /tick until terminal. Branch
-     on terminal_action:
-       - GRADUATE → step 9.
-       - PIVOT → step 8.5 (regime analysis) → STRATEGY_OUTCOME + step 1.
+  8. POST /tick/drain — orchestrator loops /tick until terminal. On each
+     terminal, CLASSIFY WARMTH per the §"Loop engineering" taxonomy —
+     read the drain digest + GET /iterations/{id} for near-gate metrics
+     and grade HOT / WARM / COLD_POWER / DEAD (never binary) — then call
+     the classify+update helper (WARMTH, FAMILY=archetype, DETAIL=
+     {surface, why, next_axis, dims, iteration_id}). Branch on
+     terminal_action:
+       - GRADUATE → (HOT) → step 9.
+       - PIVOT → step 8.5 (regime analysis; is_promising=true upgrades
+         the grade to WARM with next_axis=regime-gate) →
+         STRATEGY_OUTCOME + step 1.
        - EMPTY_QUEUE → re-queue or pivot.
-       - INFRA_FAIL → INFRA_FAILURE + retry.
-       - MAX_ITERS_REACHED / MAX_WALL_CLOCK_REACHED → re-call to continue same queue.
+       - INFRA_FAIL → decrement session_retry_budget (§Loop engineering);
+         INFRA_FAILURE + retry; budget 0 → INFRA_HARD_FAIL.
+       - MAX_ITERS_REACHED / MAX_WALL_CLOCK_REACHED → re-call to continue
+         same queue (NOT a terminal — do not classify or touch counters).
   8.5. REGIME ANALYSIS (fires on every PIVOT from a sweep that ran ≥ 5 iterations):
        a. POST /regime-analysis/{queue_id} — reads backtest_trade.entry_trend_regime
           (or derives SMA-200/ATR-pct from market_data as fallback). Writes
@@ -230,7 +374,7 @@ while goal_not_achieved AND cumulative_elapsed < 8.5h:
      Else: STRATEGY_OUTCOME, back to step 1 with next archetype.
 ```
 
-**Transient API failures.** On 5xx, retry up to 3× with 30s backoff before journaling INFRA_FAILURE. Idempotency-Key makes replay safe. Do NOT retry 4xx — those are contract failures.
+**Transient API failures.** On 5xx, retry up to 3× with 30s backoff before journaling INFRA_FAILURE. Idempotency-Key makes replay safe. Do NOT retry 4xx — those are contract failures. **When the 3× per-call backoff is exhausted, decrement `session_retry_budget` (§"Loop engineering") before journaling INFRA_FAILURE; at `0` this session exits on INFRA_HARD_FAIL. The budget resets to 6 at every session start and the marker stays ACTIVE, so a wedged host ends only this session's thrash — transient noise never accumulates across sessions into a spurious run-killing hard-fail.**
 
 ## Terminal conditions (the ONLY seven ways the loop ends)
 
@@ -243,7 +387,7 @@ Full payload specs per terminal in playbook §"Terminal protocols". Title prefix
 | **WALL_CLOCK_CAP** | **cumulative** elapsed ≥ 8.5h (research run halts; marker file set to `status=COMPLETED` — subsequent cron fires are no-ops until operator runs `rm C:/Project/.research_run_state.json`) | `RESEARCH_RUN_COMPLETE_<date>` |
 | **INFRA_HARD_FAIL** | orchestrator/JVM/DB unreachable, 3× retry-and-wait did not recover | `INFRA_FAIL_<date>` |
 | **HARD_RULE_VIOLATION** | proceeding would require violating one of the 13 hard rules below | `HARD_RULE_BLOCK_<rule_n>_<date>` |
-| **ARCHETYPE_EXHAUSTION** | second no-credible-next-archetype diagnosis in 7d (first one journals STRATEGY_OUTCOME + continues; second fires this terminal) | `ARCHETYPE_EXHAUSTION_<date>` |
+| **ARCHETYPE_EXHAUSTION** | second no-credible-next-archetype diagnosis in 7d (first one journals STRATEGY_OUTCOME + soft-fire reset + continues; second fires this terminal). The diagnosis is **triggered** by the §"Loop engineering" scheduler — `CONVERGED` (zero warm/cold leads outstanding, ≥ 2 families tried, last 5 outcomes DEAD) or the runaway backstop — never by a global failure count. | `ARCHETYPE_EXHAUSTION_<date>` |
 | **OPERATOR_ESCALATION** | five-condition bounded escape: (a) graduation REJECTED, (b) `n_blocker_fails=0`, (c) ≥1 methodology-fragile WARNING, (d) you can articulate the methodology critique, (e) no prior escalation on this iteration in 30d | `OPERATOR_ESCALATION_<date>` |
 
 **There is no eighth exit.** Do not invent terminals not in this table (past sessions invented `VOLUNTARY_CHECKPOINT` — that is a contract violation). If a situation feels stop-worthy but doesn't match a listed terminal, continue the loop.
@@ -311,13 +455,14 @@ You may edit `blackheart-research-orchestrator/` code when — and only when —
 
 **Filesystem .md paper — canonical format and versioning.** ALSO write a filesystem paper per the template at `research/RESEARCH_PAPER_TEMPLATE.md`. **Read the template before writing — its top comment block is the canonical spec for filename format (`RESEARCH_PAPER_<STRATEGY>_<INSTRUMENT>_<INTERVAL>_v<N>_<TYPE>_<DATE>.md`), v<N> computation, the `ALGO|HYBRID|ML|CHAR` TYPE enum, required vs conditional sections, and the quality bar.** Non-negotiables even without the template: full symbol names (ETHUSDT, never ETH), TYPE from the enum only (no free-text like `REDO`), self-contained prose grounded in iteration_ids — "Setup/finding/verdict" bullet lists are not a paper.
 
-On every exit, journal the matching `RUN_SUMMARY` row per playbook §"Terminal protocols" AND emit a 7-line summary. The journal row is what the next session reads via `/agent/state.last_run_summary` — that's how continuity works. The text summary is for the operator's audit trail; you do not wait for them to read it.
+On every exit, journal the matching `RUN_SUMMARY` row per playbook §"Terminal protocols" AND emit a 7-line summary. **On run-ending terminals (WALL_CLOCK_CAP / GOAL_HIT / ARCHETYPE_EXHAUSTION), copy the marker's `warm_leads` array into the RUN_SUMMARY's `structured_data.warm_leads`** — the next run seeds from it (§"Cross-run lead inheritance"); omitting it silently discards the run's highest-EV residue. The journal row is what the next session reads via `/agent/state.last_run_summary` — that's how continuity works. The text summary is for the operator's audit trail; you do not wait for them to read it.
 
 ```
 Terminal:    GOAL_HIT | SPECIALIST_REVIEW_PENDING | WALL_CLOCK_CAP | INFRA_HARD_FAIL | HARD_RULE_VIOLATION | ARCHETYPE_EXHAUSTION | OPERATOR_ESCALATION | NO_OP_RUN_COMPLETED
 ThisSession: Xh Ym (this Claude session only)
 RunCumul:    Yh Zm of 8h 30m (cumulative across all sessions in this research run; from marker file)
 MarkerFile:  status=ACTIVE (next session resumes same run) | status=COMPLETED (run halted at cap or goal — operator must rm marker to start new run)
+LoopState:   iter=<n> leads=<n> families=<open>/<exhausted> recent=<e.g. DDWCD> retry=<n>/6  (from marker; warm_leads = the next session's highest-EV work)
 Plan:        research/RESEARCH_PLAN_<date>.md  (or "resumed prior plan" if 1a took the resume branch)
 Queued:      N sweeps (codes, dimensions, hypothesis_ids)
 Reviews:     <approved>/<rejected>/<pending> for plan + graduation
