@@ -139,6 +139,17 @@ def make_router(require_token) -> APIRouter:
             rows = pack.answers(conn, code.upper() if code else None, min(max(limit, 1), 500))
         return [{k: (v.isoformat() if isinstance(v, date | datetime) else v) for k, v in r.items()} for r in rows]
 
+    @router.get("/answers/score")
+    def pack_answers_score() -> dict[str, Any]:
+        """Forward returns after each imported answer, per stance and for vetoes, vs the COMPOSITE (same as `idx answers --score`)."""
+        from . import pack
+        with get_connection() as conn:
+            s = pack.score_answers(conn)
+        groups = [{"group": g, "horizon": h, "n": v["n"], "avg_ret": v["sum"] / v["n"], "hit_rate": v["hits"] / v["n"],
+                   "avg_excess": (v["xs"] / v["xs_n"]) if v["xs_n"] else None}
+                  for g, hs in s["groups"].items() for h, v in sorted(hs.items())]
+        return {"answers": s["answers"], "scored": s["scored"], "horizons": s["horizons"], "groups": groups, "rows": s["rows"]}
+
     @router.get("/book/{book}")
     def book_get(book: str) -> dict[str, Any]:
         from . import book as bk

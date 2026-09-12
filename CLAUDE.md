@@ -23,6 +23,7 @@ then jump to the specific repo's `CLAUDE.md`.
 | `blackheart-train/` | yes | ML training worker (feature_values → LightGBM artifacts) | Python | — | ✅ |
 | `blackheart-exchange-gateway/` | yes | Binance/exchange connectivity gateway (`blackheartjs`) | Node / TS | 8088 | ✅ |
 | `blackheart-equity/` | yes | Equity paper/live executor — Alpaca, reach-target book loop | Java 21 / Spring Boot | 8090 | ✅ + `docs/agent-context/` |
+| `blackheart-idx-web/` | yes | **Papan** — standalone operator app for the IDX value desk (proxies `/idx/*` to ingest; platform accounts via the trading JVM) | Next.js 14 / TS | 3010 | ✅ + `docs/agent-context/` |
 | `superpowers/` | yes | Claude Code skills/plugins (external OSS, not platform code) | — | — | ✅ |
 
 Infra (local `docker-compose.yml`, 22 services): Postgres/TimescaleDB `5432` (+ standby `5434`),
@@ -49,6 +50,7 @@ Binance REST/WS
                  research-orchestrator (:8082) ── drives the research tick loop (agent front door)
                  frontend (:3000) ── reads trading JVM (8080) + research JVM (8081) via proxy
                  blackheart-equity (:8090) ── equity targets: Book Authority (trading JVM) → blackheart-equity → Alpaca
+                 blackheart-idx-web (:3010) ── IDX value desk UI: /idx/* proxy → blackheart-ingest (:8001) idx routes
 ```
 
 ## Deploy model

@@ -98,3 +98,4 @@ research-scratch/
 __pycache__/
 # IDX schema migrations are source, not backups (the *.sql rule above would hide them)
 !blackheart-ingest/src/blackheart_ingest/idx/migrations/*.sql
+/blackheart-idx-web/
