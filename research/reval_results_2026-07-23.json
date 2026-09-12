@@ -1,0 +1,145 @@
+{
+ "solo": [
+  {
+   "sleeve": "CRYPTO(pool 20/10 LS)",
+   "days": 3241,
+   "last": "2026-07-22",
+   "n_trades": 0,
+   "pf": 0.0,
+   "sharpe": 0.55,
+   "maxdd_pct": 51.2
+  },
+  {
+   "sleeve": "GOLD(40/20 L)",
+   "days": 6237,
+   "last": "2026-07-22",
+   "n_trades": 60,
+   "pf": 2.42,
+   "sharpe": 0.372,
+   "maxdd_pct": 32.3
+  },
+  {
+   "sleeve": "CORN(55/20 L)",
+   "days": 6228,
+   "last": "2026-07-22",
+   "n_trades": 45,
+   "pf": 2.63,
+   "sharpe": 0.392,
+   "maxdd_pct": 30.0
+  },
+  {
+   "sleeve": "USDJPY(55/20 L)",
+   "days": 6433,
+   "last": "2026-07-21",
+   "n_trades": 33,
+   "pf": 2.05,
+   "sharpe": 0.305,
+   "maxdd_pct": 28.5
+  },
+  {
+   "sleeve": "NVDA(55/20 L)",
+   "days": 6230,
+   "last": "2026-07-17",
+   "n_trades": 52,
+   "pf": 4.7,
+   "sharpe": 0.673,
+   "maxdd_pct": 48.9
+  },
+  {
+   "sleeve": "KEPPEL(20/10 L)",
+   "days": 4805,
+   "last": "2026-07-17",
+   "n_trades": 73,
+   "pf": 2.97,
+   "sharpe": 0.655,
+   "maxdd_pct": 29.6
+  },
+  {
+   "sleeve": "LQD(40/20 L)",
+   "days": 5989,
+   "last": "2026-07-17",
+   "n_trades": 51,
+   "pf": 3.28,
+   "sharpe": 0.652,
+   "maxdd_pct": 7.7
+  },
+  {
+   "sleeve": "XLK(40/20 L)",
+   "days": 6245,
+   "last": "2026-07-17",
+   "n_trades": 62,
+   "pf": 2.71,
+   "sharpe": 0.465,
+   "maxdd_pct": 22.1
+  }
+ ],
+ "BASE4": {
+  "book": "BASE4",
+  "common_days": 1967,
+  "window": "2017-09-07..2026-07-21",
+  "oos_sharpe": 1.183,
+  "oos_ann_ret_pct": 7.11,
+  "maxdd_pct": 6.9,
+  "max_abs_corr": 0.176,
+  "folds_ret_pct": [
+   13.1,
+   11.6,
+   -0.6,
+   9.7,
+   3.9
+  ],
+  "folds_pos": "4/5",
+  "sharpe_last3y": 0.689,
+  "sharpe_last1y": 0.804,
+  "dsr20": 0.768,
+  "dsr50": 0.639,
+  "dsr100": 0.541,
+  "dsr488": 0.34
+ },
+ "EQ7_AGGRESSIVE": {
+  "book": "EQ7_AGGRESSIVE",
+  "common_days": 1913,
+  "window": "2017-09-07..2026-07-16",
+  "oos_sharpe": 1.719,
+  "oos_ann_ret_pct": 7.43,
+  "maxdd_pct": 5.7,
+  "max_abs_corr": 0.244,
+  "folds_ret_pct": [
+   9.6,
+   6.7,
+   5.5,
+   6.4,
+   9.4
+  ],
+  "folds_pos": "5/5",
+  "sharpe_last3y": 1.431,
+  "sharpe_last1y": 2.107,
+  "dsr20": 0.971,
+  "dsr50": 0.936,
+  "dsr100": 0.898,
+  "dsr488": 0.775
+ },
+ "EQ6_SURVSAFE": {
+  "book": "EQ6_SURVSAFE",
+  "common_days": 1964,
+  "window": "2017-09-07..2026-07-16",
+  "oos_sharpe": 1.399,
+  "oos_ann_ret_pct": 5.92,
+  "maxdd_pct": 4.1,
+  "max_abs_corr": 0.269,
+  "folds_ret_pct": [
+   8.6,
+   6.2,
+   3.0,
+   6.1,
+   7.0
+  ],
+  "folds_pos": "5/5",
+  "sharpe_last3y": 1.144,
+  "sharpe_last1y": 1.669,
+  "dsr20": 0.888,
+  "dsr50": 0.799,
+  "dsr100": 0.721,
+  "dsr488": 0.528
+ }
+}
