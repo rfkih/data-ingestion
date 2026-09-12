@@ -50,6 +50,16 @@ dev = [
     "respx>=0.21,<0.23",          # httpx mocking
 ]
 
+# IDX data plane (blackheart_ingest.idx): self-scheduled jobs + later phases
+# (financial-statement workbooks, RSS, disclosure PDFs). Installed locally for
+# the IDX worker; the served app only needs the core deps for /idx/* routes.
+idx = [
+    "apscheduler>=3.10,<4",
+    "openpyxl>=3.1,<4",
+    "feedparser>=6.0,<7",
+    "pypdf>=5.0,<7",
+]
+
 # HTML scraping for the (currently unused) ForexFactory HTML fallback.
 # Pull this in only if/when we move forexfactory.py off the JSON mirror.
 # lxml lacks prebuilt wheels on bleeding-edge Python — installing without

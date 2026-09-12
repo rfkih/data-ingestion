@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     server_host: str = "127.0.0.1"
     server_port: int = 8001
 
+    # IDX data plane (blackheart_ingest.idx) — bronze archive + polite client.
+    idx_bronze_dir: str = "data/idx/bronze"   # relative to the working dir unless absolute
+    idx_rps: float = 1.0                       # requests per second to idx.co.id
+    idx_daily_budget: int = 3000               # max requests per UTC day
+    idx_circuit_threshold: int = 5             # consecutive 403/5xx before pausing
+    idx_circuit_pause_s: int = 900
+
     # Shared-secret for the mutation routes (POST /pull, /compute/*).
     # Empty (default) = auth disabled for backward compatibility with the
     # loopback/Tailscale-only deployment — the port rebind is the primary

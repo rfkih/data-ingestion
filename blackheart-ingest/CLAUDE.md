@@ -40,6 +40,88 @@ Key routes: `GET /health` (and `/healthz`), `GET /sources`, `GET /features`, `PO
 Has its **own CI** (`C:/Project/.github/workflows/blackheart-ingest-ci.yml`, root workspace — not inside this repo): push to `master` runs pytest + a served-app smoke-boot, builds/pushes the GHCR image, then auto-deploys to the VPS (gated by `vars.DEPLOY_ENABLED`) with a healthcheck + auto-rollback.
 **Docker-run-managed on the VPS — NOT compose.** The container is created via `docker rm -f` + `docker run -d --name blackheart-ingest --network blackheart_default --env-file /home/starsky/blackheart/ingest.env -p 127.0.0.1:8001:8001 -p 100.112.13.126:8001:8001` (loopback + Tailscale only). A `docker compose up` would create a conflicting container — recreate by hand with the same `docker run` + env_file if you must touch it live. CI pulls the image BEFORE removing the old container (a pull-then-rm ordering bug once caused a 53-min outage + lost unbackfillable liquidation events).
 
+## IDX data plane (`src/blackheart_ingest/idx/`, phase 0 — 2026-09-12)
+
+Primary-source Indonesian equities (idx.co.id) → schema **`idx`** in the same `trading_db`; self-scheduled,
+**independent of the trading JVM**. Spec: `C:/Project/docs/superpowers/specs/2026-09-12-idx-data-platform-design.md`;
+build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
+
+- **Layers:** bronze = every response archived (`INGEST_IDX_BRONZE_DIR/<endpoint>/<key>/<fetched_at>.json.gz` + `idx.bronze_index`)
+  → silver = `idx.*` tables via pure ETL (`idx/etl.py`) → gold = `public.market_data` rows `<CODE>.JK / 1d` (IDX reference-price basis =
+  splits + rights/bonus via `Previous` resets, never cash dividends; `idx/publish.py` re-bases the Yahoo pre-2020 segment onto it). Silver/gold are derived; `idx replay` rebuilds them from bronze with no network.
+- **CLI:** `python -m blackheart_ingest.idx.cli` — `migrate | status | universe | daily --date | index --date |
+  backfill --from --to [--index] | replay | publish [--full] | announce | features [--publish] | fin discover|download|parse |
+  dividends | card CODE | candidates [--as-of D] | answers [--score] | crosscheck | run-scheduler`. Local wrapper:
+  `C:/Project/scripts/idx.sh` / `idx.ps1` (loads `idx-local.env`, gitignored).
+- **Value/quality book (phase 2 verdict, `research/IDX_VALUE_QUALITY_2026-09-12.md` rev. 3; review
+  `research/IDX_REVIEW_2026-09-12.md`):** `idx/metrics.py` is the one PIT evaluator (latest audited + latest quarterly → TTM,
+  loose/strict gates, warnings; information cutoff = 16:00 WIB of the as-of day; prior-period comparatives come from the report
+  (`net_profit_prior`, migration 0009) — the YoY ratio is only inverted when its sign is certain). `idx/candidates.py` applies
+  the rule: board Utama/Pengembangan **on the day** (`board_from_remarks`: 5th char of the day-dump notation string, 1 Utama
+  2 Pengembangan 3 Akselerasi 4 Pemantauan Khusus 5 Ekonomi Baru) → traded that day → liquid ≥ Rp 5 bn/day → loose gate →
+  composite **average** rank E/P+B/P+DY → top fifth, min 10, only when the pool has ≥ 20 names. `rank_pool(rows, gate=,
+  keys=, sector_cap=)` is the single implementation — `research/idx_value_quality.py` calls `candidates.build()`/`rank_pool()`
+  per rebalance date, so backtest and live list cannot drift. Rows carry `data_error_ratio` (ratio > 50×), `no_trade_on_date`,
+  `scale_mismatch` warnings. `idx/card.py` is the per-name thesis card. `GET /idx/candidates[?all=1&as_of=]`. Gates are
+  evaluated on the **audited** year; TTM and quarterly warnings are shown for judgment, never used to exclude automatically.
+  `idx answers --score` = forward returns per pack stance / veto vs COMPOSITE (21/63/126/252 trading days).
+- **Analysis pack (manual Claude chat, no API):** `idx pack` → `idx/pack.py` builds one markdown (pinned prompt `pack_v1` +
+  market + candidate table + a compact section per name: valuation, gates, 4 quarters + 3 FY, flow, disclosures since the previous
+  pack) for selected candidates + next 10 + `idx.watchlist`; stored in `idx.nightly_pack` and written to
+  `research-scratch/idx-pack/<date>/pack.md` (~13k tokens for 32 names). The operator pastes it into Claude chat and saves the
+  JSON block; `idx pack-import answer.json` validates (codes must be in the pack, stance buy|hold|avoid|sell, conviction 1-5,
+  veto needs a reason) and writes `idx.sentiment_score` rows (`doc_type='pack'`, `model='claude-chat-manual'`) +
+  `nightly_pack.answer_json`. `idx answers`, `idx watch list|add|rm`. Routes: `GET /idx/pack/latest|{date}`, `POST /idx/pack/build`,
+  `POST /idx/pack/{date}/answer`, `GET /idx/answers`, `GET|PUT /idx/watchlist`.
+- **Position book (`idx/book.py`, migration 0007):** `idx.book` (live | paper; cash, fee %, dividend tax), `idx.fill` (buy | sell |
+  split; average cost, fees in the basis) → `idx.position` rebuilt from fills; `idx book mark` writes `idx.book_mark` + `idx.book_nav`
+  per trading day (net dividends credited on the ex-date, splits become `split` fills; cash anchored on the live `book.cash`, so a
+  back-dated fill needs `--rebuild`); `idx book check` raises deduplicated `idx.alert` rows (`job='book:<name>'`) for held names:
+  material disclosures (last 3 days), a new report breaking the book rule or with TTM warnings, unrealized loss ≥ 25 %, liquidity
+  below half the floor. `idx book fill --date --code --side --lots --price [--fee]` is how the operator records broker fills;
+  `idx book paper-seed --book paper --as-of <candidate run date> --amount N` buys the selected list at the next open. Both books
+  are marked + checked at the end of the daily chain. Routes: `GET /idx/book/{book}`, `POST /idx/book/{book}/fills`, `PUT /idx/book/{book}`.
+  `research/idx_book.py` (CSV ledger) is superseded; `idx book import --file fills.csv` reads its format.
+- **Rebalance ticket (`idx/ticket.py`, migration 0008):** `idx ticket build --book live [--mode rebalance|exits] [--as-of run_date]
+  [--max-names N]` → `idx.ticket` + `idx.ticket_line`. `rebalance` = hold the selected candidates equal-weight: sell what is no
+  longer selected, trim/add beyond ±1 % of NAV (min Rp 5 M), buy new entrants, whole lots, limit = one tick through the reference
+  close clamped inside the auto-rejection band, buys capped by cash + expected sale proceeds − 1 % reserve (`cash-limited` flag).
+  `exits` = sells only, for held names whose newest report breaks the book rule or whose latest pack answer is `sell`. Lines carry
+  rank, strict-gate fails, TTM warnings and the pack stance/veto as flags. Fill capture: `idx ticket fill --line ID --lots --price
+  [--fee]` (→ `idx.fill`, book re-marked; partial fills tracked), `idx ticket skip --line ID --reason`, `issue|close|cancel`.
+  IDX rules encoded (verify against Peraturan II-A on change): lot 100; fractions 1/2/5/10/25 below 200/500/2,000/5,000/above;
+  symmetric auto-rejection 35/25/20 % for 50–200/200–5,000/>5,000. Scheduler: May 1–10 alert if the live book has no rebalance
+  ticket yet. Routes: `GET /idx/ticket/latest?book=`, `GET /idx/ticket/{id}`, `POST /idx/ticket/build`, `POST /idx/ticket/{id}/status`,
+  `POST /idx/ticket/lines/{id}/fill|skip`.
+- **Workbook scaling gotchas (`idx/fin_parse.py`):** (a) the FY2023 vintage (published Jan-Apr 2024) is labelled "in millions"
+  but holds full rupiah — `_effective_rounding` overrides the label when total assets would exceed 50,000 T (IDR) / 3 T (USD),
+  and scales up when a "full amount" label yields < Rp 1 bn; (b) ~27 % of USD-filer reports carry no conversion rate —
+  `fin_store.fx_table` supplies the median reporting-date rate other filers reported for that period end (`FX_SEED` for a fresh
+  DB), `Parsed.fx_source` says which; (c) a company whose *every* report is mis-scaled (PGEO, 1000×) is invisible to the
+  neighbour cross-check, and some filers scale the EPS row too (BBNI FY2024 EPS 0.0006) — `fin_store._eps_reconcile` compares
+  `net_profit` with `eps × listed shares`; a clean power-of-1000 gap is resolved by the publication-day price (the side whose
+  earnings yield could belong to a company wins): `report_rescaled` re-parses the whole workbook, `eps_rescaled` fixes EPS only,
+  `scale_mismatch` / `eps_mismatch` are stored in `fundamental.flags` (`scale_mismatch` surfaces as a candidate warning).
+  All unit-tested; `fin parse --reparse` re-derives everything from the archived files (safe to run in parallel by code chunks).
+- **Schema:** own migrations `idx/migrations/NNNN_*.sql` + `idx.schema_history` (sha256-checked, never edit an applied file).
+  Not Flyway. JVM/equity roles get SELECT only.
+- **Jobs (WIB):** `universe` 16:15 · `daily` every 15 min 16:30–20:00 until today's bar lands → `index` → `publish --since`
+  → `features --since -45d` → `candidates` · 18:00 alert if no bar · `announce_recent` 20:30 (all-emiten feed, last 3 days,
+  one request per day) · `fundamentals` 21:00 Mon–Fri (discover current FY → download pending workbooks for
+  `metrics.universe_codes` → parse) and Sat 09:00 with the previous FY too · `dividends` 1st of month 09:30 (Yahoo) ·
+  Sunday `crosscheck`. Alerts are rows in `idx.alert`, shown by the app (`/equities/ops` via `GET /idx/ops` on this server);
+  no Telegram/email.
+- **Gotchas:** (1) idx.co.id is Cloudflare-fronted and **fingerprints TLS — `httpx`/`requests` get 403, stdlib `urllib` passes**;
+  `idx/client.py` uses urllib on purpose. (2) Use `127.0.0.1`, not `localhost`, in the local DSN (IPv6 `::1` hangs on the Docker
+  port proxy). (3) idx.co.id serves **2020-01-02 onward only**; pre-2020 comes from the Yahoo split-only cache
+  (`research/idx_ohlc_loader.py`, `yf_fetch(adjust=False)`). (4) Backfill uses the whole-market day-dump
+  (`GetStockSummary?date=`) so delisted names are included; per-stock `GetTradingInfoSS` is only a cross-check.
+  (5) `OpenPrice=FirstTrade=0` (2020-03-13..09-04, no pre-opening) → `open` NULL + `open_missing`, never fabricated.
+  (6) Corporate actions come from IDX's `Previous` reset vs prior close; exact split ratios from listed-shares change;
+  `idx.bar.adj_factor` is rewritten for earlier rows, raw prices never change. (7) A code in the day-dump but not in Daftar Saham
+  (e.g. GOTOM multiple-voting shares) is `listing.status='NOT_IN_DAFTAR'`, not delisted.
+  (8) **Opens before 2025 exist only for LQ45** in IDX's own data (`open_missing` on ~80 % of 2020-24 rows is the source, not a bug).
+
 ## Gotchas
 - **`api/` is dead.** The served app is `workers.server:app`; the old `api/` app factory was unused. CI's `test_server_app.py` exists precisely because the old suite tested the dead app while the served app shipped broken ("CI green, served app broken").
 - **Mutation routes are unauthenticated** unless `INGEST_AUTH_TOKEN` is set — never publish `/pull` or `/compute` on a public interface (the loopback+Tailscale bind is the safeguard).

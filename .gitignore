@@ -6,6 +6,7 @@ blackheart-train/
 blackheart-research-orchestrator/
 research-orchestrator/
 superpowers/
+/blackheart-equity/
 
 # Build / runtime artifacts
 logs/
@@ -89,3 +90,11 @@ research-scratch/
 
 # Brainstorming visual-companion mockups
 .superpowers/
+
+# IDX bronze archive + local data plane files (phase 0, 2026-09-12)
+/data/
+
+# Python bytecode (research/ scripts run from the workspace root)
+__pycache__/
+# IDX schema migrations are source, not backups (the *.sql rule above would hide them)
+!blackheart-ingest/src/blackheart_ingest/idx/migrations/*.sql

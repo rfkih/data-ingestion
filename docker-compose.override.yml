@@ -1,0 +1,35 @@
+# Local dev override — runs the full app stack in Docker WITHOUT disturbing the
+# manually-run dev postgres (blackheart-postgres on :5432 holding session data).
+# The compose owns its OWN fresh postgres (renamed container + separate volume,
+# NO host port — apps reach it internally via `postgres:5432`); kafka via host.
+# `!reset` drops the base list (compose appends lists otherwise → the 5432 clash).
+services:
+  postgres:
+    container_name: blackheart-postgres-local
+    # 2026-09-12 (IDX phase 0): host port 5433 so host-side Python (idx ingest,
+    # research screens) and psql can reach it; fresh volume pgdata_idx restored
+    # from the 2026-08-10 VPS dump (TimescaleDB 2.27.0 on both sides); backups
+    # folder mounted read-only for pg_restore inside the container.
+    ports: !override ["5433:5432"]
+    shm_size: "1g"   # parallel query DSM segments; docker default 64m -> "could not resize shared memory segment"
+    volumes: !override ["pgdata_idx:/home/postgres/pgdata/data", "C:/blackheart-backups:/backups:ro"]
+  blackheart:
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
+  blackheart-research:
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
+  blackheart-ingest:
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
+      # base compose maps/healthchecks :8001 but the app default is 127.0.0.1:8089;
+      # bind 0.0.0.0:8001 so the host port + the 8001 healthcheck both resolve.
+      INGEST_SERVER_HOST: "0.0.0.0"
+      INGEST_SERVER_PORT: "8001"
+  blackheart-inference:
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9092
+
+volumes:
+  pgdata_local:
+  pgdata_idx:

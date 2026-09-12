@@ -38,10 +38,10 @@ import logging
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Any
 from types import ModuleType
+from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -141,7 +141,7 @@ def _compute_all_macro(lookback_hours: int) -> dict[str, Any]:
     Failures on individual features are caught, logged, and counted — one
     bad transformer should not block the rest.
     """
-    end = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    end = datetime.now(tz=UTC).replace(tzinfo=None)
     start = end - timedelta(hours=lookback_hours)
     macro_features = [f for f in FEATURES if f.raw_tables == ("macro_raw",)]
 
@@ -164,7 +164,7 @@ def _compute_all_macro(lookback_hours: int) -> dict[str, Any]:
                 run_id = start_run(feat, range_start=start, range_end=end, conn=conn)
                 try:
                     df = compute_feature(feat, start=start, end=end, conn=conn)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     conn.rollback()
                     fail_run(run_id, error_message=str(e), conn=conn)
                     raise
@@ -180,7 +180,7 @@ def _compute_all_macro(lookback_hours: int) -> dict[str, Any]:
                 try:
                     written = write_values(feat, df, run_id=run_id, conn=conn)
                     finish_run(run_id, rows_written=written, conn=conn)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     conn.rollback()
                     fail_run(run_id, error_message=f"persist: {e}", conn=conn)
                     raise
@@ -191,7 +191,7 @@ def _compute_all_macro(lookback_hours: int) -> dict[str, Any]:
                 "status": "ok",
                 "duration_s": round(time.monotonic() - t0, 2),
             })
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             failures += 1
             logger.exception("auto_compute failed | feature=%s", feat.name)
             results.append({"feature": feat.name, "status": "error", "error": str(e)[:200]})
@@ -236,18 +236,18 @@ async def _compute_loop(interval_hours: int, lookback_hours: int) -> None:
             )
             _COMPUTE_LOOP_STATUS["runs"] = _COMPUTE_LOOP_STATUS["runs"] + 1
             _COMPUTE_LOOP_STATUS["last_run_at"] = (
-                datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat()
+                datetime.now(tz=UTC).replace(tzinfo=None).isoformat()
             )
             _COMPUTE_LOOP_STATUS["last_failures"] = summary.get("failures")
         except asyncio.CancelledError:
             logger.info("compute_loop cancelled")
             return
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("compute_loop iteration failed — continuing")
 
 
 @asynccontextmanager
-async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
+async def _lifespan(settings_ref: Any, app: FastAPI):
     from .bar_event_consumer import run_bar_event_consumer
 
     settings = settings_ref
@@ -294,7 +294,7 @@ async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
                     await run_bar_event_consumer(settings)
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning(
                         "ingest bar-event consumer crashed, restarting in %ds | error=%s",
                         delay, exc,
@@ -355,7 +355,7 @@ async def _lifespan(settings_ref: Any, app: FastAPI):  # noqa: ANN001
                 task.cancel()
                 try:
                     await task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                except (asyncio.CancelledError, Exception):
                     pass
 
 
@@ -365,6 +365,12 @@ app = FastAPI(
     description="Pulls macro/sentiment/on-chain data from free sources into Postgres *_raw tables.",
     lifespan=partial(_lifespan, get_settings()),
 )
+
+
+# IDX data plane (blackheart_ingest.idx): ops/alerts/runs for the app's /equities/ops page.
+from ..idx.api import make_router as _idx_router  # noqa: E402
+
+app.include_router(_idx_router(require_token))
 
 
 def _db_probe() -> bool:
@@ -388,7 +394,7 @@ async def health() -> dict[str, Any]:
     """
     try:
         await asyncio.wait_for(asyncio.to_thread(_db_probe), timeout=8)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=503, detail=f"db probe failed: {exc}") from exc
     return {"status": "healthy", "db": True}
 
@@ -466,7 +472,7 @@ def liquidation_status(request: Request) -> dict[str, Any]:
         "last_gap_seconds": state.last_gap_seconds,
         "last_error": state.last_error,
         "last_error_at": _iso(state.last_error_at),
-        "now": datetime.now(tz=timezone.utc).replace(tzinfo=None).isoformat(),
+        "now": datetime.now(tz=UTC).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -500,7 +506,7 @@ def pull(source: str, body: PullRequest) -> dict[str, Any]:
         result = module.fetch(request)
     except HTTPException:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # Health row was already updated inside the source module on failure.
         logger.exception("pull failed | source=%s", source)
         raise HTTPException(
@@ -646,10 +652,10 @@ def compute_endpoint(feature_name: str, version: int, body: ComputeRequest) -> d
                 symbol=body.symbol,
                 interval=body.interval,
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             try:
                 conn.rollback()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             fail_run(run_id, error_message=str(e), conn=conn)
             logger.exception("compute failed | feature=%s v=%d", feature_name, version)
@@ -682,11 +688,11 @@ def compute_endpoint(feature_name: str, version: int, body: ComputeRequest) -> d
                 interval=body.interval,
                 conn=conn,
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             # write_values raised before commit — no data landed.
             try:
                 conn.rollback()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             fail_run(run_id, error_message=str(e), conn=conn)
             logger.exception("persist failed | feature=%s v=%d", feature_name, version)
@@ -700,10 +706,10 @@ def compute_endpoint(feature_name: str, version: int, body: ComputeRequest) -> d
         # audit row reflecting that, not zeroed.
         try:
             finish_run(run_id, rows_written=written, conn=conn)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             try:
                 conn.rollback()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             logger.exception(
                 "finish_run failed after persist | feature=%s v=%d run_id=%s rows=%d "
@@ -721,7 +727,7 @@ def compute_endpoint(feature_name: str, version: int, body: ComputeRequest) -> d
                     rows_written=written,
                     conn=conn,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(
                     "audit reconciliation also failed | run_id=%s — row left as 'running'",
                     run_id,
