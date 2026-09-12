@@ -65,10 +65,20 @@ def limit_price(ref_close: Decimal, side: str, ticks_through: int = 1) -> Decima
     return min(max(snap(raw, side), lo), hi)
 
 
-def plan(targets: list[str], held: dict[str, dict[str, Any]], prices: dict[str, Decimal], cash: Decimal, *, book: dict[str, Any],
-         band: Decimal = BAND, min_trade: Decimal = MIN_TRADE, reserve: Decimal = CASH_RESERVE, mode: str = "rebalance",
-         exits: dict[str, str] | None = None) -> dict[str, Any]:
-    """Pure. held = {code: {lots, avg_price}}; prices = last close per code. Returns lines + sizing context."""
+def _target_weights(targets: list[str] | dict[str, Any]) -> dict[str, Decimal]:
+    """Targets as {code: weight} summing to 1: a list means equal weight, a dict carries the strategy's own weights."""
+    if isinstance(targets, dict):
+        ws = {c: Decimal(str(w)) for c, w in targets.items()}
+        tot = sum((w for w in ws.values() if w > 0), Decimal(0))
+        return {c: w / tot for c, w in ws.items() if w > 0} if tot > 0 else {}
+    return {c: Decimal(1) / len(targets) for c in targets} if targets else {}
+
+
+def plan(targets: list[str] | dict[str, Any], held: dict[str, dict[str, Any]], prices: dict[str, Decimal], cash: Decimal, *,
+         book: dict[str, Any], band: Decimal = BAND, min_trade: Decimal = MIN_TRADE, reserve: Decimal = CASH_RESERVE,
+         mode: str = "rebalance", exits: dict[str, str] | None = None) -> dict[str, Any]:
+    """Pure. targets = codes (equal weight) or {code: weight}; held = {code: {lots, avg_price}}; prices = last close per
+    code. Returns lines + sizing context."""
     fee_buy, fee_sell = Decimal(book["fee_buy_pct"]) / 100, Decimal(book["fee_sell_pct"]) / 100
     value = {c: Decimal(h["lots"]) * LOT * prices[c] for c, h in held.items() if c in prices}
     nav = cash + sum(value.values(), Decimal(0))
@@ -82,35 +92,37 @@ def plan(targets: list[str], held: dict[str, dict[str, Any]], prices: dict[str, 
                               "weight_target": Decimal(0), "reason": why, "flags": []})
         return {"nav": nav, "cash": cash, "n_targets": len(held) - len(lines), "lines": lines, "cash_after": cash + sum(
             ln["notional"] * (1 - fee_sell) for ln in lines)}
-    n = len(targets)
-    target_value = ((nav * (1 - reserve)) / n) if n else Decimal(0)
-    w_target = (target_value / nav) if nav else Decimal(0)
+    tw = _target_weights(targets)
+    n = len(tw)
+    target_value = {c: nav * (1 - reserve) * w for c, w in tw.items()}
+    w_target = {c: (target_value[c] / nav if nav else Decimal(0)) for c in tw}
     # sells: no longer a target -> exit; overweight beyond the band -> trim
     for c, h in held.items():
         if c not in prices:
             continue
         v, lots = value[c], Decimal(h["lots"])
-        if c not in targets:
+        if c not in tw:
             lp = limit_price(prices[c], "sell")
             lines.append({"code": c, "side": "sell", "lots": lots, "limit_price": lp, "ref_close": prices[c], "notional": lots * LOT * lp,
                           "weight_now": v / nav, "weight_target": Decimal(0), "reason": "no longer selected", "flags": []})
-        elif v - target_value > band * nav and v - target_value >= min_trade:
+        elif v - target_value[c] > band * nav and v - target_value[c] >= min_trade:
             lp = limit_price(prices[c], "sell")
-            trim = Decimal(math.ceil((v - target_value) / (lp * LOT)))
+            trim = Decimal(math.ceil((v - target_value[c]) / (lp * LOT)))
             if 0 < trim < lots:
                 lines.append({"code": c, "side": "sell", "lots": trim, "limit_price": lp, "ref_close": prices[c], "notional": trim * LOT * lp,
-                              "weight_now": v / nav, "weight_target": w_target, "reason": f"trim {_pct(v / nav)} -> {_pct(w_target)}", "flags": []})
+                              "weight_now": v / nav, "weight_target": w_target[c], "reason": f"trim {_pct(v / nav)} -> {_pct(w_target[c])}",
+                              "flags": []})
     proceeds = sum(ln["notional"] * (1 - fee_sell) for ln in lines)
     budget = cash + proceeds - nav * reserve
-    # buys: new entrants and underweights
+    # buys: new entrants and underweights, in the strategy's order
     buys: list[dict[str, Any]] = []
-    for c in targets:
+    for c in tw:
         if c not in prices:
             buys.append({"code": c, "side": "buy", "lots": Decimal(0), "limit_price": Decimal(0), "ref_close": None, "notional": Decimal(0),
-                         "weight_now": Decimal(0), "weight_target": w_target, "reason": "no price", "flags": ["no_price"]})
+                         "weight_now": Decimal(0), "weight_target": w_target[c], "reason": "no price", "flags": ["no_price"]})
             continue
         v = value.get(c, Decimal(0))
-        gap = target_value - v
+        gap = target_value[c] - v
         if gap <= band * nav or gap < min_trade:
             continue
         lp = limit_price(prices[c], "buy")
@@ -118,8 +130,8 @@ def plan(targets: list[str], held: dict[str, dict[str, Any]], prices: dict[str, 
         if lots <= 0:
             continue
         buys.append({"code": c, "side": "buy", "lots": lots, "limit_price": lp, "ref_close": prices[c], "notional": lots * LOT * lp,
-                     "weight_now": v / nav if nav else Decimal(0), "weight_target": w_target,
-                     "reason": "new entrant" if c not in held else f"add {_pct(v / nav)} -> {_pct(w_target)}", "flags": []})
+                     "weight_now": v / nav if nav else Decimal(0), "weight_target": w_target[c],
+                     "reason": "new entrant" if c not in held else f"add {_pct(v / nav)} -> {_pct(w_target[c])}", "flags": []})
     need = sum(b["notional"] * (1 + fee_buy) for b in buys)
     if need > budget > 0:
         scale = budget / need
@@ -130,26 +142,30 @@ def plan(targets: list[str], held: dict[str, dict[str, Any]], prices: dict[str, 
         buys = [b for b in buys if b["lots"] > 0 or "no_price" in b["flags"]]
     lines += buys
     cash_after = cash + proceeds - sum(b["notional"] * (1 + fee_buy) for b in buys)
-    return {"nav": nav, "cash": cash, "n_targets": n, "target_value": target_value, "lines": lines, "cash_after": cash_after}
+    return {"nav": nav, "cash": cash, "n_targets": n, "target_value": target_value, "weights": tw, "lines": lines, "cash_after": cash_after}
 
 
 # ---------------------------------------------------------------------------
 # build from the database
 # ---------------------------------------------------------------------------
 def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_date: date | None = None, max_names: int | None = None,
-          band: Decimal = BAND, min_trade: Decimal = MIN_TRADE) -> dict[str, Any]:
+          strategy: str | None = None, band: Decimal = BAND, min_trade: Decimal = MIN_TRADE) -> dict[str, Any]:
+    """Targets come from the book's strategy and size (idx.book.strategy / max_names) unless overridden per call."""
+    from . import strategies
     b = bk.get_book(conn, book)
+    strategy = strategy or b.get("strategy") or "rule"
+    size = max_names if max_names is not None else b.get("max_names")
     s = bk.snapshot(conn, book)
     held = {p["code"]: {"lots": p["lots"], "avg_price": p["avg_price"]} for p in s["positions"]}
     D = _rows(conn, "SELECT max(run_date) FROM idx.candidate WHERE (%s::date IS NULL OR run_date <= %s)", (run_date, run_date), ["d"])[0]["d"]
     if D is None:
         raise ValueError("no candidate run; run `idx candidates` first")
-    cands = _rows(conn, "SELECT code, rank, selected, gate_strict, strict_fails, warnings FROM idx.candidate WHERE run_date = %s ORDER BY rank", (D,),
-                  ["code", "rank", "selected", "gate_strict", "strict_fails", "warnings"])
-    cmap = {c["code"]: c for c in cands}
-    targets = [c["code"] for c in cands if c["selected"]]
-    if max_names:
-        targets = targets[:max_names]
+    cands = _rows(conn, """SELECT code, rank, selected, ep, bp, dy, np_yoy, mom, gate_loose, gate_strict, strict_fails, warnings, sector
+                             FROM idx.candidate WHERE run_date = %s ORDER BY rank""", (D,),
+                  ["code", "rank", "selected", "ep", "bp", "dy", "np_yoy", "mom", "gate_loose", "gate_strict", "strict_fails", "warnings", "sector"])
+    picked = strategies.pick(strategy, cands, size=size or None)
+    cmap = {c["code"]: c for c in picked}
+    targets = {c["code"]: c["weight"] for c in picked if c["selected"]}
     codes = sorted(set(targets) | set(held))
     px = {p["code"]: Decimal(p["close"]) for p in _rows(conn, """
         SELECT DISTINCT ON (code) code, close FROM idx.bar WHERE code = ANY(%s) AND source = 'idx' AND trade_date <= %s
@@ -172,14 +188,15 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
         c = cmap.get(line["code"])
         a = answers.get(line["code"])
         if c:
-            line["reason"] += f" (rank {c['rank']})"
+            line["reason"] += f" (rank {c['strategy_rank']})"
             if line["side"] == "buy":
                 if not c["gate_strict"]:
                     line["flags"] += [f"strict:{f}" for f in (c["strict_fails"] or [])]
                 line["flags"] += [f"warn:{w}" for w in (c["warnings"] or [])]
         if a and a["stance"]:
             line["flags"].append(f"pack:{a['stance']}" + (" VETO" if a["veto"] else ""))
-    res.update({"book": book, "mode": mode, "run_date": D, "ticket_date": D, "targets": targets, "held": held, "prices": px})
+    res.update({"book": book, "mode": mode, "run_date": D, "ticket_date": D, "targets": list(targets), "held": held, "prices": px,
+                "strategy": strategy, "size": size or None, "weights": {c: str(w) for c, w in res["weights"].items()}})
     return res
 
 
@@ -188,7 +205,8 @@ def store(conn: psycopg.Connection, res: dict[str, Any], notes: str | None = Non
         cur.execute("""INSERT INTO idx.ticket (book, ticket_date, run_date, mode, nav, cash, n_targets, params, notes)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                     (res["book"], res["ticket_date"], res["run_date"], res["mode"], res["nav"], res["cash"], res["n_targets"],
-                     psycopg.types.json.Jsonb({"targets": res["targets"], "cash_after": str(res["cash_after"])}), notes))
+                     psycopg.types.json.Jsonb({"targets": res["targets"], "cash_after": str(res["cash_after"]), "strategy": res.get("strategy"),
+                                               "size": res.get("size"), "weights": res.get("weights")}), notes))
         row = cur.fetchone()
         tid = int(next(iter(row.values())) if isinstance(row, dict) else row[0])
         for i, line in enumerate(res["lines"], 1):
@@ -222,7 +240,7 @@ def set_status(conn: psycopg.Connection, ticket_id: int, status: str) -> None:
 
 
 def fill_line(conn: psycopg.Connection, line_id: int, lots: Decimal, price: Decimal, fee: Decimal | None = None, trade_date: date | None = None,
-              note: str | None = None) -> dict[str, Any]:
+              note: str | None = None, source: str = "manual") -> dict[str, Any]:
     """Record the broker fill for a line: a book fill + line status (filled | partial)."""
     ln = _rows(conn, "SELECT l.id, l.ticket_id, l.code, l.side, l.lots, l.filled_lots, t.book, t.ticket_date FROM idx.ticket_line l JOIN idx.ticket t ON t.id = l.ticket_id WHERE l.id = %s",
               (line_id,), ["id", "ticket_id", "code", "side", "lots", "filled_lots", "book", "ticket_date"])
@@ -230,7 +248,7 @@ def fill_line(conn: psycopg.Connection, line_id: int, lots: Decimal, price: Deci
         raise ValueError(f"no ticket line {line_id}")
     ln = ln[0]
     d = trade_date or date.today()
-    fid = bk.add_fill(conn, ln["book"], d, ln["code"], ln["side"], Decimal(lots), Decimal(price), fee, source="manual",
+    fid = bk.add_fill(conn, ln["book"], d, ln["code"], ln["side"], Decimal(lots), Decimal(price), fee, source=source,
                       note=note or f"ticket {ln['ticket_id']} line {line_id}")
     done = Decimal(ln["filled_lots"]) + Decimal(lots)
     status = "filled" if done >= Decimal(ln["lots"]) else "partial"
@@ -239,6 +257,73 @@ def fill_line(conn: psycopg.Connection, line_id: int, lots: Decimal, price: Deci
     conn.commit()
     bk.mark(conn, ln["book"])
     return {"fill_id": fid, "status": status, "filled_lots": done}
+
+
+def paper_fill_plan(lines: list[dict[str, Any]], prices: dict[str, Any], cash: Any, book_meta: dict[str, Any]) -> tuple[list[dict[str, Any]], Decimal]:
+    """Pure. The open lines of a paper ticket and the fill day's prices -> what fills at those prices: sells first (they fund
+    the buys), then buys in ticket order, each trimmed to whole lots the remaining cash can pay for including the book's
+    buy fee. A line without a price that day, or with no cash left, comes back with ``lots`` 0 and a ``why``."""
+    cash = Decimal(cash)
+    fee_buy = Decimal(book_meta["fee_buy_pct"]) / 100
+    fee_sell = Decimal(book_meta["fee_sell_pct"]) / 100
+    out: list[dict[str, Any]] = []
+    for ln in sorted(lines, key=lambda x: (x["side"] != "sell", x["seq"])):
+        if ln["status"] not in ("open", "partial"):
+            continue
+        want = Decimal(ln["lots"]) - Decimal(ln.get("filled_lots") or 0)
+        p = prices.get(ln["code"])
+        f = {"line_id": ln["id"], "code": ln["code"], "side": ln["side"], "lots": Decimal(0), "price": None, "why": None}
+        if not p or want <= 0:
+            f["why"] = "no bar on the fill day" if not p else "nothing left to fill"
+            out.append(f)
+            continue
+        p = Decimal(p)
+        if ln["side"] == "buy":
+            per_lot = p * bk.LOT * (1 + fee_buy)
+            lots = min(want, Decimal(int(cash // per_lot)) if per_lot > 0 else Decimal(0))
+            if lots <= 0:
+                f["why"] = "cash exhausted"
+                out.append(f)
+                continue
+            cash -= lots * per_lot
+        else:
+            lots = want
+            cash += lots * p * bk.LOT * (1 - fee_sell)
+        f.update({"lots": lots, "price": p})
+        out.append(f)
+    return out, cash
+
+
+def paper_fill(conn: psycopg.Connection, book: str = "paper", dry_run: bool = False) -> list[dict[str, Any]]:
+    """The paper book's convention (as ``book.paper_seed``): open tickets fill at the open of the first trading day after the
+    ticket date, sells first, buys trimmed to the cash; lines that cannot fill are skipped with the reason; the ticket closes.
+    Refuses any other book: real fills are captured by hand. Returns one report per ticket touched."""
+    if book != "paper":
+        raise ValueError("paper_fill is for the paper book only")
+    reports = []
+    for t_id in [r["id"] for r in _rows(conn, "SELECT id FROM idx.ticket WHERE book = %s AND status IN ('draft', 'issued') ORDER BY id", (book,), ["id"])]:
+        t = load(conn, t_id)
+        d = _rows(conn, "SELECT min(trade_date) AS d FROM idx.bar WHERE source = 'idx' AND trade_date > %s", (t["ticket_date"],), ["d"])[0]["d"]
+        rep = {"ticket": t_id, "ticket_date": t["ticket_date"], "fill_date": d, "fills": [], "cash_after": None, "dry_run": dry_run}
+        if d is None:
+            rep["why"] = "no bar after the ticket date yet"
+            reports.append(rep)
+            continue
+        codes = [ln["code"] for ln in t["lines"] if ln["status"] in ("open", "partial")]
+        px = {r["code"]: (r["open"] or r["close"]) for r in _rows(conn, "SELECT code, open, close FROM idx.bar WHERE trade_date = %s AND source = 'idx' AND code = ANY(%s)",
+                                                                    (d, codes), ["code", "open", "close"])}
+        b = bk.get_book(conn, book)
+        fills, cash_after = paper_fill_plan(t["lines"], px, b["cash"], b)
+        rep.update({"fills": fills, "cash_after": cash_after})
+        if not dry_run:
+            for f in fills:
+                if f["lots"] > 0:
+                    fill_line(conn, f["line_id"], f["lots"], f["price"], None, d, note=f"paper fill at the {d} open (ticket {t_id})", source="paper")
+                else:
+                    skip_line(conn, f["line_id"], f"paper: {f['why']}")
+            set_status(conn, t_id, "closed")
+        reports.append(rep)
+    return reports
 
 
 def skip_line(conn: psycopg.Connection, line_id: int, reason: str) -> None:

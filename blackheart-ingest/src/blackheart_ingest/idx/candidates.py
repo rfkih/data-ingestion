@@ -28,6 +28,7 @@ from .metrics import LIQ, fundamentals_asof
 logger = logging.getLogger(__name__)
 JOB = "candidates"
 TOP_FRACTION, MIN_NAMES, MIN_POOL = 5, 10, 20
+CONV_CAP = Decimal(3)                                                 # CFO / profit above 3 is noise, not virtue
 KEYS = ("ep", "bp", "dy")
 MAX_RATIO = Decimal(50)                 # E/P, B/P, DY or TTM E/P above 5000 % is a data error
 BOARD_DIGIT = {"1": "Utama", "2": "Pengembangan", "3": "Akselerasi", "4": "Pemantauan Khusus", "5": "Ekonomi Baru"}
@@ -68,6 +69,7 @@ def build(conn: psycopg.Connection, as_of: date | None = None) -> dict[str, Any]
     liquid = [p for p in px if p["board"] in ELIGIBLE_BOARDS and p["v60"] is not None and Decimal(p["v60"]) >= LIQ
               and p["shares"] and Decimal(p["shares"]) > 0 and p["close"]]
     codes = [p["code"] for p in liquid]
+    mom = momentum_at(conn, D, codes)
     fund = fundamentals_asof(conn, D, codes)
     divs = _rows(conn, "SELECT code, sum(amount_per_share) AS dps FROM idx.dividend WHERE ex_date > %s AND ex_date <= %s AND code = ANY(%s) GROUP BY code",
                  (D - timedelta(days=365), D, codes), ["code", "dps"])
@@ -79,7 +81,7 @@ def build(conn: psycopg.Connection, as_of: date | None = None) -> dict[str, Any]
         mcap = price * shares                                        # both on the day's basis
         r: dict[str, Any] = {"code": p["code"], "name": p["name"], "board": p["board"], "price": price, "mcap": mcap,
                              "v60": Decimal(p["v60"]), "tradable": bool(p["volume"] and int(p["volume"]) > 0),
-                             "f20": _dec(p["f20"]), "f5": _dec(p["f5"]),
+                             "f20": _dec(p["f20"]), "f5": _dec(p["f5"]), "mom": mom.get(p["code"]),
                              # Yahoo dividend amounts are on today's split basis, so the yield uses the adjusted close
                              "dy": (dps.get(p["code"], Decimal(0)) / adj_close) if adj_close > 0 else None, "sector": p["sector"]}
         if m and m.get("net_profit") is not None:
@@ -88,9 +90,11 @@ def build(conn: psycopg.Connection, as_of: date | None = None) -> dict[str, Any]
                       "roe": m["roe"], "der": m["der"], "cfo": m["cfo"], "np_yoy": m["np_yoy"], "rev_yoy": m["rev_yoy"],
                       "gate_loose": m["gate_loose"], "gate_strict": m["gate_strict"], "strict_fails": m["strict_fails"],
                       "warnings": m["warnings"], "annual_period": m["annual_period"], "ttm_basis": m.get("ttm_basis"),
-                      "sector": m.get("sector") or p["sector"], "is_financial": m.get("is_financial")})
+                      "sector": m.get("sector") or p["sector"], "is_financial": m.get("is_financial"),
+                      # cash conversion: operating cash flow per rupiah of audited profit, capped (rank input of strict_cash)
+                      "conv": (min(m["cfo"] / m["net_profit"], CONV_CAP) if (m["cfo"] is not None and m["net_profit"] > 0) else None)})
         else:
-            r.update({"ep": None, "bp": None, "ep_ttm": None, "roe": None, "der": None, "cfo": None, "np_yoy": None, "rev_yoy": None,
+            r.update({"ep": None, "bp": None, "ep_ttm": None, "roe": None, "der": None, "cfo": None, "np_yoy": None, "rev_yoy": None, "conv": None,
                       "gate_loose": False, "gate_strict": False, "strict_fails": ["no_audited_report"], "warnings": [],
                       "annual_period": None, "ttm_basis": None, "is_financial": False})
         # a ratio beyond any real valuation means a mis-scaled report, not a bargain: drop the name and say why
@@ -103,6 +107,21 @@ def build(conn: psycopg.Connection, as_of: date | None = None) -> dict[str, Any]
     pool = rank_pool([dict(r) for r in rows])
     return {"as_of": D, "liquid": len(rows), "with_fundamentals": sum(1 for r in rows if r["ep"] is not None), "pool": len(pool),
             "selected_n": sum(1 for r in pool if r["selected"]), "pool_rows": pool, "all_rows": rows}
+
+
+def momentum_at(conn: psycopg.Connection, D: date, codes: list[str], long: int = 252, skip: int = 21) -> dict[str, Decimal]:
+    """12-1 month price momentum on the day: close ``skip`` bars before D over close ``long`` bars before D, minus one
+    (the same definition as research/idx_top10.py). Empty when the calendar is too short."""
+    dates = [r["d"] for r in _rows(conn, """
+        SELECT trade_date FROM (SELECT DISTINCT trade_date FROM idx.bar WHERE source = 'idx' AND trade_date <= %s
+                                 ORDER BY trade_date DESC LIMIT %s) t ORDER BY trade_date""", (D, long + 1), ["d"])]
+    if len(dates) < long + 1 or not codes:
+        return {}
+    far_d, near_d = dates[0], dates[-1 - skip]
+    q = "SELECT code, close * adj_factor AS c FROM idx.bar WHERE source = 'idx' AND trade_date = %s AND code = ANY(%s)"
+    far = {r["code"]: Decimal(r["c"]) for r in _rows(conn, q, (far_d, codes), ["code", "c"]) if r["c"]}
+    near = {r["code"]: Decimal(r["c"]) for r in _rows(conn, q, (near_d, codes), ["code", "c"]) if r["c"]}
+    return {c: near[c] / far[c] - 1 for c in codes if c in near and c in far and far[c] > 0}
 
 
 def _avg_ranks(pool: list[dict[str, Any]], key: str) -> None:
@@ -163,13 +182,13 @@ def store(conn: psycopg.Connection, res: dict[str, Any]) -> int:
         cur.executemany(
             """
             INSERT INTO idx.candidate (run_date, code, rank, selected, score, price, mcap, ep, bp, dy, ep_ttm, roe, der, np_yoy,
-                                       gate_loose, gate_strict, strict_fails, warnings, f20, v60, annual_period, ttm_basis, sector)
+                                       gate_loose, gate_strict, strict_fails, warnings, f20, v60, annual_period, ttm_basis, sector, mom, conv)
             VALUES (%(run_date)s, %(code)s, %(rank)s, %(selected)s, %(score)s, %(price)s, %(mcap)s, %(ep)s, %(bp)s, %(dy)s, %(ep_ttm)s,
                     %(roe)s, %(der)s, %(np_yoy)s, %(gate_loose)s, %(gate_strict)s, %(strict_fails)s, %(warnings)s, %(f20)s, %(v60)s,
-                    %(annual_period)s, %(ttm_basis)s, %(sector)s)
+                    %(annual_period)s, %(ttm_basis)s, %(sector)s, %(mom)s, %(conv)s)
             """,
             [{"run_date": res["as_of"], **{k: r.get(k) for k in ("code", "rank", "selected", "score", "price", "mcap", "ep", "bp", "dy",
-              "ep_ttm", "roe", "der", "np_yoy", "gate_loose", "gate_strict", "f20", "v60", "annual_period", "ttm_basis", "sector")},
+              "ep_ttm", "roe", "der", "np_yoy", "gate_loose", "gate_strict", "f20", "v60", "annual_period", "ttm_basis", "sector", "mom", "conv")},
               "strict_fails": r.get("strict_fails") or [], "warnings": r.get("warnings") or []} for r in res["pool_rows"]])
     conn.commit()
     return len(res["pool_rows"])

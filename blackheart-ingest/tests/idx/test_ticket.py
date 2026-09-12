@@ -56,6 +56,17 @@ def test_plan_trim_size() -> None:
     assert trim["side"] == "sell" and trim["lots"] == 103 and "trim" in trim["reason"]
 
 
+def test_plan_weighted_targets() -> None:
+    prices = {"A": Decimal(1000), "B": Decimal(1000)}
+    res = ticket.plan({"A": 3, "B": 1}, {}, prices, Decimal(100_000_000), book=BOOK)
+    by = {ln["code"]: ln for ln in res["lines"]}
+    assert res["weights"] == {"A": Decimal("0.75"), "B": Decimal("0.25")}
+    assert by["A"]["weight_target"] == Decimal("0.7425") and by["B"]["weight_target"] == Decimal("0.2475")   # 99 % invested
+    assert by["A"]["lots"] == 3 * by["B"]["lots"] or abs(by["A"]["lots"] - 3 * by["B"]["lots"]) <= 2
+    assert [ln["code"] for ln in res["lines"]] == ["A", "B"]                # buys in the strategy's order
+    assert ticket.plan({"A": 0, "B": 0}, {}, prices, Decimal(1_000_000), book=BOOK)["lines"] == []
+
+
 def test_plan_cash_limited_and_exits_mode() -> None:
     res = ticket.plan(["A", "B"], {}, {"A": Decimal(1000), "B": Decimal(1000)}, Decimal(1_000_000), book=BOOK)
     assert all("cash-limited" not in ln["flags"] for ln in res["lines"])        # sizing already fits the cash
@@ -112,3 +123,27 @@ def test_round_trip(conn) -> None:
         assert ticket.load(conn, None, bk)["id"] == tid
     finally:
         _clean(conn, bk)
+
+
+def test_paper_fill_plan_sells_first_and_trims_buys_to_cash() -> None:
+    from decimal import Decimal
+
+    from blackheart_ingest.idx import ticket as T
+
+    meta = {"fee_buy_pct": "0.15", "fee_sell_pct": "0.25"}
+    lines = [
+        {"id": 1, "seq": 1, "code": "BUYA", "side": "buy", "lots": 50, "filled_lots": 0, "status": "open"},
+        {"id": 2, "seq": 2, "code": "SELLA", "side": "sell", "lots": 10, "filled_lots": 0, "status": "open"},
+        {"id": 3, "seq": 3, "code": "NOBAR", "side": "buy", "lots": 5, "filled_lots": 0, "status": "open"},
+        {"id": 4, "seq": 4, "code": "DONE", "side": "buy", "lots": 5, "filled_lots": 5, "status": "filled"},
+    ]
+    fills, cash = T.paper_fill_plan(lines, {"BUYA": "500", "SELLA": "1000"}, "0", meta)
+    assert [f["code"] for f in fills] == ["SELLA", "BUYA", "NOBAR"]           # the sell funds the buys; filled lines untouched
+    assert fills[0]["lots"] == 10 and fills[0]["price"] == Decimal(1000)
+    after_sell = Decimal(10) * 100 * 1000 * (1 - Decimal("0.0025"))
+    per_lot = Decimal(500) * 100 * (1 + Decimal("0.0015"))
+    assert fills[1]["lots"] == int(after_sell // per_lot) == 19                # 50 wanted, 19 affordable
+    assert fills[2]["lots"] == 0 and fills[2]["why"] == "no bar on the fill day"
+    assert cash == after_sell - 19 * per_lot
+    fills, _ = T.paper_fill_plan(lines[:1], {"BUYA": "500"}, "0", meta)
+    assert fills[0]["lots"] == 0 and fills[0]["why"] == "cash exhausted"

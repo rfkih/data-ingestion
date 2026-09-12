@@ -372,6 +372,21 @@ def cmd_answers(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_strategies(a: argparse.Namespace) -> int:
+    from . import strategies
+    with get_connection() as conn:
+        if a.sub == "import-history":
+            n = sum(strategies.import_history(conn, f) for f in a.files)
+            print(f"imported {n} history rows from {len(a.files)} file(s)")
+            return 0
+        for s in strategies.catalog(conn):
+            print(f"{s['key']:14s} {s['status']:12s} {s['label']}")
+            for size, months in sorted(s["records"].items(), key=lambda kv: int(kv[0])):
+                cells = "  ".join(f"m{m}: {v['total_pct']:+.0f}% Sh {v['sharpe']:.2f} DD {v['mdd_pct']:.0f}%" for m, v in sorted(months.items(), key=lambda kv: int(kv[0])))
+                print(f"    size {size if size != '0' else 'all':>3}  {cells}")
+    return 0
+
+
 def cmd_watch(a: argparse.Namespace) -> int:
     with get_connection() as conn, conn.cursor() as cur:
         if a.sub == "add":
@@ -447,7 +462,8 @@ def cmd_ticket(a: argparse.Namespace) -> int:
     from . import ticket
     with get_connection() as conn:
         if a.sub == "build":
-            res = ticket.build(conn, a.book, mode=a.mode, run_date=_d(a.as_of) if a.as_of else None, max_names=a.max_names)
+            res = ticket.build(conn, a.book, mode=a.mode, run_date=_d(a.as_of) if a.as_of else None, max_names=a.max_names,
+                               strategy=a.strategy)
             tid = ticket.store(conn, res, notes=a.note)
             t = ticket.load(conn, tid)
             print(ticket.render(t))
@@ -464,6 +480,14 @@ def cmd_ticket(a: argparse.Namespace) -> int:
                 return 1
             ticket.set_status(conn, t["id"], {"issue": "issued", "close": "closed", "cancel": "cancelled"}[a.sub])
             print(f"ticket #{t['id']} {'cancelled' if a.sub == 'cancel' else a.sub + 'd'}")
+        elif a.sub == "paper-fill":
+            for rep in ticket.paper_fill(conn, "paper", dry_run=a.dry_run):
+                head = f"ticket #{rep['ticket']} ({rep['ticket_date']}) -> {rep['fill_date'] or rep.get('why')}{' [dry run]' if a.dry_run else ''}"
+                print(head)
+                for f in rep["fills"]:
+                    print(f"  {f['side']:4s} {f['code']:6s} {f['lots']:>6} lots @ {f['price'] if f['price'] is not None else '-':>8}  {f['why'] or ''}")
+                if rep["cash_after"] is not None:
+                    print(f"  cash after: Rp {rep['cash_after']:,.0f}")
         elif a.sub == "fill":
             r = ticket.fill_line(conn, a.line, Decimal(a.lots), Decimal(a.price), Decimal(a.fee) if a.fee is not None else None,
                                  _d(a.date) if a.date else None, a.note)
@@ -581,6 +605,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--score", action="store_true", help="forward returns per stance (21/63/126/252 trading days) and vs COMPOSITE")
     p.set_defaults(fn=cmd_answers)
+    p = sub.add_parser("strategies", help="strategy catalog: list | import-history FILE...")
+    p.add_argument("sub", choices=["list", "import-history"])
+    p.add_argument("files", nargs="*")
+    p.set_defaults(fn=cmd_strategies)
     p = sub.add_parser("watch", help="watchlist")
     p.add_argument("sub", choices=["list", "add", "rm"])
     p.add_argument("code", nargs="?")
@@ -608,11 +636,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(fn=cmd_book)
     p = sub.add_parser("ticket", help="rebalance ticket: target list vs held -> buys/sells in lots; fill capture")
-    p.add_argument("sub", choices=["build", "show", "issue", "close", "cancel", "fill", "skip"])
+    p.add_argument("sub", choices=["build", "show", "issue", "close", "cancel", "fill", "skip", "paper-fill"])
     p.add_argument("--book", default="live")
+    p.add_argument("--dry-run", action="store_true", help="paper-fill: show what would fill, change nothing")
     p.add_argument("--mode", choices=["rebalance", "exits"], default="rebalance")
     p.add_argument("--as-of", help="candidate run date to target (default latest)")
     p.add_argument("--max-names", type=int)
+    p.add_argument("--strategy", help="catalog key (default: the book's strategy); see `idx strategies list`")
     p.add_argument("--id", type=int)
     p.add_argument("--line", type=int)
     p.add_argument("--lots")

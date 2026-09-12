@@ -65,6 +65,18 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   `scale_mismatch` warnings. `idx/card.py` is the per-name thesis card. `GET /idx/candidates[?all=1&as_of=]`. Gates are
   evaluated on the **audited** year; TTM and quarterly warnings are shown for judgment, never used to exclude automatically.
   `idx answers --score` = forward returns per pack stance / veto vs COMPOSITE (21/63/126/252 trading days).
+- **Strategy catalog (`idx/strategies.py`, migrations 0010 + 0011):** families `rule` (baseline) · `strict` (deployed since
+  2026-09-12, the operator's call ahead of the pre-registered May 2027 date) · `strict_cash` (tested: passes its criterion on
+  one name, ENRG; not the default) · `value` · `momentum` · `momentum_rank` · `growth`, each `{gate, order, weight[, keys]}`;
+  `strategies.deployed()` is the API's default strategy; a choice = family + size (None = natural
+  fifth, 10, 15). `strategies.pick(key, rows, size=, weight=)` is the ONE implementation of "which names, what weights"
+  (composite families order their gate pool; feature families order the rule's fifth by ep / mom / np_yoy); the research
+  scripts call it too (`research/idx_top10.py <10|15>`), so tested == deployed. `candidates.build` now stores `mom` (12-1
+  month momentum, `momentum_at`). `idx.book.strategy` + `max_names` say what a book follows; `ticket.build(strategy=,
+  max_names=)` defaults to them and `ticket.plan` takes `{code: weight}` targets. `idx.strategy_history (strategy, size,
+  month)` holds the research record (`idx strategies import-history <rev3 json> <top10 json> <top15 json>`, `idx strategies
+  list`). Routes: `GET /idx/strategies`, `GET /idx/strategies/{key}?size=`, `GET /idx/candidates?strategy=&size=&all=`,
+  `PUT /idx/book/{b}` accepts `strategy`/`max_names`, `POST /idx/ticket/build?strategy=`.
 - **Analysis pack (manual Claude chat, no API):** `idx pack` → `idx/pack.py` builds one markdown (pinned prompt `pack_v1` +
   market + candidate table + a compact section per name: valuation, gates, 4 quarters + 3 FY, flow, disclosures since the previous
   pack) for selected candidates + next 10 + `idx.watchlist`; stored in `idx.nightly_pack` and written to
@@ -87,7 +99,7 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   longer selected, trim/add beyond ±1 % of NAV (min Rp 5 M), buy new entrants, whole lots, limit = one tick through the reference
   close clamped inside the auto-rejection band, buys capped by cash + expected sale proceeds − 1 % reserve (`cash-limited` flag).
   `exits` = sells only, for held names whose newest report breaks the book rule or whose latest pack answer is `sell`. Lines carry
-  rank, strict-gate fails, TTM warnings and the pack stance/veto as flags. Fill capture: `idx ticket fill --line ID --lots --price
+  rank, strict-gate fails, TTM warnings and the pack stance/veto as flags. Paper tickets fill themselves at the next day's open inside the daily chain (`idx ticket paper-fill --dry-run` previews; sells first, buys trimmed to cash, unfillable lines skipped, ticket closed); live fills are captured by hand: `idx ticket fill --line ID --lots --price
   [--fee]` (→ `idx.fill`, book re-marked; partial fills tracked), `idx ticket skip --line ID --reason`, `issue|close|cancel`.
   IDX rules encoded (verify against Peraturan II-A on change): lot 100; fractions 1/2/5/10/25 below 200/500/2,000/5,000/above;
   symmetric auto-rejection 35/25/20 % for 50–200/200–5,000/>5,000. Scheduler: May 1–10 alert if the live book has no rebalance

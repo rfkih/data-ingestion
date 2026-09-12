@@ -4,6 +4,7 @@ Schedule (WIB):
   16:15 Mon-Fri   universe            Daftar Saham snapshot
   16:30-20:00     daily (every 15 min until today's bar has landed)
                   -> then index -> publish --since today-7 -> features --since today-45 -> candidates
+                  -> paper ticket fill at today's open (paper book only; live fills are captured by hand)
                   -> book mark + check (live, paper): marks, NAV, holding alerts
   18:00 Mon-Fri   alert if today's bar has still not landed (holiday, or IDX late)
   20:30 Mon-Fri   announce_recent     all-emiten disclosures for the last 3 days -> idx.announcement / idx.event
@@ -26,7 +27,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..shared.db import get_connection
-from . import book, candidates, features, fin_store, publish, runlog
+from . import book, candidates, features, fin_store, publish, runlog, ticket
 from .client import IdxClient, IdxFetchError
 from .jobs import announce as job_announce
 from .jobs import crosscheck as job_crosscheck
@@ -83,6 +84,11 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
             rc, _ = candidates.run(conn)
             _fail_alert(conn, rc)
             logger.info("idx candidates %s pool=%s selected=%s", rc.status, rc.detail.get("pool"), rc.detail.get("selected"))
+        try:
+            for rep in ticket.paper_fill(conn, "paper"):
+                logger.info("idx paper fill ticket #%s at %s: %s lines", rep["ticket"], rep["fill_date"], len(rep["fills"]))
+        except Exception as e:                                          # the chain must go on to the marks
+            runlog.alert(conn, "warning", "ticket:paper", f"paper fill failed: {type(e).__name__}: {e}")
         for bk in ("live", "paper"):
             rm = book.mark(conn, bk)
             _fail_alert(conn, rm)

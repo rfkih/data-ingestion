@@ -46,7 +46,7 @@ def test_candidates_shape(client) -> None:
     r = client.get("/idx/candidates")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"run_date", "pool", "selected", "rows"}
+    assert set(body) == {"run_date", "pool", "selected", "rows", "strategy", "size"}
     if body["rows"]:
         row = body["rows"][0]
         assert row["rank"] == 1 and row["selected"] is True

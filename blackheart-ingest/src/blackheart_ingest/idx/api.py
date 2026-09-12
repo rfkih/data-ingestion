@@ -72,25 +72,51 @@ def make_router(require_token) -> APIRouter:
             return [dict(r) for r in cur.fetchall()]
 
     @router.get("/candidates")
-    def candidates(as_of: str | None = None, all: bool = False) -> dict[str, Any]:
-        """Latest candidate list (or the latest on/before as_of): selected names first, the rest of the pool with all=1."""
+    def candidates(as_of: str | None = None, all: bool = False, strategy: str | None = None, size: int | None = None) -> dict[str, Any]:
+        """The candidate list under a strategy and size (latest run, or the latest on/before as_of): the chosen names, and
+        the rest of that strategy's pool with all=1. Rows carry the strategy's rank and weight; `rank` stays the composite rank."""
+        from . import strategies
+        strategy = strategy or strategies.deployed()
         with get_connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT max(run_date) AS d FROM idx.candidate WHERE (%s::date IS NULL OR run_date <= %s)", (as_of, as_of))
             d = dict(cur.fetchone())["d"]
             if d is None:
-                return {"run_date": None, "pool": 0, "selected": 0, "rows": []}
+                return {"run_date": None, "strategy": strategy, "size": size, "pool": 0, "selected": 0, "rows": []}
             cur.execute(
                 """
                 SELECT c.run_date, c.code, l.name, c.rank, c.selected, c.score, c.price, c.mcap, c.ep, c.bp, c.dy, c.ep_ttm, c.roe, c.der,
                        c.np_yoy, c.gate_loose, c.gate_strict, c.strict_fails, c.warnings, c.f20, c.v60, c.annual_period, c.ttm_basis,
-                       c.sector
+                       c.sector, c.mom, c.conv
                   FROM idx.candidate c LEFT JOIN idx.listing l USING (code)
-                 WHERE c.run_date = %s AND (%s OR c.selected) ORDER BY c.rank
-                """, (d, all))
+                 WHERE c.run_date = %s ORDER BY c.rank
+                """, (d,))
             rows = [dict(r) for r in cur.fetchall()]
-            cur.execute("SELECT count(*) AS n, count(*) FILTER (WHERE selected) AS s FROM idx.candidate WHERE run_date = %s", (d,))
-            n = dict(cur.fetchone())
-        return {"run_date": d.isoformat(), "pool": n["n"], "selected": n["s"], "rows": rows}
+        try:
+            picked = strategies.pick(strategy, rows, size=size or None)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from None
+        out = [r for r in picked if all or r["selected"]]
+        return {"run_date": d.isoformat(), "strategy": strategy, "size": size or None, "pool": len(picked),
+                "selected": sum(1 for r in picked if r["selected"]), "rows": out}
+
+    @router.get("/strategies")
+    def strategies_list() -> dict[str, Any]:
+        """The catalog with every (size, month) research record attached: what each choice earned, and how it varies by calendar."""
+        from . import strategies
+        with get_connection() as conn:
+            return {"sizes": [0, 10, 15], "strategies": strategies.catalog(conn)}
+
+    @router.get("/strategies/{key}")
+    def strategy_detail(key: str, size: int | None = None) -> dict[str, Any]:
+        from . import strategies
+        meta = strategies.BY_KEY.get(key) or ({"key": key, "label": strategies.REFERENCE_LABELS[key], "status": "reference"}
+                                              if key in strategies.REFERENCE_LABELS else None)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="unknown strategy")
+        with get_connection() as conn:
+            rows = strategies.history(conn, key, size)
+        return {"strategy": {k: v for k, v in meta.items() if k != "history"},
+                "history": [{k: (v.isoformat() if isinstance(v, date | datetime) else v) for k, v in r.items()} for r in rows]}
 
     @router.get("/card/{code}")
     def card_get(code: str, as_of: str | None = None) -> dict[str, Any]:
@@ -182,10 +208,14 @@ def make_router(require_token) -> APIRouter:
 
     @router.put("/book/{book}", dependencies=[Depends(require_token)])
     def book_put(book: str, body: dict[str, Any] = _BODY) -> dict[str, Any]:
-        """Set cash / fees / broker: any of {cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note}."""
+        """Set cash / fees / broker / strategy: any of {cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note, strategy, max_names}."""
         from . import book as bk
         with get_connection() as conn:
-            bk.ensure_book(conn, book, **{k: v for k, v in body.items() if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note")})
+            try:
+                bk.ensure_book(conn, book, **{k: v for k, v in body.items()
+                                              if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names")})
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from None
             return bk.get_book(conn, book)
 
     @router.get("/ticket/latest")
@@ -207,11 +237,13 @@ def make_router(require_token) -> APIRouter:
         return t
 
     @router.post("/ticket/build", dependencies=[Depends(require_token)])
-    def ticket_build(book: str = "live", mode: str = "rebalance", as_of: str | None = None, max_names: int | None = None) -> dict[str, Any]:
+    def ticket_build(book: str = "live", mode: str = "rebalance", as_of: str | None = None, max_names: int | None = None,
+                     strategy: str | None = None) -> dict[str, Any]:
         from . import ticket
         with get_connection() as conn:
             try:
-                res = ticket.build(conn, book, mode=mode, run_date=date.fromisoformat(as_of) if as_of else None, max_names=max_names)
+                res = ticket.build(conn, book, mode=mode, run_date=date.fromisoformat(as_of) if as_of else None, max_names=max_names,
+                                   strategy=strategy)
             except ValueError as e:
                 raise HTTPException(status_code=422, detail=str(e)) from None
             tid = ticket.store(conn, res)
