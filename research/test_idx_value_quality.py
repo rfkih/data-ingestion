@@ -56,6 +56,31 @@ def test_delisted_name_goes_to_zero_after_its_last_bar():
     assert abs(nav.iloc[3] - (nav2 - w + units_a * 10 * (1 - VQ.DIV_TAX))) < 1e-12     # C worth zero from day 3
 
 
+def test_weighted_targets_renormalise_over_buyable_names():
+    close, vol, div, _ = _setup(c_sellable_on_rebalance=True)
+    # A gets 3 parts, B 1 part, C is wanted but cannot be bought on day 0 (no trade) -> A 75 %, B 25 %
+    vol.iloc[0, 2] = 0
+    nav = VQ.simulate({DAYS[0]: {'A': 3.0, 'B': 1.0, 'C': 2.0}}, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[1], spread=False)
+    assert abs(nav.iloc[0] - (1 - C)) < 1e-12
+    assert abs(nav.iloc[1] - (1 - C + 0.75 * 0.1)) < 1e-12               # only A moved, +10 % on a 75 % weight
+
+
+def test_drift_mode_keeps_winners_and_funds_entrants_from_cash():
+    close, vol, div, _ = _setup(c_sellable_on_rebalance=True)
+    vol.iloc[2] = [1, 1, 1]                                                 # everyone tradable on the rebalance day
+    # day 0: A, B ; day 2: A stays, B leaves, C enters -> B sold, its cash buys C; A is not touched
+    plan = {DAYS[0]: {'A', 'B'}, DAYS[2]: lambda held: (held & {'A'}) | {'C'}}
+    nav = VQ.simulate(plan, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[2], spread=False, mode='drift')
+    units_a = 0.5 / 100
+    # day 2 before trades: A = 0.5 * 1.2, B = 0.5, cash = -C ; sell B -> cash = 0.5 (1 - C) - C ; buy C with it
+    cash_after_sell = 0.5 * (1 - C) - C
+    units_c = cash_after_sell / 50
+    expected = units_a * 120 + units_c * 50 - units_c * 50 * C            # A untouched, C bought, cost on C only
+    assert abs(nav.iloc[2] - expected) < 1e-12
+    reset = VQ.simulate(plan, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[2], spread=False, mode='reset')
+    assert reset.iloc[2] < nav.iloc[2]                                     # the reset trims A and pays for it
+
+
 def test_cost_side_includes_half_tick_spread():
     assert VQ.cost_side(120.0, False) == C
     assert abs(VQ.cost_side(120.0, True) - (C + 0.5 * 1 / 120)) < 1e-15

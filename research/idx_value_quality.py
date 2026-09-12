@@ -138,9 +138,13 @@ def cost_side(p: float, spread: bool) -> float:
     return COST_SIDE + (0.5 * next(t for lim, t in TICKS if p < lim) / p if spread else 0.0)
 
 
-def simulate(sel_by_date: dict[pd.Timestamp, set[str]], close: pd.DataFrame, vol: pd.DataFrame, delisted: dict, div: pd.DataFrame,
-             start: pd.Timestamp, end: pd.Timestamp, spread: bool = True) -> pd.Series:
-    """NAV of one portfolio: buy at the rebalance close, hold, dividends (net) to cash, real costs, stuck and delisted names."""
+def simulate(sel_by_date: dict[pd.Timestamp, set[str] | dict[str, float]], close: pd.DataFrame, vol: pd.DataFrame, delisted: dict,
+             div: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, spread: bool = True, mode: str = "reset") -> pd.Series:
+    """NAV of one portfolio: buy at the rebalance close, hold, dividends (net) to cash, real costs, stuck and delisted names.
+    A rebalance entry is a set (equal weight), a {code: weight} dict (weights renormalised over the names that can be bought),
+    or a callable(held codes) returning either — for rules that depend on what the book already holds.
+    mode 'reset' re-weights every target to its weight (the rule); 'drift' never touches a name already held: exits are sold,
+    the cash goes into the new entrants equally, and winners keep the weight they have grown into."""
     days = close.index[(close.index >= start) & (close.index <= end)]
     div_days: dict[pd.Timestamp, list[tuple[str, float]]] = {}
     for code, ex, dps in div.itertuples(index=False):
@@ -170,7 +174,11 @@ def simulate(sel_by_date: dict[pd.Timestamp, set[str]], close: pd.DataFrame, vol
                 cash += units[c] * dps * (1 - DIV_TAX)
         if d in sel_by_date:
             vrow = vol.loc[d]
-            target = {c for c in sel_by_date[d] if c in row.index and not np.isnan(row[c]) and row[c] > 0 and vrow.get(c, 0) > 0}
+            want = sel_by_date[d]
+            if callable(want):
+                want = want(set(units))
+            weight = want if isinstance(want, dict) else {c: 1.0 for c in want}
+            target = {c for c in weight if c in row.index and not np.isnan(row[c]) and row[c] > 0 and vrow.get(c, 0) > 0}
             for c in list(units):
                 if c in target:
                     continue
@@ -181,15 +189,25 @@ def simulate(sel_by_date: dict[pd.Timestamp, set[str]], close: pd.DataFrame, vol
                 elif p == 0.0:                                          # delisted: gone
                     del units[c]
                 # else: no trade today (suspended) -> carried, outside the new equal weights
-            investable = cash + sum(units[c] * row[c] for c in units if c in target)
-            if target:
-                w = investable / len(target)
-                for c in target:
-                    p = row[c]
-                    tgt = w / p
-                    delta = tgt - units.get(c, 0.0)
-                    cash -= delta * p + abs(delta) * p * cost_side(p, spread)
-                    units[c] = tgt
+            if mode == "drift":
+                new = [c for c in target if c not in units]
+                if new and cash > 0:
+                    total_w = sum(weight[c] for c in new)
+                    for c in new:
+                        p = row[c]
+                        tgt = cash * (weight[c] / total_w) / p
+                        units[c] = tgt
+                    cash -= sum(units[c] * row[c] * (1 + cost_side(row[c], spread)) for c in new)
+            else:
+                investable = cash + sum(units[c] * row[c] for c in units if c in target)
+                if target:
+                    total_w = sum(weight[c] for c in target)
+                    for c in target:
+                        p = row[c]
+                        tgt = investable * (weight[c] / total_w) / p
+                        delta = tgt - units.get(c, 0.0)
+                        cash -= delta * p + abs(delta) * p * cost_side(p, spread)
+                        units[c] = tgt
         nav.append(cash + sum(u * (0.0 if np.isnan(px(c)) else px(c)) for c, u in units.items()))
     return pd.Series(nav, index=days)
 

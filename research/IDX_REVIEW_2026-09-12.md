@@ -10,6 +10,8 @@
 > `idx answers --score` for the pack (§5). One more defect surfaced while re-running and is fixed too: market cap in the
 > candidate builder multiplied the split-adjusted close by the day's (unadjusted) share count, so names that later split
 > looked up to 10× cheaper in past runs (PTRO ranked #1 in May 2024 on that). Results: `research/IDX_VALUE_QUALITY_2026-09-12.md` rev. 3.
+>
+> **Later the same night:** four more pre-registered menus (ten names, weights and holding rules, quality, cash conversion; 71 trials in all) left the strict composite the only robust improvement, and the operator moved both books to it on 2026-09-12 (`IDX_TOP10`, `IDX_HOLD_WINNERS`, `IDX_QUALITY`, `IDX_CASH_CONVERSION`, same date). Paper ticket #13 is the switch, drafted and unfilled.
 
 Scope: the prediction/selection pipeline (`research/idx_value_quality.py`, `idx/metrics.py`, `idx/candidates.py`,
 `idx/fin_parse.py`, `idx/fin_store.py`, dividends), the backtest behind the "+122 %" verdict, and the operator layer
