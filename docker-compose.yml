@@ -346,6 +346,13 @@ services:
     image: prometheuscommunity/postgres-exporter:v0.15.0
     container_name: blackheart-postgres-exporter
     restart: unless-stopped
+    # TimescaleDB has thousands of chunk relations; the per-table stat collectors
+    # OOM the small cgroup mid-scrape and the exporter never answers (prod
+    # PostgresDown false-fire 2026-07-25). Table-level stats are the price of a
+    # live exporter. Applied to the VPS compose 2026-07-29.
+    command:
+      - "--no-collector.stat_user_tables"
+      - "--no-collector.statio_user_tables"
     depends_on:
       postgres:
         condition: service_healthy
@@ -354,7 +361,7 @@ services:
       PG_EXPORTER_AUTO_DISCOVER_DATABASES: "false"
     ports:
       - "127.0.0.1:9187:9187"
-    mem_limit: 64m
+    mem_limit: 128m
 
   # Grafana — dashboards over VictoriaMetrics. Default admin password is
   # `admin`; change on first login. Bound to 127.0.0.1:3001 (3000 is taken
