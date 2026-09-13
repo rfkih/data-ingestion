@@ -210,9 +210,12 @@ def simulate(sel_by_date: dict[pd.Timestamp, set[str] | dict[str, float]], close
                     else:
                         cap_d = cap(d) if callable(cap) else cap
                         nav_now = cash + sum(u * (0.0 if np.isnan(px(c)) else px(c)) for c, u in units.items())
-                        for c in new:
+                        pool = cash                                              # shares of the pool as it was, order-independent
+                        for c in sorted(new):
                             p = row[c]
-                            budget = min(cash * (weight[c] / total_w), cap_d * nav_now)
+                            budget = min(pool * (weight[c] / total_w), cap_d * nav_now, cash)
+                            if budget <= 0:
+                                continue
                             units[c] = budget / (p * (1 + cost_side(p, spread)))
                             cash -= budget
             else:

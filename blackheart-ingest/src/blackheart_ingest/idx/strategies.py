@@ -84,15 +84,17 @@ OVERLAYS: list[dict[str, Any]] = [
     {"key": "overlay:regime", "label": "Crash filter: cash while the IHSG is under its 200-day average", "status": "option",
      "rule": "Checked on the first trading day of each month, after the close. Off: the book is sold to cash. On again: the book's list is "
              "bought back. An annual rebalance while it is off becomes a cash ticket. Set per book (regime filter).",
-     "note": "2008-2026 on a 100-name liquid basket: max drawdown 51 % to 21 %, 2008 flat instead of -31 %, 2020 -8 % instead of -46 %, "
-             "total +588 % against +464 % with cash at 4 %. 2021-2026 on the strict book: 8 to 49 % of the return given up, there being no "
-             "crash to be saved from. Insurance: it pays in crashes and costs in calm years.",
+     "note": "2008-2026 on a 100-name liquid basket: max drawdown 51 % to 25 %, 2008 flat instead of -36 %, 2020 -13 % instead of -47 %, "
+             "total +794 % against +497 % with cash at 4 %. 2021-2026 on the strict book: 0 to 49 % of the return given up depending on the "
+             "calendar, and no help with the book's own 2022 dips, which happened while the IHSG stayed above its average. Insurance: it "
+             "pays in market crashes and costs in calm years. 200 days, not 100: shorter windows halve the return on the real book.",
      "history": {"overlay": "index"}},
     {"key": "overlay:entry_gate", "label": "Entry gate: buy a listed name only above its 200-day average", "status": "option",
      "rule": "At a rebalance, a listed name under its own 200-day average is held back and its slot stays in cash; at each monthly check "
              "the held-back names that have crossed above are bought, one slot each. Never sells on trend. Set per book (entry gate).",
-     "note": "2021-2026 on the strict book: ahead in three of four calendars (+8 to +37 points), level in the fourth. No protection in a "
-             "crash: over 2008-2026 the 2020 drawdown is -46 % either way.",
+     "note": "2021-2026 on the strict book: drawdowns a little shallower (worst 20 % against 22 %), return lower in three of four "
+             "calendars (-8 to -34 %), higher in the fourth. No protection in a crash: over 2008-2026 the 2020 drawdown is about the "
+             "same either way. A mild damper, not a free improvement.",
      "history": {"overlay": "entry_only"}},
     {"key": "overlay:none", "label": "Strict book as simulated in the overlay test (drift, one-slot cap, cash 4 %)", "status": "reference",
      "rule": "", "note": "The like-for-like baseline of the two overlay records above.", "history": {"overlay": "none"}},

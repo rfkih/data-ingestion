@@ -108,3 +108,14 @@ def test_cash_earns_the_rate_and_the_cap_can_follow_the_date():
                       cap=lambda d: 0.25 if d == DAYS[0] else 1.0)
     units_a = 0.25 / (100 * (1 + C))
     assert abs(nav.iloc[1] - (0.75 + units_a * 110)) < 1e-12
+
+
+def test_capped_drift_does_not_depend_on_the_order_of_the_names():
+    close, vol, div, _ = _setup(c_sellable_on_rebalance=True)
+    vol.iloc[0] = [1, 1, 1]
+    a = VQ.simulate({DAYS[0]: {'A', 'B', 'C'}}, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[2], spread=False, mode='drift', cap=0.4)
+    b = VQ.simulate({DAYS[0]: ['C', 'A', 'B']}, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[2], spread=False, mode='drift', cap=0.4)
+    assert list(a.round(12)) == list(b.round(12))
+    # three names, cap 40 % each: everyone gets a third of the cash (the cap does not bind), nothing is left over
+    units_a = (1 / 3) / (100 * (1 + C))
+    assert abs(a.iloc[0] - (units_a * 100 + (1 / 3) / (1 + C) + (1 / 3) / (1 + C))) < 1e-12
