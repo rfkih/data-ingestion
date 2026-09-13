@@ -96,6 +96,14 @@ OVERLAYS: list[dict[str, Any]] = [
              "calendars (-8 to -34 %), higher in the fourth. No protection in a crash: over 2008-2026 the 2020 drawdown is about the "
              "same either way. A mild damper, not a free improvement.",
      "history": {"overlay": "entry_only"}},
+    {"key": "overlay:take_profit", "label": "Take profit: sell a name once it has doubled", "status": "option",
+     "rule": "At each monthly check, a held name at or above twice its purchase price is sold and its cash waits for the next "
+             "rebalance. Set per book (take profit %, 100 tested).",
+     "note": "2021-2026 on the strict book: ahead in three of four calendars by 3 to 8 points, behind by 42 in the fourth (PTRO went on "
+             "to +185 % after doubling). Ten doubling events in five years: median -5 % after the double, six of ten fell back. Sells the "
+             "small reversals, misses the multi-bagger. Selling on valuation instead (no longer cheap vs peers, P/E over 15) lost in every "
+             "calendar; the annual rebalance stays the valuation exit.",
+     "history": {"sell": "tp100"}},
     {"key": "overlay:none", "label": "Strict book as simulated in the overlay test (drift, one-slot cap, cash 4 %)", "status": "reference",
      "rule": "", "note": "The like-for-like baseline of the two overlay records above.", "history": {"overlay": "none"}},
 ]
@@ -184,6 +192,17 @@ def history_rows_from_json(doc: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     months = doc.get("months") or {}
     first = next(iter(months.values()), {})
+    if "verdict" in doc and "months" in doc and any("tp100" in (m.get("table") or {}) for m in doc["months"].values()):
+        for m, mdoc in doc["months"].items():                              # research/idx_sell_rules.py
+            table = mdoc.get("table") or {}
+            for s in OVERLAYS:
+                hk = s["history"].get("sell")
+                if hk in table:
+                    v = table[hk]
+                    rows.append({"strategy": s["key"], "size": 0, "month": int(m), "source": f"sell:{hk}", "n_trials": doc.get("n_trials"),
+                                 "stats": {k: v.get(k) for k in STATS}, "yearly": v.get("yearly"), "periods": v.get("periods"),
+                                 "holdings": None, "generated_at": doc.get("generated")})
+        return rows
     if "part_b" in doc:                                                   # research/idx_trend_overlay.py
         for m, mdoc in (doc["part_b"] or {}).items():
             table = mdoc.get("table") or {}

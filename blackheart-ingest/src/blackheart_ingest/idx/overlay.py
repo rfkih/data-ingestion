@@ -50,6 +50,23 @@ def regime_from_closes(closes: list[Any], days: int = SMA_DAYS) -> dict[str, Any
     return {"close": last, "sma": sma, "on": last > sma, "n": len(closes)}
 
 
+def take_profit_hits(positions: list[dict[str, Any]], prices: dict[str, Any], pct: Any) -> dict[str, str]:
+    """Pure. Held names whose last close is at least ``pct`` % above their average purchase price -> {code: reason}."""
+    if pct is None:
+        return {}
+    bar = Decimal(str(pct)) / 100
+    out = {}
+    for p in positions:
+        c, avg = p["code"], p.get("avg_price")
+        px = prices.get(c)
+        if avg is None or px is None or Decimal(str(avg)) <= 0:
+            continue
+        gain = Decimal(str(px)) / Decimal(str(avg)) - 1
+        if gain >= bar:
+            out[c] = f"take profit: +{100 * gain:.0f} % over the purchase price (rule +{Decimal(str(pct)):.0f} %)"
+    return out
+
+
 def gate(targets: dict[str, Any], trend: dict[str, dict[str, Any]], held: set[str]) -> list[str]:
     """Pure. The names to hold back at a rebalance: listed, not already held, and under their 200-day average. A name
     without an average (young listing) is bought."""
@@ -150,9 +167,10 @@ def monthly_check(conn: psycopg.Connection, D: date, build: bool = True) -> dict
     for row in _rows(conn, "SELECT book FROM idx.book ORDER BY book", (), ["book"]):
         b = row["book"]
         meta = bk.get_book(conn, b)
-        if not (meta.get("regime_filter") or meta.get("entry_gate")):
+        if not (meta.get("regime_filter") or meta.get("entry_gate") or meta.get("take_profit_pct")):
             continue
-        held = {p["code"] for p in bk.snapshot(conn, b)["positions"]}
+        positions = bk.snapshot(conn, b)["positions"]
+        held = {p["code"] for p in positions}
         entry: dict[str, Any] = {"book": b, "action": None, "ticket": None, "names": []}
         report["books"].append(entry)
         if meta.get("regime_filter"):
@@ -172,6 +190,19 @@ def monthly_check(conn: psycopg.Connection, D: date, build: bool = True) -> dict
                                  f"{r['sma']:.0f}): ticket #{entry['ticket']} buys the {b} book back")
             if not r["on"]:
                 continue
+        if meta.get("take_profit_pct") and held:
+            px = {r["code"]: r["close"] for r in _rows(conn, """SELECT DISTINCT ON (code) code, close FROM idx.bar
+                       WHERE code = ANY(%s) AND source = 'idx' AND trade_date <= %s ORDER BY code, trade_date DESC""", (sorted(held), D), ["code", "close"])}
+            hits = take_profit_hits(positions, px, meta["take_profit_pct"])
+            if hits:
+                entry["action"] = (entry["action"] + "+" if entry["action"] else "") + "take-profit"
+                entry["names"] = entry["names"] + sorted(hits)
+                if build:
+                    res = tk.build(conn, b, mode="exits", run_date=D, exits=hits)
+                    tid = tk.store(conn, res, notes=f"take profit on {r['check_date']}: {', '.join(sorted(hits))}")
+                    entry["ticket"] = tid if entry["ticket"] is None else entry["ticket"]
+                    runlog.alert(conn, "info", f"ticket:{b}", f"take profit: {', '.join(sorted(hits))} at least {meta['take_profit_pct']:.0f} % over "
+                                 f"their purchase price; ticket #{tid} sells them from the {b} book")
         if meta.get("entry_gate"):
             cur = current_list(conn, b)
             back = [c for c in (cur or {}).get("held_back", []) if c not in held]

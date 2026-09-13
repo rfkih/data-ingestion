@@ -65,6 +65,12 @@ def limit_price(ref_close: Decimal, side: str, ticks_through: int = 1) -> Decima
     return min(max(snap(raw, side), lo), hi)
 
 
+def min_trade_for(nav: Decimal, floor: Decimal = MIN_TRADE) -> Decimal:
+    """Pure. The smallest line worth placing for a book of this size: one twentieth of NAV, never above the Rp 5M floor
+    used for big books and never under Rp 1M (a Rp 50M book gets Rp 2.5M; a Rp 1B book keeps Rp 5M)."""
+    return max(Decimal(1_000_000), min(floor, Decimal(nav) / 20))
+
+
 def _target_weights(targets: list[str] | dict[str, Any]) -> dict[str, Decimal]:
     """Targets as {code: weight} summing to 1: a list means equal weight, a dict carries the strategy's own weights."""
     if isinstance(targets, dict):
@@ -155,7 +161,8 @@ def plan(targets: list[str] | dict[str, Any], held: dict[str, dict[str, Any]], p
 # build from the database
 # ---------------------------------------------------------------------------
 def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_date: date | None = None, max_names: int | None = None,
-          strategy: str | None = None, band: Decimal = BAND, min_trade: Decimal = MIN_TRADE, entrants: list[str] | None = None) -> dict[str, Any]:
+          strategy: str | None = None, band: Decimal = BAND, min_trade: Decimal | None = None, entrants: list[str] | None = None,
+          exits: dict[str, str] | None = None) -> dict[str, Any]:
     """Targets come from the book's strategy and size (idx.book.strategy / max_names) unless overridden per call.
     Modes: rebalance | exits (names whose newest report breaks the rule, or a pack sell) | cash (sell everything: the
     regime filter turned off) | entry (buy ``entrants``, one slot each: held-back names that crossed above their average).
@@ -200,11 +207,11 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
     answers = {a["code"]: a for a in _rows(conn, """
         SELECT DISTINCT ON (code) code, doc_id AS pack_date, event_type AS stance, veto, rationale FROM idx.sentiment_score
          WHERE doc_type = 'pack' AND code = ANY(%s) ORDER BY code, scored_at DESC""", (codes,), ["code", "pack_date", "stance", "veto", "rationale"])}
-    exits: dict[str, str] = {}
+    exits = dict(exits or {})                                              # explicit exits (take profit) come from the caller
     if mode == "cash":
         why = "regime off: to cash" if regime else "to cash"
         exits = {c: why for c in held}
-    if mode == "exits" and held:
+    if mode == "exits" and held and not exits:
         fund = fundamentals_asof(conn, D, list(held))
         for c in held:
             m = fund.get(c)
@@ -213,8 +220,11 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
                 exits[c] = "newest report breaks the book rule: " + ", ".join(m["strict_fails"])
             elif a and a["stance"] == "sell":
                 exits[c] = f"pack {a['pack_date']}: sell - {(a['rationale'] or '')[:100]}"
+    nav_now = Decimal(b["cash"]) + sum(Decimal(h["lots"]) * LOT * px[c] for c, h in held.items() if c in px)
+    min_trade = min_trade_for(nav_now) if min_trade is None else min_trade
     res = plan(targets, held, px, Decimal(b["cash"]), book=b, band=band, min_trade=min_trade, mode="exits" if mode == "cash" else mode,
                exits=exits, hold_back=set(held_back), buys_only=(mode == "entry"))
+    res["min_trade"] = min_trade
     for line in res["lines"]:
         c = cmap.get(line["code"])
         a = answers.get(line["code"])

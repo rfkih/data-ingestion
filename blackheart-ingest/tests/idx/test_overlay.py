@@ -27,3 +27,11 @@ def test_gate_holds_back_listed_names_under_their_average_unless_already_held() 
              "HELD": {"close": 8, "sma": Decimal(9), "on": False}, "NEW": {"close": 5, "sma": None, "on": True}}
     assert OV.gate(targets, trend, held={"HELD"}) == ["DOWN"]                     # held stays, young listing is bought
     assert OV.gate(targets, {}, held=set()) == []                                  # no trend data: nothing held back
+
+
+def test_take_profit_hits_compare_the_close_to_the_average_purchase_price() -> None:
+    positions = [{"code": "UP", "avg_price": 1000}, {"code": "FLAT", "avg_price": 1000}, {"code": "NOAVG", "avg_price": None}]
+    hits = OV.take_profit_hits(positions, {"UP": 2000, "FLAT": 1500, "NOAVG": 9000}, 100)
+    assert set(hits) == {"UP"} and "+100 %" in hits["UP"]
+    assert OV.take_profit_hits(positions, {"UP": 2000}, None) == {}
+    assert set(OV.take_profit_hits(positions, {"UP": 2000, "FLAT": 1500}, 50)) == {"UP", "FLAT"}

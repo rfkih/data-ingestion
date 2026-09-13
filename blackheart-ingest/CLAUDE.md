@@ -70,7 +70,7 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   the daily chain -> `cash` ticket when it turns off, `rebalance` ticket when it turns on; an annual rebalance while off
   becomes a cash ticket) and `entry_gate` (listed names under their own SMA200 are held back at a rebalance, bought with an
   `entry` ticket at the monthly check they cross). Checks recorded in `idx.regime_check`; `idx overlay status | check
-  [--dry-run]`; `/idx/overlay`, `POST /idx/overlay/check`. Both OFF by default (paper book: both on since 2026-09-13).
+  [--dry-run]`; `/idx/overlay`, `POST /idx/overlay/check`. Plus `take_profit_pct` (NULL = off): at the monthly check, held names at or above purchase x (1 + pct) go into an exits ticket (`research/IDX_SELL_RULES_2026-09-13.md`). All OFF by default (paper book: all three on since 2026-09-13). `ticket.min_trade_for(nav)` scales the minimum line with the book (NAV/20, floor Rp 1M, cap Rp 5M).
 - **Strategy catalog (`idx/strategies.py`, migrations 0010 + 0011):** families `rule` (baseline) · `strict` (deployed since
   2026-09-12, the operator's call ahead of the pre-registered May 2027 date) · `strict_cash` (tested: passes its criterion on
   one name, ENRG; not the default) · `value` · `momentum` · `momentum_rank` · `growth`, each `{gate, order, weight[, keys]}`;

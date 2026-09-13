@@ -162,3 +162,13 @@ def test_plan_holds_back_names_and_keeps_their_slot_in_cash() -> None:
     assert res["weights"]["A"] == Decimal(1) / 3                                 # B's third stays in cash, A is not upsized
     entry = T.plan({"B": Decimal(1) / 3}, {"A": {"lots": 1000, "avg_price": 1000}}, prices, Decimal(100_000_000), book=book, buys_only=True)
     assert all(ln["side"] == "buy" for ln in entry["lines"]) and {ln["code"] for ln in entry["lines"]} == {"B"}   # no sell of A
+
+
+def test_min_trade_scales_with_the_book() -> None:
+    from decimal import Decimal
+
+    from blackheart_ingest.idx import ticket as T
+
+    assert T.min_trade_for(Decimal(1_000_000_000)) == Decimal(5_000_000)        # big book: the Rp 5M floor
+    assert T.min_trade_for(Decimal(50_000_000)) == Decimal(2_500_000)           # Rp 50M: one twentieth
+    assert T.min_trade_for(Decimal(10_000_000)) == Decimal(1_000_000)           # never under Rp 1M
