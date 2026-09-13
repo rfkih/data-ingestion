@@ -1,5 +1,7 @@
 # IDX — The operator's asymmetric rule: sell on a trend break, buy when oversold (2026-09-13)
 
+> From 2008, as a price overlay on the long basket: `IDX_ASYMMETRIC_2008_2026-09-13.md` (a damper and a small return adder over eighteen years, not crash insurance; with the regime filter the smoothest path of the session).
+
 **The operator's idea.** Sell a name when its price breaks under its 200-day average, but do not wait for the trend to
 turn before buying: buy a listed name when it has fallen into an oversold zone, or once an accumulation base has formed.
 
