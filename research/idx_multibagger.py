@@ -3,6 +3,13 @@
 BEFORE the run, and can a statistical model see them coming?
 
 PRE-REGISTERED (written before the run; one model, one label, one evaluation; cumulative trials 109 + 1 = 110).
+V2 (2026-09-13, the operator's follow-up: accumulation, foreign flow, news, and what in the statements says profit will
+rise): the panel gains accumulation (20/120-day volume ratio, 60-day on-balance-volume balance, quiet accumulation =
+flat price on rising volume, ownership filings in the last 30 days), attention (exchange queries in 10 days, material
+information in 30, rights in 60), foreign flow over 5 days, and the statement signal `accel` = TTM earnings run-rate over
+the audited year minus one (the latest quarterly YTD annualised against the last audited profit, point in time), plus the
+desk's TTM warning flags. Same model, same evaluation; counted as one more trial (111). News sentiment cannot be tested:
+no news articles are ingested and idx.sentiment_score holds no news rows.
 
 Sample. The bar table from 2020-01 (989 names, delisted included, so no survivorship in the universe) and the
 point-in-time fundamentals used by the desk (audited year, published-date discipline). One snapshot on the first trading
@@ -55,7 +62,10 @@ from blackheart_ingest.idx import candidates as cand  # noqa: E402
 
 OUT = os.path.join(VQ.OUTDIR, "multibagger_results.json")
 FEATURES = ["ep", "bp", "dy", "pe", "roe", "der", "conv", "np_yoy", "rev_yoy", "r1m", "r3m", "r6m", "mom", "vol60", "dd252", "up_low252",
-            "log_mcap", "log_v60", "turnover", "f20"]
+            "log_mcap", "log_v60", "turnover", "f20",
+            "accel", "ttm_loss", "ytd_down", "vol_ratio", "obv60", "quiet_acc", "ev_own30", "ev_uma10", "ev_mat30", "ev_rights60", "f5"]
+EVENT_SQL = """SELECT code, foreign_net_share_5d, ev_ownership_30d, ev_exchange_query_10d, ev_material_30d, ev_rights_60d
+                 FROM idx.feature_daily WHERE trade_date = %s AND code = ANY(%s)"""
 CAT = ["sector"]
 PARAMS = {"objective": "binary", "num_leaves": 15, "learning_rate": 0.03, "min_data_in_leaf": 50,
           "feature_fraction": 0.8, "bagging_fraction": 0.8, "bagging_freq": 1, "verbose": -1, "seed": 7}
@@ -113,29 +123,47 @@ def build_panel(conn, close: pd.DataFrame, vol: pd.DataFrame) -> pd.DataFrame:
     hi252 = close.rolling(252, min_periods=120).max()
     lo252 = close.rolling(252, min_periods=120).min()
     vol60 = logr.rolling(60, min_periods=40).std() * math.sqrt(252)
+    v20 = vol.rolling(20, min_periods=10).mean()
+    v120 = vol.rolling(120, min_periods=60).mean()
+    obv60 = (np.sign(logr) * vol).rolling(60, min_periods=40).sum() / vol.rolling(60, min_periods=40).sum()
     ff = close.ffill()
-    snaps = [d for d in TO.month_starts(idx, pd.Timestamp("2021-01-01"), pd.Timestamp("2025-09-30"))]
+    snaps = [d for d in TO.month_starts(idx, pd.Timestamp("2021-01-01"), idx[-1])]
     rows = []
     for D in snaps:
         i = idx.get_loc(D)
-        if i + 252 > len(idx) - 1:
-            break
+        complete12 = i + 252 <= len(idx) - 1                             # else the 12-month label is still open (NaN)
         cands = cand.build(conn, D.date())["all_rows"]
+        with conn.cursor() as cur:
+            cur.execute(EVENT_SQL, (D.date(), [r["code"] for r in cands]))
+            ev = {row["code"] if isinstance(row, dict) else row[0]: (row if isinstance(row, dict) else dict(zip(
+                ["code", "foreign_net_share_5d", "ev_ownership_30d", "ev_exchange_query_10d", "ev_material_30d", "ev_rights_60d"], row, strict=True)))
+                  for row in cur.fetchall()}
         c0 = close.loc[D]
         j12 = min(i + 252, len(idx) - 1)
         j24 = min(i + 504, len(idx) - 1)
         seg12 = close.iloc[i + 1:j12 + 1]
         seg24 = close.iloc[i + 1:j24 + 1]
-        max12 = seg12.max()
-        max24 = seg24.max() if i + 504 <= len(idx) - 1 else pd.Series(np.nan, index=close.columns)
-        p12 = ff.iloc[j12]
+        nan_row = pd.Series(np.nan, index=close.columns)
+        max12 = seg12.max() if complete12 else nan_row
+        max24 = seg24.max() if i + 504 <= len(idx) - 1 else nan_row
+        p12 = ff.iloc[j12] if complete12 else nan_row
         for r in cands:
             c = r["code"]
             if c not in close.columns or np.isnan(c0.get(c, np.nan)) or c0[c] <= 0 or not r.get("tradable", True):
                 continue
             p0 = c0[c]
             ep = f(r.get("ep"))
+            ep_ttm = f(r.get("ep_ttm"))
+            e = ev.get(c, {})
+            warns = r.get("warnings") or []
+            vr = (v20.iloc[i][c] / v120.iloc[i][c]) if v120.iloc[i][c] and not np.isnan(v120.iloc[i][c]) and v120.iloc[i][c] > 0 else np.nan
+            r3 = p0 / close.iloc[i - 63][c] - 1 if i >= 63 else np.nan
             rows.append({
+                "accel": (ep_ttm / ep - 1) if (ep and ep > 0 and not np.isnan(ep_ttm)) else np.nan,
+                "ttm_loss": float("latest_quarter_ytd_loss" in warns), "ytd_down": float("ytd_profit_down_>50%" in warns),
+                "vol_ratio": vr, "obv60": obv60.iloc[i][c], "quiet_acc": float(not np.isnan(vr) and vr > 1.5 and not np.isnan(r3) and abs(r3) < 0.10),
+                "ev_own30": f(e.get("ev_ownership_30d")), "ev_uma10": f(e.get("ev_exchange_query_10d")), "ev_mat30": f(e.get("ev_material_30d")),
+                "ev_rights60": f(e.get("ev_rights_60d")), "f5": f(e.get("foreign_net_share_5d")),
                 "date": D, "year": D.year, "code": c, "sector": (r.get("sector") or "?")[:2],
                 "ep": ep, "bp": f(r.get("bp")), "dy": f(r.get("dy")), "pe": (1 / ep) if ep and ep > 0 else np.nan,
                 "roe": f(r.get("roe")), "der": f(r.get("der")), "conv": f(r.get("conv")), "np_yoy": f(r.get("np_yoy")), "rev_yoy": f(r.get("rev_yoy")),
@@ -150,7 +178,7 @@ def build_panel(conn, close: pd.DataFrame, vol: pd.DataFrame) -> pd.DataFrame:
             })
         print(f"  snapshot {D.date()}: {sum(1 for x in rows if x['date'] == D)} names", flush=True)
     df = pd.DataFrame(rows)
-    df["touch12"] = (df["max12"] >= 1.0).astype(int)
+    df["touch12"] = np.where(df["max12"].isna(), np.nan, (df["max12"] >= 1.0).astype(float))
     df["touch24"] = np.where(df["max24"].isna(), np.nan, (df["max24"] >= 1.0).astype(float))
     return df
 
@@ -174,6 +202,8 @@ def main():
         print("building the panel (one snapshot per month, point-in-time)…")
         df = build_panel(conn, close, vol)
         df.to_parquet(PANEL)
+    df = df[df["touch12"].notna()].copy()
+    df["touch12"] = df["touch12"].astype(int)
     out: dict = {"generated": datetime.now(UTC).isoformat(), "n_rows": int(len(df)), "n_names": int(df["code"].nunique())}
     print(f"\npanel: {len(df)} name-months, {df['code'].nunique()} names, {df['date'].nunique()} snapshots")
 
@@ -197,7 +227,9 @@ def main():
     out["quintiles"] = {}
     for col, label in (("log_mcap", "market cap"), ("log_v60", "liquidity"), ("pe", "P/E"), ("bp", "book yield"), ("dy", "dividend yield"),
                        ("roe", "ROE"), ("np_yoy", "profit growth (audited)"), ("dd252", "drawdown from 252d high"), ("up_low252", "rise from 252d low"),
-                       ("mom", "12-1 momentum"), ("r3m", "3-month return"), ("vol60", "60-day volatility"), ("turnover", "turnover"), ("f20", "foreign flow 20d")):
+                       ("mom", "12-1 momentum"), ("r3m", "3-month return"), ("vol60", "60-day volatility"), ("turnover", "turnover"), ("f20", "foreign flow 20d"),
+                       ("f5", "foreign flow 5d"), ("accel", "TTM earnings vs audited (accel)"), ("vol_ratio", "volume 20d / 120d"), ("obv60", "OBV balance 60d"),
+                       ("ev_own30", "ownership filings 30d"), ("ev_uma10", "exchange queries 10d")):
         t = quintile_table(df, col)
         out["quintiles"][col] = t
         print(f"  {label:26s} " + "  ".join(f"{k}: {100 * v:4.1f}%" for k, v, n in t))
@@ -206,6 +238,14 @@ def main():
     out["sectors"] = {SECTOR.get(k[0], k): {"rate": float(v["mean"]), "n": int(v["size"])} for k, v in sec.iterrows()}
     gate = df.groupby("gate_strict")["touch12"].mean()
     print(f"  strict gate: passes {100 * gate.get(True, np.nan):.1f}%  fails {100 * gate.get(False, np.nan):.1f}%")
+    for flag, label in (("quiet_acc", "quiet accumulation (flat 3m, volume x1.5)"), ("ttm_loss", "latest quarter YTD loss"), ("ytd_down", "YTD profit down >50 %")):
+        g2 = df.groupby(df[flag] > 0)["touch12"].agg(["mean", "size"])
+        print(f"  {label:44s} yes {100 * g2.loc[True, 'mean']:.1f}% (n={int(g2.loc[True, 'size'])})   no {100 * g2.loc[False, 'mean']:.1f}%" if True in g2.index else f"  {label}: none")
+    acc = df[df["accel"].notna()]
+    for lo, hi, lab in ((-9, -0.3, "TTM run-rate under -30 %"), (-0.3, 0.3, "within +-30 %"), (0.3, 1.0, "+30 % to +100 %"), (1.0, 99, "over +100 %")):
+        g3 = acc[(acc["accel"] > lo) & (acc["accel"] <= hi)]
+        if len(g3):
+            print(f"  accel {lab:26s} doubles {100 * g3['touch12'].mean():.1f}%  mean 12m {100 * g3['fwd12'].mean():+.0f}%  median {100 * g3['fwd12'].median():+.0f}%  (n={len(g3)})")
 
     # ---- why did they rise: earnings vs re-rating over the 12-month window
     snap_dates = sorted(df["date"].unique())

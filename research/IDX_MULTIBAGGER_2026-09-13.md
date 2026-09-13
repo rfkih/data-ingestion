@@ -1,5 +1,7 @@
 # IDX — The doublers (2026-09-13)
 
+> Follow-up with the operator's signals (accumulation, flow, statements, news), the sleeve test, the acceleration test and the refresh-cadence check: `IDX_DOUBLER_SLEEVE_2026-09-13.md`.
+
 **The operator's question.** Which names rose more than 100 % within one to two years, why, and can a statistical model
 see them coming?
 
