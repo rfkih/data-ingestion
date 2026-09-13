@@ -119,3 +119,11 @@ def test_capped_drift_does_not_depend_on_the_order_of_the_names():
     # three names, cap 40 % each: everyone gets a third of the cash (the cap does not bind), nothing is left over
     units_a = (1 / 3) / (100 * (1 + C))
     assert abs(a.iloc[0] - (units_a * 100 + (1 / 3) / (1 + C) + (1 / 3) / (1 + C))) < 1e-12
+
+
+def test_exposure_scales_the_targets_and_leaves_the_rest_in_cash():
+    close, vol, div, _ = _setup(c_sellable_on_rebalance=True)
+    nav = VQ.simulate({DAYS[0]: {'A'}}, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[1], spread=False, exposure=lambda d: 0.4)
+    # 40 % of the book in A (cost on the bought amount), 60 % in cash
+    assert abs(nav.iloc[0] - (1 - 0.4 * C)) < 1e-12
+    assert abs(nav.iloc[1] - (1 - 0.4 * C + 0.4 * 0.1)) < 1e-12

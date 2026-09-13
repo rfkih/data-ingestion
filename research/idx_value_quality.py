@@ -142,14 +142,17 @@ def cost_side(p: float, spread: bool) -> float:
 
 def simulate(sel_by_date: dict[pd.Timestamp, set[str] | dict[str, float]], close: pd.DataFrame, vol: pd.DataFrame, delisted: dict,
              div: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, spread: bool = True, mode: str = "reset",
-             cap: float | Callable[[pd.Timestamp], float] | None = None, cash_rate: float = 0.0) -> pd.Series:
+             cap: float | Callable[[pd.Timestamp], float] | None = None, cash_rate: float = 0.0,
+             exposure: Callable[[pd.Timestamp], float] | None = None) -> pd.Series:
     """NAV of one portfolio: buy at the rebalance close, hold, dividends (net) to cash, real costs, stuck and delisted names.
     A rebalance entry is a set (equal weight), a {code: weight} dict (weights renormalised over the names that can be bought),
     or a callable(held codes) returning either — for rules that depend on what the book already holds.
     mode 'reset' re-weights every target to its weight (the rule); 'drift' never touches a name already held: exits are sold,
     the cash goes into the new entrants equally, and winners keep the weight they have grown into. ``cap`` (drift only)
     limits what one entrant may take to that fraction of NAV (a number, or a function of the date), cost included; the
-    rest of the cash waits. ``cash_rate`` is the annual rate positive cash earns, accrued daily (0 = the rule's convention)."""
+    rest of the cash waits. ``cash_rate`` is the annual rate positive cash earns, accrued daily (0 = the rule's convention).
+    ``exposure`` (reset mode) is a function of the trade date giving the fraction of the book to hold in the targets; the
+    rest stays in cash (volatility targeting, a half-out regime)."""
     days = close.index[(close.index >= start) & (close.index <= end)]
     div_days: dict[pd.Timestamp, list[tuple[str, float]]] = {}
     for code, ex, dps in div.itertuples(index=False):
@@ -220,6 +223,8 @@ def simulate(sel_by_date: dict[pd.Timestamp, set[str] | dict[str, float]], close
                             cash -= budget
             else:
                 investable = cash + sum(units[c] * row[c] for c in units if c in target)
+                if exposure is not None:
+                    investable *= max(0.0, min(1.0, float(exposure(d))))
                 if target:
                     total_w = sum(weight[c] for c in target)
                     for c in target:
