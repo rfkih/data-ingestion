@@ -147,3 +147,18 @@ def test_paper_fill_plan_sells_first_and_trims_buys_to_cash() -> None:
     assert cash == after_sell - 19 * per_lot
     fills, _ = T.paper_fill_plan(lines[:1], {"BUYA": "500"}, "0", meta)
     assert fills[0]["lots"] == 0 and fills[0]["why"] == "cash exhausted"
+
+
+def test_plan_holds_back_names_and_keeps_their_slot_in_cash() -> None:
+    from decimal import Decimal
+
+    from blackheart_ingest.idx import ticket as T
+
+    book = {"fee_buy_pct": "0.15", "fee_sell_pct": "0.25"}
+    prices = {"A": Decimal(1000), "B": Decimal(1000), "C": Decimal(1000)}
+    res = T.plan(["A", "B", "C"], {}, prices, Decimal(300_000_000), book=book, hold_back={"B"})
+    buys = {ln["code"] for ln in res["lines"] if ln["side"] == "buy"}
+    assert buys == {"A", "C"} and res["held_back"] == ["B"]
+    assert res["weights"]["A"] == Decimal(1) / 3                                 # B's third stays in cash, A is not upsized
+    entry = T.plan({"B": Decimal(1) / 3}, {"A": {"lots": 1000, "avg_price": 1000}}, prices, Decimal(100_000_000), book=book, buys_only=True)
+    assert all(ln["side"] == "buy" for ln in entry["lines"]) and {ln["code"] for ln in entry["lines"]} == {"B"}   # no sell of A

@@ -301,6 +301,30 @@ def cmd_card(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_overlay(a: argparse.Namespace) -> int:
+    from . import overlay
+    with get_connection() as conn:
+        if a.sub == "status":
+            r = overlay.latest(conn)
+            if r is None:
+                print("no regime check recorded yet; run `idx overlay check --dry-run`")
+            else:
+                sma = f"{r['sma']:,.0f}" if r["sma"] is not None else "n/a"
+                print(f"regime {'ON (invested)' if r['on'] else 'OFF (cash)'} since check {r['check_date']}: {r['index_code']} {r['close']:,.0f} vs 200-day average {sma}")
+            with conn.cursor() as cur:
+                cur.execute("SELECT book, regime_filter, entry_gate FROM idx.book ORDER BY book")
+                for row in cur.fetchall():
+                    row = dict(row) if isinstance(row, dict) else dict(zip(["book", "regime_filter", "entry_gate"], row, strict=True))
+                    print(f"  {row['book']:6s} regime filter {'on' if row['regime_filter'] else 'off'}, entry gate {'on' if row['entry_gate'] else 'off'}")
+            for h in overlay.history(conn, 12):
+                print(f"  {h['check_date']} {'on ' if h['on'] else 'off'} {h['close']:,.0f} / {h['sma']:,.0f}" if h["sma"] is not None else f"  {h['check_date']} {'on' if h['on'] else 'off'}")
+            return 0
+        d = _d(a.as_of) if a.as_of else date.today()
+        rep = overlay.monthly_check(conn, d, build=not a.dry_run)
+        print(overlay.render(rep) + ("   [dry run]" if a.dry_run else ""))
+    return 0
+
+
 def cmd_candidates(a: argparse.Namespace) -> int:
     from . import candidates
     with get_connection() as conn:
@@ -609,6 +633,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["list", "import-history"])
     p.add_argument("files", nargs="*")
     p.set_defaults(fn=cmd_strategies)
+    p = sub.add_parser("overlay", help="book overlays: status | check [--as-of D] [--dry-run] (regime filter, entry gate)")
+    p.add_argument("sub", choices=["status", "check"])
+    p.add_argument("--as-of")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_overlay)
     p = sub.add_parser("watch", help="watchlist")
     p.add_argument("sub", choices=["list", "add", "rm"])
     p.add_argument("code", nargs="?")
@@ -639,7 +668,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["build", "show", "issue", "close", "cancel", "fill", "skip", "paper-fill"])
     p.add_argument("--book", default="live")
     p.add_argument("--dry-run", action="store_true", help="paper-fill: show what would fill, change nothing")
-    p.add_argument("--mode", choices=["rebalance", "exits"], default="rebalance")
+    p.add_argument("--mode", choices=["rebalance", "exits", "cash"], default="rebalance")
     p.add_argument("--as-of", help="candidate run date to target (default latest)")
     p.add_argument("--max-names", type=int)
     p.add_argument("--strategy", help="catalog key (default: the book's strategy); see `idx strategies list`")

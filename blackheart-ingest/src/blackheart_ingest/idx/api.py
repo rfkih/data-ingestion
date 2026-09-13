@@ -109,8 +109,8 @@ def make_router(require_token) -> APIRouter:
     @router.get("/strategies/{key}")
     def strategy_detail(key: str, size: int | None = None) -> dict[str, Any]:
         from . import strategies
-        meta = strategies.BY_KEY.get(key) or ({"key": key, "label": strategies.REFERENCE_LABELS[key], "status": "reference"}
-                                              if key in strategies.REFERENCE_LABELS else None)
+        meta = strategies.BY_KEY.get(key) or next((s for s in strategies.OVERLAYS if s["key"] == key), None) or (
+            {"key": key, "label": strategies.REFERENCE_LABELS[key], "status": "reference"} if key in strategies.REFERENCE_LABELS else None)
         if meta is None:
             raise HTTPException(status_code=404, detail="unknown strategy")
         with get_connection() as conn:
@@ -208,15 +208,38 @@ def make_router(require_token) -> APIRouter:
 
     @router.put("/book/{book}", dependencies=[Depends(require_token)])
     def book_put(book: str, body: dict[str, Any] = _BODY) -> dict[str, Any]:
-        """Set cash / fees / broker / strategy: any of {cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note, strategy, max_names}."""
+        """Set cash / fees / broker / strategy / overlays: any of {cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note, strategy,
+        max_names, regime_filter, entry_gate}."""
         from . import book as bk
         with get_connection() as conn:
             try:
                 bk.ensure_book(conn, book, **{k: v for k, v in body.items()
-                                              if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names")})
+                                              if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names",
+                                                       "regime_filter", "entry_gate")})
             except ValueError as e:
                 raise HTTPException(status_code=422, detail=str(e)) from None
             return bk.get_book(conn, book)
+
+    @router.get("/overlay")
+    def overlay_get() -> dict[str, Any]:
+        """The regime record (latest check + history) and which books have an overlay on."""
+        from . import overlay
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT book, regime_filter, entry_gate FROM idx.book ORDER BY book")
+            books = [dict(r) for r in cur.fetchall()]
+            return {"index": overlay.INDEX, "sma_days": overlay.SMA_DAYS, "latest": overlay.latest(conn), "history": overlay.history(conn), "books": books}
+
+    @router.post("/overlay/check", dependencies=[Depends(require_token)])
+    def overlay_check(body: dict[str, Any] = _BODY) -> dict[str, Any]:
+        """Run the monthly check now: {as_of?, dry_run?}. Dry run reports without recording or building tickets."""
+        from . import overlay
+        with get_connection() as conn:
+            try:
+                d = date.fromisoformat(body["as_of"]) if body.get("as_of") else date.today()
+                rep = overlay.monthly_check(conn, d, build=not bool(body.get("dry_run")))
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from None
+        return rep
 
     @router.get("/ticket/latest")
     def ticket_latest(book: str = "live") -> dict[str, Any]:

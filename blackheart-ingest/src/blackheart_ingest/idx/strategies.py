@@ -80,6 +80,23 @@ CATALOG: list[dict[str, Any]] = [
      "history": {"topn": "growth/eq"}},
 ]
 BY_KEY = {s["key"]: s for s in CATALOG}
+OVERLAYS: list[dict[str, Any]] = [
+    {"key": "overlay:regime", "label": "Crash filter: cash while the IHSG is under its 200-day average", "status": "option",
+     "rule": "Checked on the first trading day of each month, after the close. Off: the book is sold to cash. On again: the book's list is "
+             "bought back. An annual rebalance while it is off becomes a cash ticket. Set per book (regime filter).",
+     "note": "2008-2026 on a 100-name liquid basket: max drawdown 51 % to 21 %, 2008 flat instead of -31 %, 2020 -8 % instead of -46 %, "
+             "total +588 % against +464 % with cash at 4 %. 2021-2026 on the strict book: 8 to 49 % of the return given up, there being no "
+             "crash to be saved from. Insurance: it pays in crashes and costs in calm years.",
+     "history": {"overlay": "index"}},
+    {"key": "overlay:entry_gate", "label": "Entry gate: buy a listed name only above its 200-day average", "status": "option",
+     "rule": "At a rebalance, a listed name under its own 200-day average is held back and its slot stays in cash; at each monthly check "
+             "the held-back names that have crossed above are bought, one slot each. Never sells on trend. Set per book (entry gate).",
+     "note": "2021-2026 on the strict book: ahead in three of four calendars (+8 to +37 points), level in the fourth. No protection in a "
+             "crash: over 2008-2026 the 2020 drawdown is -46 % either way.",
+     "history": {"overlay": "entry_only"}},
+    {"key": "overlay:none", "label": "Strict book as simulated in the overlay test (drift, one-slot cap, cash 4 %)", "status": "reference",
+     "rule": "", "note": "The like-for-like baseline of the two overlay records above.", "history": {"overlay": "none"}},
+]
 REFERENCE_LABELS = {"bench": "Equal-weight universe (same simulation)", "index:COMPOSITE": "IDX COMPOSITE (price)",
                     "index:IDXV30": "IDX Value 30 (price)", "index:IDXHIDIV20": "IDX High Dividend 20 (price)",
                     "index:LQ45": "LQ45 (price)"}
@@ -94,6 +111,14 @@ def get(key: str) -> dict[str, Any]:
     if key not in BY_KEY:
         raise ValueError(f"unknown strategy {key!r}; one of {', '.join(BY_KEY)}")
     return BY_KEY[key]
+
+
+def get_any(key: str) -> dict[str, Any]:
+    """A catalog family or an overlay entry (for the record pages); ValueError otherwise."""
+    for s in OVERLAYS:
+        if s["key"] == key:
+            return s
+    return get(key)
 
 
 def weights(codes: list[str], scheme: str) -> dict[str, Decimal]:
@@ -157,6 +182,17 @@ def history_rows_from_json(doc: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     months = doc.get("months") or {}
     first = next(iter(months.values()), {})
+    if "part_b" in doc:                                                   # research/idx_trend_overlay.py
+        for m, mdoc in (doc["part_b"] or {}).items():
+            table = mdoc.get("table") or {}
+            for s in OVERLAYS:
+                hk = s["history"].get("overlay")
+                if hk in table:
+                    v = table[hk]
+                    rows.append({"strategy": s["key"], "size": 0, "month": int(m), "source": f"overlay:{hk}", "n_trials": doc.get("n_trials"),
+                                 "stats": {k: v.get(k) for k in STATS}, "yearly": v.get("yearly"), "periods": v.get("periods"),
+                                 "holdings": None, "generated_at": doc.get("generated")})
+        return rows
     source = "conv" if "verdict" in doc else ("rev3" if "summary" in first else "topn")
     size = 0 if source == "rev3" else int(doc.get("size") or 10)
     slots = (("conv", 0), ("conv10", 10)) if source == "conv" else ((source, size),)
@@ -229,4 +265,6 @@ def catalog(conn: psycopg.Connection | None = None) -> list[dict[str, Any]]:
         if key in hist:
             out.append({"key": key, "label": label, "status": "reference", "rule": "", "note": "", "params": None, "sizes": [0],
                         "records": hist[key]})
+    for s in OVERLAYS:
+        out.append({**{k: v for k, v in s.items() if k != "history"}, "params": None, "sizes": [0], "records": hist.get(s["key"], {})})
     return out

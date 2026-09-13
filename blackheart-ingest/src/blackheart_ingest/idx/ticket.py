@@ -76,9 +76,11 @@ def _target_weights(targets: list[str] | dict[str, Any]) -> dict[str, Decimal]:
 
 def plan(targets: list[str] | dict[str, Any], held: dict[str, dict[str, Any]], prices: dict[str, Decimal], cash: Decimal, *,
          book: dict[str, Any], band: Decimal = BAND, min_trade: Decimal = MIN_TRADE, reserve: Decimal = CASH_RESERVE,
-         mode: str = "rebalance", exits: dict[str, str] | None = None) -> dict[str, Any]:
+         mode: str = "rebalance", exits: dict[str, str] | None = None, hold_back: set[str] | None = None,
+         buys_only: bool = False) -> dict[str, Any]:
     """Pure. targets = codes (equal weight) or {code: weight}; held = {code: {lots, avg_price}}; prices = last close per
-    code. Returns lines + sizing context."""
+    code. Returns lines + sizing context. ``hold_back``: target names not to buy this time (their slot stays in cash);
+    ``buys_only``: no sells or trims (an entry ticket)."""
     fee_buy, fee_sell = Decimal(book["fee_buy_pct"]) / 100, Decimal(book["fee_sell_pct"]) / 100
     value = {c: Decimal(h["lots"]) * LOT * prices[c] for c, h in held.items() if c in prices}
     nav = cash + sum(value.values(), Decimal(0))
@@ -96,9 +98,10 @@ def plan(targets: list[str] | dict[str, Any], held: dict[str, dict[str, Any]], p
     n = len(tw)
     target_value = {c: nav * (1 - reserve) * w for c, w in tw.items()}
     w_target = {c: (target_value[c] / nav if nav else Decimal(0)) for c in tw}
+    hold_back = hold_back or set()
     # sells: no longer a target -> exit; overweight beyond the band -> trim
     for c, h in held.items():
-        if c not in prices:
+        if c not in prices or buys_only:
             continue
         v, lots = value[c], Decimal(h["lots"])
         if c not in tw:
@@ -117,6 +120,8 @@ def plan(targets: list[str] | dict[str, Any], held: dict[str, dict[str, Any]], p
     # buys: new entrants and underweights, in the strategy's order
     buys: list[dict[str, Any]] = []
     for c in tw:
+        if c in hold_back:
+            continue
         if c not in prices:
             buys.append({"code": c, "side": "buy", "lots": Decimal(0), "limit_price": Decimal(0), "ref_close": None, "notional": Decimal(0),
                          "weight_now": Decimal(0), "weight_target": w_target[c], "reason": "no price", "flags": ["no_price"]})
@@ -142,17 +147,24 @@ def plan(targets: list[str] | dict[str, Any], held: dict[str, dict[str, Any]], p
         buys = [b for b in buys if b["lots"] > 0 or "no_price" in b["flags"]]
     lines += buys
     cash_after = cash + proceeds - sum(b["notional"] * (1 + fee_buy) for b in buys)
-    return {"nav": nav, "cash": cash, "n_targets": n, "target_value": target_value, "weights": tw, "lines": lines, "cash_after": cash_after}
+    return {"nav": nav, "cash": cash, "n_targets": n, "target_value": target_value, "weights": tw, "lines": lines, "cash_after": cash_after,
+            "held_back": sorted(c for c in tw if c in hold_back)}
 
 
 # ---------------------------------------------------------------------------
 # build from the database
 # ---------------------------------------------------------------------------
 def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_date: date | None = None, max_names: int | None = None,
-          strategy: str | None = None, band: Decimal = BAND, min_trade: Decimal = MIN_TRADE) -> dict[str, Any]:
-    """Targets come from the book's strategy and size (idx.book.strategy / max_names) unless overridden per call."""
-    from . import strategies
+          strategy: str | None = None, band: Decimal = BAND, min_trade: Decimal = MIN_TRADE, entrants: list[str] | None = None) -> dict[str, Any]:
+    """Targets come from the book's strategy and size (idx.book.strategy / max_names) unless overridden per call.
+    Modes: rebalance | exits (names whose newest report breaks the rule, or a pack sell) | cash (sell everything: the
+    regime filter turned off) | entry (buy ``entrants``, one slot each: held-back names that crossed above their average).
+    With the book's regime_filter on, a rebalance while the regime is off becomes a cash ticket; with entry_gate on, listed
+    names under their 200-day average are held back (no buy line, slot kept in cash)."""
+    from . import overlay, strategies
     b = bk.get_book(conn, book)
+    if mode not in ("rebalance", "exits", "cash", "entry"):
+        raise ValueError(f"unknown ticket mode {mode!r}")
     strategy = strategy or b.get("strategy") or "rule"
     size = max_names if max_names is not None else b.get("max_names")
     s = bk.snapshot(conn, book)
@@ -165,7 +177,22 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
                   ["code", "rank", "selected", "ep", "bp", "dy", "np_yoy", "mom", "gate_loose", "gate_strict", "strict_fails", "warnings", "sector"])
     picked = strategies.pick(strategy, cands, size=size or None)
     cmap = {c["code"]: c for c in picked}
-    targets = {c["code"]: c["weight"] for c in picked if c["selected"]}
+    regime = None
+    if mode == "rebalance" and b.get("regime_filter"):
+        regime = overlay.latest(conn) or overlay.index_regime(conn, D)
+        if not regime["on"]:
+            mode = "cash"
+    if mode == "cash":
+        targets = {}
+    elif mode == "entry":
+        cur = overlay.current_list(conn, book) or {}
+        slot = Decimal(1) / max(len(cur.get("weights") or {}), 1)
+        targets = {c: slot for c in (entrants or []) if c not in held}
+    else:
+        targets = {c["code"]: c["weight"] for c in picked if c["selected"]}
+    held_back: list[str] = []
+    if mode == "rebalance" and b.get("entry_gate") and targets:
+        held_back = overlay.gate(targets, overlay.name_trend(conn, D, [c for c in targets if c not in held]), set(held))
     codes = sorted(set(targets) | set(held))
     px = {p["code"]: Decimal(p["close"]) for p in _rows(conn, """
         SELECT DISTINCT ON (code) code, close FROM idx.bar WHERE code = ANY(%s) AND source = 'idx' AND trade_date <= %s
@@ -174,6 +201,9 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
         SELECT DISTINCT ON (code) code, doc_id AS pack_date, event_type AS stance, veto, rationale FROM idx.sentiment_score
          WHERE doc_type = 'pack' AND code = ANY(%s) ORDER BY code, scored_at DESC""", (codes,), ["code", "pack_date", "stance", "veto", "rationale"])}
     exits: dict[str, str] = {}
+    if mode == "cash":
+        why = "regime off: to cash" if regime else "to cash"
+        exits = {c: why for c in held}
     if mode == "exits" and held:
         fund = fundamentals_asof(conn, D, list(held))
         for c in held:
@@ -183,7 +213,8 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
                 exits[c] = "newest report breaks the book rule: " + ", ".join(m["strict_fails"])
             elif a and a["stance"] == "sell":
                 exits[c] = f"pack {a['pack_date']}: sell - {(a['rationale'] or '')[:100]}"
-    res = plan(targets, held, px, Decimal(b["cash"]), book=b, band=band, min_trade=min_trade, mode=mode, exits=exits)
+    res = plan(targets, held, px, Decimal(b["cash"]), book=b, band=band, min_trade=min_trade, mode="exits" if mode == "cash" else mode,
+               exits=exits, hold_back=set(held_back), buys_only=(mode == "entry"))
     for line in res["lines"]:
         c = cmap.get(line["code"])
         a = answers.get(line["code"])
@@ -196,7 +227,10 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
         if a and a["stance"]:
             line["flags"].append(f"pack:{a['stance']}" + (" VETO" if a["veto"] else ""))
     res.update({"book": book, "mode": mode, "run_date": D, "ticket_date": D, "targets": list(targets), "held": held, "prices": px,
-                "strategy": strategy, "size": size or None, "weights": {c: str(w) for c, w in res["weights"].items()}})
+                "strategy": strategy, "size": size or None, "weights": {c: str(w) for c, w in (res.get("weights") or {}).items()},
+                "held_back": held_back, "regime_filter": bool(b.get("regime_filter")), "entry_gate": bool(b.get("entry_gate")),
+                "regime": None if regime is None else {"check_date": str(regime["check_date"]), "close": str(regime["close"]),
+                                                       "sma": None if regime["sma"] is None else str(regime["sma"]), "on": bool(regime["on"])}})
     return res
 
 
@@ -206,7 +240,9 @@ def store(conn: psycopg.Connection, res: dict[str, Any], notes: str | None = Non
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                     (res["book"], res["ticket_date"], res["run_date"], res["mode"], res["nav"], res["cash"], res["n_targets"],
                      psycopg.types.json.Jsonb({"targets": res["targets"], "cash_after": str(res["cash_after"]), "strategy": res.get("strategy"),
-                                               "size": res.get("size"), "weights": res.get("weights")}), notes))
+                                               "size": res.get("size"), "weights": res.get("weights"), "held_back": res.get("held_back") or [],
+                                               "regime": res.get("regime"), "regime_filter": res.get("regime_filter"),
+                                               "entry_gate": res.get("entry_gate")}), notes))
         row = cur.fetchone()
         tid = int(next(iter(row.values())) if isinstance(row, dict) else row[0])
         for i, line in enumerate(res["lines"], 1):

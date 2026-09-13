@@ -120,3 +120,16 @@ def test_history_rows_from_the_cash_conversion_format() -> None:
     assert by[("strict_cash", 0, 5)]["holdings"] == [{"date": "2021-05-03", "n": 2, "names": ["A", "B"]}]
     assert by[("strict_cash", 10, 5)]["stats"]["mdd_pct"] == 30.0
     assert ("strict", 0, 5) not in by                                        # reference lines are not re-imported
+
+
+def test_history_rows_from_the_overlay_format() -> None:
+    doc = {"generated": "2026-09-13T01:00:00+00:00", "n_trials": 83,
+           "part_a": {"table": {}},
+           "part_b": {"5": {"table": {"none": {"total_pct": 107.0, "sharpe": 1.11, "mdd_pct": 18.0},
+                                      "index": {"total_pct": 66.0, "cagr_pct": 9.9, "sharpe": 1.03, "mdd_pct": 14.0, "yearly": {"2021": 10.0}},
+                                      "entry_only": {"total_pct": 131.0, "sharpe": 1.18, "mdd_pct": 15.0}}}}}
+    by = {(r["strategy"], r["size"], r["month"]): r for r in ST.history_rows_from_json(doc)}
+    assert by[("overlay:regime", 0, 5)]["stats"]["total_pct"] == 66.0 and by[("overlay:regime", 0, 5)]["n_trials"] == 83
+    assert by[("overlay:entry_gate", 0, 5)]["stats"]["total_pct"] == 131.0 and by[("overlay:none", 0, 5)]["stats"]["mdd_pct"] == 18.0
+    cat = ST.catalog()
+    assert {s["key"] for s in cat} >= {"overlay:regime", "overlay:entry_gate"} and ST.get_any("overlay:regime")["status"] == "option"

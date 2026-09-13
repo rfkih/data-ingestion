@@ -37,6 +37,8 @@ import os
 import sys
 from datetime import UTC, date, datetime
 
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 import psycopg
@@ -139,12 +141,15 @@ def cost_side(p: float, spread: bool) -> float:
 
 
 def simulate(sel_by_date: dict[pd.Timestamp, set[str] | dict[str, float]], close: pd.DataFrame, vol: pd.DataFrame, delisted: dict,
-             div: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, spread: bool = True, mode: str = "reset") -> pd.Series:
+             div: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, spread: bool = True, mode: str = "reset",
+             cap: float | Callable[[pd.Timestamp], float] | None = None, cash_rate: float = 0.0) -> pd.Series:
     """NAV of one portfolio: buy at the rebalance close, hold, dividends (net) to cash, real costs, stuck and delisted names.
     A rebalance entry is a set (equal weight), a {code: weight} dict (weights renormalised over the names that can be bought),
     or a callable(held codes) returning either — for rules that depend on what the book already holds.
     mode 'reset' re-weights every target to its weight (the rule); 'drift' never touches a name already held: exits are sold,
-    the cash goes into the new entrants equally, and winners keep the weight they have grown into."""
+    the cash goes into the new entrants equally, and winners keep the weight they have grown into. ``cap`` (drift only)
+    limits what one entrant may take to that fraction of NAV (a number, or a function of the date), cost included; the
+    rest of the cash waits. ``cash_rate`` is the annual rate positive cash earns, accrued daily (0 = the rule's convention)."""
     days = close.index[(close.index >= start) & (close.index <= end)]
     div_days: dict[pd.Timestamp, list[tuple[str, float]]] = {}
     for code, ex, dps in div.itertuples(index=False):
@@ -157,8 +162,11 @@ def simulate(sel_by_date: dict[pd.Timestamp, set[str] | dict[str, float]], close
     last_px: dict[str, float] = {}
     cash = 1.0
     nav = []
+    daily_rate = (1 + cash_rate) ** (1 / 252) - 1 if cash_rate else 0.0
     for d in days:
         row = close.loc[d]
+        if daily_rate and cash > 0:
+            cash *= 1 + daily_rate
 
         def px(c, row=row, d=d):
             v = row.get(c, np.nan)
@@ -193,11 +201,20 @@ def simulate(sel_by_date: dict[pd.Timestamp, set[str] | dict[str, float]], close
                 new = [c for c in target if c not in units]
                 if new and cash > 0:
                     total_w = sum(weight[c] for c in new)
-                    for c in new:
-                        p = row[c]
-                        tgt = cash * (weight[c] / total_w) / p
-                        units[c] = tgt
-                    cash -= sum(units[c] * row[c] * (1 + cost_side(row[c], spread)) for c in new)
+                    if cap is None:
+                        for c in new:
+                            p = row[c]
+                            tgt = cash * (weight[c] / total_w) / p
+                            units[c] = tgt
+                        cash -= sum(units[c] * row[c] * (1 + cost_side(row[c], spread)) for c in new)
+                    else:
+                        cap_d = cap(d) if callable(cap) else cap
+                        nav_now = cash + sum(u * (0.0 if np.isnan(px(c)) else px(c)) for c, u in units.items())
+                        for c in new:
+                            p = row[c]
+                            budget = min(cash * (weight[c] / total_w), cap_d * nav_now)
+                            units[c] = budget / (p * (1 + cost_side(p, spread)))
+                            cash -= budget
             else:
                 investable = cash + sum(units[c] * row[c] for c in units if c in target)
                 if target:

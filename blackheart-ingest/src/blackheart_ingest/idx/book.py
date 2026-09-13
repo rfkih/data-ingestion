@@ -83,8 +83,9 @@ def default_fee(gross: Decimal, side: str, book: dict[str, Any]) -> Decimal:
 # storage
 # ---------------------------------------------------------------------------
 def get_book(conn: psycopg.Connection, book: str) -> dict[str, Any]:
-    rows = _rows(conn, "SELECT book, cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note, strategy, max_names FROM idx.book WHERE book = %s",
-                 (book,), ["book", "cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names"])
+    rows = _rows(conn, "SELECT book, cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note, strategy, max_names, regime_filter, entry_gate "
+                       "FROM idx.book WHERE book = %s",
+                 (book,), ["book", "cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate"])
     if not rows:
         raise ValueError(f"no book {book!r}")
     return rows[0]
@@ -97,7 +98,9 @@ def ensure_book(conn: psycopg.Connection, book: str, **fields: Any) -> None:
             from .strategies import deployed
             cur.execute("UPDATE idx.book SET strategy = %s WHERE book = %s", (deployed(), book))
         for k, v in fields.items():
-            if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names"):
+            if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate"):
+                if k in ("regime_filter", "entry_gate"):
+                    v = v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "t", "yes", "on")
                 if k == "strategy":
                     from .strategies import get as _get_strategy
                     _get_strategy(str(v))                                # ValueError on an unknown key

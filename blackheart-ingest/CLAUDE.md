@@ -65,6 +65,12 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   `scale_mismatch` warnings. `idx/card.py` is the per-name thesis card. `GET /idx/candidates[?all=1&as_of=]`. Gates are
   evaluated on the **audited** year; TTM and quarterly warnings are shown for judgment, never used to exclude automatically.
   `idx answers --score` = forward returns per pack stance / veto vs COMPOSITE (21/63/126/252 trading days).
+- **Book overlays (`idx/overlay.py`, migration 0012, `research/IDX_TREND_OVERLAY_2026-09-13.md`):** per-book flags
+  `regime_filter` (cash while COMPOSITE < its 200-day average; monthly check on the first trading day of the month inside
+  the daily chain -> `cash` ticket when it turns off, `rebalance` ticket when it turns on; an annual rebalance while off
+  becomes a cash ticket) and `entry_gate` (listed names under their own SMA200 are held back at a rebalance, bought with an
+  `entry` ticket at the monthly check they cross). Checks recorded in `idx.regime_check`; `idx overlay status | check
+  [--dry-run]`; `/idx/overlay`, `POST /idx/overlay/check`. Both OFF by default (paper book: both on since 2026-09-13).
 - **Strategy catalog (`idx/strategies.py`, migrations 0010 + 0011):** families `rule` (baseline) · `strict` (deployed since
   2026-09-12, the operator's call ahead of the pre-registered May 2027 date) · `strict_cash` (tested: passes its criterion on
   one name, ENRG; not the default) · `value` · `momentum` · `momentum_rank` · `growth`, each `{gate, order, weight[, keys]}`;

@@ -4,6 +4,8 @@ Schedule (WIB):
   16:15 Mon-Fri   universe            Daftar Saham snapshot
   16:30-20:00     daily (every 15 min until today's bar has landed)
                   -> then index -> publish --since today-7 -> features --since today-45 -> candidates
+                  -> on the first trading day of the month: regime check (COMPOSITE vs its 200-day average) and the
+                     overlay tickets it calls for (cash / re-entry / entry) for books with an overlay on
                   -> paper ticket fill at today's open (paper book only; live fills are captured by hand)
                   -> book mark + check (live, paper): marks, NAV, holding alerts
   18:00 Mon-Fri   alert if today's bar has still not landed (holiday, or IDX late)
@@ -27,7 +29,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..shared.db import get_connection
-from . import book, candidates, features, fin_store, publish, runlog, ticket
+from . import book, candidates, features, fin_store, overlay, publish, runlog, ticket
 from .client import IdxClient, IdxFetchError
 from .jobs import announce as job_announce
 from .jobs import crosscheck as job_crosscheck
@@ -84,6 +86,12 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
             rc, _ = candidates.run(conn)
             _fail_alert(conn, rc)
             logger.info("idx candidates %s pool=%s selected=%s", rc.status, rc.detail.get("pool"), rc.detail.get("selected"))
+        try:
+            if overlay.first_trading_day_of_month(conn, d):
+                rep = overlay.monthly_check(conn, d)
+                logger.info("idx overlay check %s regime_on=%s books=%s", d, rep["regime"]["on"], [(x["book"], x["action"]) for x in rep["books"]])
+        except Exception as e:                                          # the chain must go on
+            runlog.alert(conn, "warning", "overlay", f"monthly check failed: {type(e).__name__}: {e}")
         try:
             for rep in ticket.paper_fill(conn, "paper"):
                 logger.info("idx paper fill ticket #%s at %s: %s lines", rep["ticket"], rep["fill_date"], len(rep["fills"]))

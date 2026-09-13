@@ -85,3 +85,26 @@ def test_cost_side_includes_half_tick_spread():
     assert VQ.cost_side(120.0, False) == C
     assert abs(VQ.cost_side(120.0, True) - (C + 0.5 * 1 / 120)) < 1e-15
     assert abs(VQ.cost_side(3000.0, True) - (C + 0.5 * 10 / 3000)) < 1e-15
+
+
+def test_drift_cap_limits_one_entrant_to_a_slice_of_nav():
+    close, vol, div, _ = _setup(c_sellable_on_rebalance=True)
+    nav = VQ.simulate({DAYS[0]: {'A'}}, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[1], spread=False, mode='drift', cap=0.5)
+    units_a = 0.5 / (100 * (1 + C))                                        # half the NAV, cost inside the budget
+    assert abs(nav.iloc[0] - (0.5 + units_a * 100)) < 1e-12
+    assert abs(nav.iloc[1] - (0.5 + units_a * 110)) < 1e-12               # the other half sat in cash
+    full = VQ.simulate({DAYS[0]: {'A'}}, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[1], spread=False, mode='drift')
+    assert full.iloc[1] > nav.iloc[1]                                      # uncapped: all in, more upside
+
+
+def test_cash_earns_the_rate_and_the_cap_can_follow_the_date():
+    close, vol, div, _ = _setup(c_sellable_on_rebalance=True)
+    # nothing bought: 1.0 of cash at 5 %/yr for four trading days after day 0
+    nav = VQ.simulate({}, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[-1], spread=False, cash_rate=0.05)
+    daily = (1.05) ** (1 / 252) - 1
+    assert abs(nav.iloc[-1] - (1 + daily) ** 5) < 1e-12
+    # a date-dependent cap: 25 % on day 0
+    nav = VQ.simulate({DAYS[0]: {'A'}}, close, vol, {}, div.iloc[0:0], DAYS[0], DAYS[1], spread=False, mode='drift',
+                      cap=lambda d: 0.25 if d == DAYS[0] else 1.0)
+    units_a = 0.25 / (100 * (1 + C))
+    assert abs(nav.iloc[1] - (0.75 + units_a * 110)) < 1e-12
