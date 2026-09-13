@@ -215,7 +215,7 @@ def make_router(require_token) -> APIRouter:
             try:
                 bk.ensure_book(conn, book, **{k: v for k, v in body.items()
                                               if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names",
-                                                       "regime_filter", "entry_gate", "take_profit_pct")})
+                                                       "regime_filter", "entry_gate", "take_profit_pct", "trend_exit")})
             except ValueError as e:
                 raise HTTPException(status_code=422, detail=str(e)) from None
             return bk.get_book(conn, book)
@@ -225,7 +225,7 @@ def make_router(require_token) -> APIRouter:
         """The regime record (latest check + history) and which books have an overlay on."""
         from . import overlay
         with get_connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT book, regime_filter, entry_gate, take_profit_pct FROM idx.book ORDER BY book")
+            cur.execute("SELECT book, regime_filter, entry_gate, take_profit_pct, trend_exit FROM idx.book ORDER BY book")
             books = [dict(r) for r in cur.fetchall()]
             return {"index": overlay.INDEX, "sma_days": overlay.SMA_DAYS, "latest": overlay.latest(conn), "history": overlay.history(conn), "books": books}
 

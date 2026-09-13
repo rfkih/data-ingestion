@@ -35,3 +35,28 @@ def test_take_profit_hits_compare_the_close_to_the_average_purchase_price() -> N
     assert set(hits) == {"UP"} and "+100 %" in hits["UP"]
     assert OV.take_profit_hits(positions, {"UP": 2000}, None) == {}
     assert set(OV.take_profit_hits(positions, {"UP": 2000, "FLAT": 1500}, 50)) == {"UP", "FLAT"}
+
+
+def test_rsi_and_the_oversold_clause_of_the_gate() -> None:
+    from decimal import Decimal
+
+    falling = [100 - i for i in range(40)]                                 # 40 straight down days
+    rising = [100 + i for i in range(40)]
+    assert OV.rsi_from_closes(falling) == 0 and OV.rsi_from_closes(rising) == 100
+    assert OV.rsi_from_closes([100] * 10) is None                          # not enough history
+    mixed = [100, 101, 100, 102, 101, 103, 102, 104, 103, 105, 104, 106, 105, 107, 106, 108, 107, 109]
+    r = OV.rsi_from_closes(mixed)
+    assert r is not None and 50 < r < 100
+    targets = {"DOWN": Decimal("0.5"), "OVERSOLD": Decimal("0.5")}
+    trend = {"DOWN": {"close": 8, "sma": Decimal(9), "on": False}, "OVERSOLD": {"close": 7, "sma": Decimal(9), "on": False}}
+    assert OV.gate(targets, trend, set()) == ["DOWN", "OVERSOLD"]          # without RSI both are held back
+    assert OV.gate(targets, trend, set(), {"OVERSOLD": Decimal(25), "DOWN": Decimal(45)}) == ["DOWN"]   # oversold is bought
+
+
+def test_trend_breaks_need_a_cross_from_above() -> None:
+    from decimal import Decimal
+
+    prev = {"A": {"close": 10, "sma": Decimal(9), "on": True}, "B": {"close": 8, "sma": Decimal(9), "on": False}, "C": {"close": 10, "sma": Decimal(9), "on": True}}
+    now = {"A": {"close": 8, "sma": Decimal(9), "on": False}, "B": {"close": 7, "sma": Decimal(9), "on": False}, "C": {"close": 11, "sma": Decimal(9), "on": True}}
+    hits = OV.trend_breaks(prev, now, {"A", "B", "C"})
+    assert set(hits) == {"A"}                                              # B was already below (no cross), C still above

@@ -199,7 +199,8 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
         targets = {c["code"]: c["weight"] for c in picked if c["selected"]}
     held_back: list[str] = []
     if mode == "rebalance" and b.get("entry_gate") and targets:
-        held_back = overlay.gate(targets, overlay.name_trend(conn, D, [c for c in targets if c not in held]), set(held))
+        new = [c for c in targets if c not in held]
+        held_back = overlay.gate(targets, overlay.name_trend(conn, D, new), set(held), overlay.rsi14(conn, D, new))
     codes = sorted(set(targets) | set(held))
     px = {p["code"]: Decimal(p["close"]) for p in _rows(conn, """
         SELECT DISTINCT ON (code) code, close FROM idx.bar WHERE code = ANY(%s) AND source = 'idx' AND trade_date <= %s

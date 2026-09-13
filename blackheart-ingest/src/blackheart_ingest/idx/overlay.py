@@ -5,16 +5,20 @@
                  turns on a "rebalance" ticket buys the book's list back. An annual rebalance while the regime is off
                  becomes a cash ticket.
   entry_gate     at a rebalance, a listed name under its own 200-day average is not bought (held back, its slot stays in
-                 cash); at each monthly check the held-back names that have crossed above are bought, one slot each,
-                 with an "entry" ticket. Never sells on trend.
+                 cash) unless it is oversold (14-day RSI at or under 30); at each monthly check the held-back names that
+                 have crossed above, or are oversold, are bought, one slot each, with an "entry" ticket.
+  trend_exit     at each monthly check, a held name that was above its 200-day average at the previous check and is
+                 below it now (a trend break) is sold with an "exits" ticket. With entry_gate this is the asymmetric rule
+                 of research/IDX_ASYMMETRIC_2026-09-13.md: sell the break, buy the oversold.
 
 The rules themselves are pure (``regime_from_closes``, ``gate``); the rest reads the tables and builds tickets, which the
 operator (live) or the paper fill (paper) then works. Every check is recorded in idx.regime_check.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from typing import Any
 
 import psycopg
@@ -25,6 +29,8 @@ from . import runlog
 
 SMA_DAYS = 200
 INDEX = "COMPOSITE"
+RSI_N = 14
+RSI_MAX = Decimal(30)
 
 
 def _rows(conn: psycopg.Connection, sql: str, params: tuple, cols: list[str]) -> list[dict[str, Any]]:
@@ -67,10 +73,52 @@ def take_profit_hits(positions: list[dict[str, Any]], prices: dict[str, Any], pc
     return out
 
 
-def gate(targets: dict[str, Any], trend: dict[str, dict[str, Any]], held: set[str]) -> list[str]:
-    """Pure. The names to hold back at a rebalance: listed, not already held, and under their 200-day average. A name
-    without an average (young listing) is bought."""
-    return [c for c in targets if c not in held and (t := trend.get(c)) is not None and t["sma"] is not None and not t["on"]]
+def rsi_from_closes(closes: list[Any], n: int = RSI_N) -> Decimal | None:
+    """Pure. Wilder's RSI over the last ``n`` changes of an oldest-first close series; None without enough history."""
+    xs = [Decimal(str(c)) for c in closes]
+    if len(xs) < n + 1:
+        return None
+    gains, losses = [], []
+    for a, b in pairwise(xs):
+        d = b - a
+        gains.append(d if d > 0 else Decimal(0))
+        losses.append(-d if d < 0 else Decimal(0))
+    up = sum(gains[:n], Decimal(0)) / n
+    dn = sum(losses[:n], Decimal(0)) / n
+    for g, lo in zip(gains[n:], losses[n:], strict=True):                 # Wilder smoothing
+        up = (up * (n - 1) + g) / n
+        dn = (dn * (n - 1) + lo) / n
+    if dn == 0:
+        return Decimal(100)
+    rs = up / dn
+    return Decimal(100) - Decimal(100) / (1 + rs)
+
+
+def gate(targets: dict[str, Any], trend: dict[str, dict[str, Any]], held: set[str], rsi: dict[str, Any] | None = None) -> list[str]:
+    """Pure. The names to hold back at a rebalance: listed, not already held, under their 200-day average, and not
+    oversold (RSI over 30, or no RSI). A name without an average (young listing) is bought."""
+    out = []
+    for c in targets:
+        if c in held:
+            continue
+        t = trend.get(c)
+        if t is None or t["sma"] is None or t["on"]:
+            continue
+        r = (rsi or {}).get(c)
+        if r is not None and Decimal(str(r)) <= RSI_MAX:
+            continue                                                     # oversold: buy it, do not hold it back
+        out.append(c)
+    return out
+
+
+def trend_breaks(prev: dict[str, dict[str, Any]], now: dict[str, dict[str, Any]], held: set[str]) -> dict[str, str]:
+    """Pure. Held names that were above their average at the previous check and are below it now -> {code: reason}."""
+    out = {}
+    for c in sorted(held):
+        p, q = prev.get(c), now.get(c)
+        if p and q and p["sma"] is not None and q["sma"] is not None and p["on"] and not q["on"]:
+            out[c] = f"trend break: crossed under its 200-day average ({q['close']:.0f} vs {q['sma']:.0f})"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +148,35 @@ def name_trend(conn: psycopg.Connection, D: date, codes: list[str]) -> dict[str,
     for r in rows:
         by.setdefault(r["code"], []).append(r["c"])
     return {c: regime_from_closes(v) for c, v in by.items() if v}
+
+
+def rsi14(conn: psycopg.Connection, D: date, codes: list[str]) -> dict[str, Decimal]:
+    """Per code, the 14-day RSI on the adjusted close as of D (last 60 bars are plenty)."""
+    if not codes:
+        return {}
+    rows = _rows(conn, """
+        SELECT code, trade_date AS d, c FROM (
+            SELECT code, trade_date, close * adj_factor AS c, row_number() OVER (PARTITION BY code ORDER BY trade_date DESC) AS rn
+              FROM idx.bar WHERE source = 'idx' AND code = ANY(%s) AND trade_date <= %s AND close IS NOT NULL) t
+         WHERE rn <= 60 ORDER BY code, trade_date""", (list(codes), D), ["code", "d", "c"])
+    by: dict[str, list[Any]] = {}
+    for r in rows:
+        by.setdefault(r["code"], []).append(r["c"])
+    out = {}
+    for c, v in by.items():
+        r = rsi_from_closes(v)
+        if r is not None:
+            out[c] = r
+    return out
+
+
+def previous_check_date(conn: psycopg.Connection, D: date) -> date | None:
+    """The first trading day of the month before D's month (the previous monthly check)."""
+    first = D.replace(day=1)
+    prev_month_last = first - timedelta(days=1)
+    rows = _rows(conn, "SELECT min(trade_date) AS d FROM idx.bar WHERE source = 'idx' AND trade_date >= %s AND trade_date < %s",
+                 (prev_month_last.replace(day=1), first), ["d"])
+    return rows[0]["d"] if rows and rows[0]["d"] else None
 
 
 def first_trading_day_of_month(conn: psycopg.Connection, D: date) -> bool:
@@ -167,7 +244,7 @@ def monthly_check(conn: psycopg.Connection, D: date, build: bool = True) -> dict
     for row in _rows(conn, "SELECT book FROM idx.book ORDER BY book", (), ["book"]):
         b = row["book"]
         meta = bk.get_book(conn, b)
-        if not (meta.get("regime_filter") or meta.get("entry_gate") or meta.get("take_profit_pct")):
+        if not (meta.get("regime_filter") or meta.get("entry_gate") or meta.get("take_profit_pct") or meta.get("trend_exit")):
             continue
         positions = bk.snapshot(conn, b)["positions"]
         held = {p["code"] for p in positions}
@@ -203,19 +280,34 @@ def monthly_check(conn: psycopg.Connection, D: date, build: bool = True) -> dict
                     entry["ticket"] = tid if entry["ticket"] is None else entry["ticket"]
                     runlog.alert(conn, "info", f"ticket:{b}", f"take profit: {', '.join(sorted(hits))} at least {meta['take_profit_pct']:.0f} % over "
                                  f"their purchase price; ticket #{tid} sells them from the {b} book")
+        if meta.get("trend_exit") and held:
+            prev_d = previous_check_date(conn, D)
+            if prev_d is not None:
+                breaks = trend_breaks(name_trend(conn, prev_d, sorted(held)), name_trend(conn, D, sorted(held)), held)
+                if breaks:
+                    entry["action"] = (entry["action"] + "+" if entry["action"] else "") + "trend-exit"
+                    entry["names"] = entry["names"] + sorted(breaks)
+                    if build:
+                        res = tk.build(conn, b, mode="exits", run_date=D, exits=breaks)
+                        tid = tk.store(conn, res, notes=f"trend exit on {r['check_date']}: {', '.join(sorted(breaks))} crossed under their 200-day average")
+                        entry["ticket"] = tid if entry["ticket"] is None else entry["ticket"]
+                        runlog.alert(conn, "warning", f"ticket:{b}", f"trend exit: {', '.join(sorted(breaks))} crossed under their 200-day "
+                                     f"average; ticket #{tid} sells them from the {b} book. Work it at the next open: the signal is the {r['check_date']} close.")
+                    held = held - set(breaks)
         if meta.get("entry_gate"):
             cur = current_list(conn, b)
             back = [c for c in (cur or {}).get("held_back", []) if c not in held]
             if back:
                 trend = name_trend(conn, D, back)
-                ready = [c for c in back if c in trend and trend[c]["on"]]
+                rsi = rsi14(conn, D, back)
+                ready = [c for c in back if (c in trend and trend[c]["on"]) or (c in rsi and rsi[c] <= RSI_MAX)]
                 if ready:
                     entry["action"], entry["names"] = "entry", ready
                     if build:
                         res = tk.build(conn, b, mode="entry", run_date=D, entrants=ready)
                         entry["ticket"] = tk.store(conn, res, notes=f"entry gate on {r['check_date']}: {', '.join(ready)} crossed above their 200-day average")
-                        runlog.alert(conn, "info", f"ticket:{b}", f"entry gate: {', '.join(ready)} crossed above their 200-day average; "
-                                     f"ticket #{entry['ticket']} buys them into the {b} book")
+                        runlog.alert(conn, "info", f"ticket:{b}", f"entry gate: {', '.join(ready)} crossed above their 200-day average or are "
+                                     f"oversold; ticket #{entry['ticket']} buys them into the {b} book. Work it at the next open.")
     return report
 
 

@@ -312,11 +312,12 @@ def cmd_overlay(a: argparse.Namespace) -> int:
                 sma = f"{r['sma']:,.0f}" if r["sma"] is not None else "n/a"
                 print(f"regime {'ON (invested)' if r['on'] else 'OFF (cash)'} since check {r['check_date']}: {r['index_code']} {r['close']:,.0f} vs 200-day average {sma}")
             with conn.cursor() as cur:
-                cur.execute("SELECT book, regime_filter, entry_gate, take_profit_pct FROM idx.book ORDER BY book")
+                cur.execute("SELECT book, regime_filter, entry_gate, take_profit_pct, trend_exit FROM idx.book ORDER BY book")
                 for row in cur.fetchall():
-                    row = dict(row) if isinstance(row, dict) else dict(zip(["book", "regime_filter", "entry_gate", "take_profit_pct"], row, strict=True))
+                    row = dict(row) if isinstance(row, dict) else dict(zip(["book", "regime_filter", "entry_gate", "take_profit_pct", "trend_exit"], row, strict=True))
                     tp = f"take profit +{row['take_profit_pct']:.0f} %" if row["take_profit_pct"] is not None else "take profit off"
-                    print(f"  {row['book']:6s} regime filter {'on' if row['regime_filter'] else 'off'}, entry gate {'on' if row['entry_gate'] else 'off'}, {tp}")
+                    print(f"  {row['book']:6s} regime filter {'on' if row['regime_filter'] else 'off'}, entry gate {'on' if row['entry_gate'] else 'off'}, "
+                          f"trend exit {'on' if row['trend_exit'] else 'off'}, {tp}")
             for h in overlay.history(conn, 12):
                 print(f"  {h['check_date']} {'on ' if h['on'] else 'off'} {h['close']:,.0f} / {h['sma']:,.0f}" if h["sma"] is not None else f"  {h['check_date']} {'on' if h['on'] else 'off'}")
             return 0

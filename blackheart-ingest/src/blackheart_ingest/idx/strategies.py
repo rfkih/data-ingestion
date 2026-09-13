@@ -96,6 +96,16 @@ OVERLAYS: list[dict[str, Any]] = [
              "calendars (-8 to -34 %), higher in the fourth. No protection in a crash: over 2008-2026 the 2020 drawdown is about the "
              "same either way. A mild damper, not a free improvement.",
      "history": {"overlay": "entry_only"}},
+    {"key": "overlay:asymmetric", "label": "Asymmetric: sell the trend break, buy the oversold", "status": "option",
+     "rule": "At each monthly check, sell a held name that crossed from above to below its 200-day average since the last check "
+             "(trend exit); buy a listed name that is not held when it is above its average or oversold (14-day RSI at or under 30). "
+             "Set per book: trend exit + entry gate together.",
+     "note": "2021-2026 on the strict book: Sharpe above the plain rule in three of four calendars (1.19 / 1.26 / 1.09 / 0.99 against "
+             "1.00 / 1.41 / 0.95 / 0.81) at 90 % or more of its return, worst drawdown 17 % against 22 %, the April 2025 dip cut to "
+             "-3..-8 %. 2008-2026 on a 100-name basket: drawdown 51 % to 42 %, CAGR +2.7 points, but 2020 still -39 %: a damper, not "
+             "crash insurance; with the crash filter, drawdown 21 %, 2008 flat, 2020 -2 %. Executed one session after the signal (the desk is not automated) it keeps the drawdown "
+             "edge and gives up about 1.3 points of CAGR; five sessions late, 2.7 points (research/IDX_EXECUTION_DELAY_2026-09-13.md).",
+     "history": {"asym": "asym_rsi"}},
     {"key": "overlay:take_profit", "label": "Take profit: sell a name once it has doubled", "status": "option",
      "rule": "At each monthly check, a held name at or above twice its purchase price is sold and its cash waits for the next "
              "rebalance. Set per book (take profit %, 100 tested).",
@@ -192,6 +202,17 @@ def history_rows_from_json(doc: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     months = doc.get("months") or {}
     first = next(iter(months.values()), {})
+    if "verdict" in doc and "months" in doc and any("asym_rsi" in (m.get("table") or {}) for m in doc["months"].values()):
+        for m, mdoc in doc["months"].items():                              # research/idx_asymmetric.py
+            table = mdoc.get("table") or {}
+            for s in OVERLAYS:
+                hk = s["history"].get("asym")
+                if hk in table:
+                    v = table[hk]
+                    rows.append({"strategy": s["key"], "size": 0, "month": int(m), "source": f"asym:{hk}", "n_trials": doc.get("n_trials"),
+                                 "stats": {k: v.get(k) for k in STATS}, "yearly": v.get("yearly"), "periods": v.get("periods"),
+                                 "holdings": None, "generated_at": doc.get("generated")})
+        return rows
     if "verdict" in doc and "months" in doc and any("tp100" in (m.get("table") or {}) for m in doc["months"].values()):
         for m, mdoc in doc["months"].items():                              # research/idx_sell_rules.py
             table = mdoc.get("table") or {}

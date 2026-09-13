@@ -84,9 +84,9 @@ def default_fee(gross: Decimal, side: str, book: dict[str, Any]) -> Decimal:
 # ---------------------------------------------------------------------------
 def get_book(conn: psycopg.Connection, book: str) -> dict[str, Any]:
     rows = _rows(conn, "SELECT book, cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note, strategy, max_names, regime_filter, entry_gate, "
-                       "take_profit_pct FROM idx.book WHERE book = %s",
+                       "take_profit_pct, trend_exit FROM idx.book WHERE book = %s",
                  (book,), ["book", "cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
-                           "take_profit_pct"])
+                           "take_profit_pct", "trend_exit"])
     if not rows:
         raise ValueError(f"no book {book!r}")
     return rows[0]
@@ -100,12 +100,12 @@ def ensure_book(conn: psycopg.Connection, book: str, **fields: Any) -> None:
             cur.execute("UPDATE idx.book SET strategy = %s WHERE book = %s", (deployed(), book))
         for k, v in fields.items():
             if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
-                     "take_profit_pct"):
+                     "take_profit_pct", "trend_exit"):
                 if k == "take_profit_pct":
                     v = None if v in (None, "", 0, "0") else Decimal(str(v))
                     if v is not None and v <= 0:
                         raise ValueError("take_profit_pct must be positive, or empty to switch it off")
-                if k in ("regime_filter", "entry_gate"):
+                if k in ("regime_filter", "entry_gate", "trend_exit"):
                     v = v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "t", "yes", "on")
                 if k == "strategy":
                     from .strategies import get as _get_strategy
