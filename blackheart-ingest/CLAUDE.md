@@ -53,6 +53,7 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   backfill --from --to [--index] | replay | publish [--full] | announce | features [--publish] | fin discover|download|parse |
   dividends | card CODE | candidates [--as-of D] | answers [--score] | crosscheck | run-scheduler`. Local wrapper:
   `C:/Project/scripts/idx.sh` / `idx.ps1` (loads `idx-local.env`, gitignored).
+- **Desk accounts (`idx/accounts.py`, migration 0015 `idx.app_user`, 2026-09-13):** the Papan app's users. Anyone can register; scrypt password hashes; 30-day HS256 sessions signed with `IDX_JWT_SECRET` (base64, `idx-local.env`; the app holds the same value as `JWT_SECRET`); failed sign-ins throttled per email. Served at `/api/v1/users/register|login|me|logout` in the trading JVM's user-API shape (ResponseDto envelope, `blackheart-token` cookie), so the app's `INTERNAL_TRADING_URL` points at this worker and would work unchanged against the JVM. These routes are open by design (loopback bind + the app in front); they are not under `/idx` and never need `X-Ingest-Token`.
 - **Value/quality book (phase 2 verdict, `research/IDX_VALUE_QUALITY_2026-09-12.md` rev. 3; review
   `research/IDX_REVIEW_2026-09-12.md`):** `idx/metrics.py` is the one PIT evaluator (latest audited + latest quarterly → TTM,
   loose/strict gates, warnings; information cutoff = 16:00 WIB of the as-of day; prior-period comparatives come from the report

@@ -368,9 +368,12 @@ app = FastAPI(
 
 
 # IDX data plane (blackheart_ingest.idx): ops/alerts/runs for the app's /equities/ops page.
+from ..idx.accounts import make_router as _accounts_router  # noqa: E402
 from ..idx.api import make_router as _idx_router  # noqa: E402
 
 app.include_router(_idx_router(require_token))
+# Desk accounts in the trading JVM's user-API shape, so the Papan app signs people in here (INTERNAL_TRADING_URL).
+app.include_router(_accounts_router())
 
 
 def _db_probe() -> bool:
