@@ -221,6 +221,21 @@ def make_router(require_token) -> APIRouter:
                 raise HTTPException(status_code=422, detail=str(e)) from None
             return bk.get_book(conn, book)
 
+    @router.get("/macro")
+    def macro_board() -> dict[str, Any]:
+        """Every macro series with its latest reading, 1/3/12-month change and a 24-month history."""
+        from . import macro
+        with get_connection() as conn:
+            rows = macro.board(conn)
+        return {"as_of": datetime.now(UTC).isoformat(), "series": rows}
+
+    @router.post("/macro/pull", dependencies=[Depends(require_token)])
+    def macro_pull(body: dict[str, Any] = _BODY) -> dict[str, Any]:
+        from . import macro
+        with get_connection() as conn:
+            r = macro.pull(conn, keys=body.get("keys"), full=bool(body.get("full")))
+        return {"status": r.status, "rows": r.rows_out, "detail": r.detail, "warnings": r.warnings}
+
     @router.get("/overlay")
     def overlay_get() -> dict[str, Any]:
         """The regime record (latest check + history) and which books have an overlay on."""

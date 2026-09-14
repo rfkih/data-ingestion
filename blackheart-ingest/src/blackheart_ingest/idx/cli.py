@@ -301,6 +301,26 @@ def cmd_card(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_macro(a: argparse.Namespace) -> int:
+    from . import macro
+    with get_connection() as conn:
+        if a.sub == "pull":
+            r = macro.pull(conn, keys=a.keys.split(",") if a.keys else None, full=a.full)
+            for k, v in r.detail.items():
+                if isinstance(v, dict):
+                    print(f"  {k:14s} {v['points']:5d} points, last {v['last']}")
+            print(f"macro pull {r.status}: {r.rows_out} rows" + (f"; failed: {', '.join(r.detail.get('failed') or [])}" if r.detail.get("failed") else ""))
+            for w in r.warnings:
+                print("  !", w)
+            return 0 if r.status != "failed" else 1
+        print(f"{'series':14s} {'last':>10s} {'value':>12s} {'1m':>9s} {'3m':>9s} {'12m':>9s}  label")
+        for row in macro.board(conn):
+            f = lambda v: "" if v is None else f"{float(v):+.2f}"  # noqa: E731
+            val = "" if row["value"] is None else f"{float(row['value']):,.2f}"
+            print(f"{row['key']:14s} {row['date'] or ''!s:>10s} {val:>12s} {f(row['chg_1m']):>9s} {f(row['chg_3m']):>9s} {f(row['chg_12m']):>9s}  {row['label']}")
+    return 0
+
+
 def cmd_overlay(a: argparse.Namespace) -> int:
     from . import overlay
     with get_connection() as conn:
@@ -646,6 +666,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["list", "import-history"])
     p.add_argument("files", nargs="*")
     p.set_defaults(fn=cmd_strategies)
+    p = sub.add_parser("macro", help="macro series: pull [--keys a,b] [--full] | show")
+    p.add_argument("sub", choices=["pull", "show"])
+    p.add_argument("--keys", help="comma list of series keys (default all)")
+    p.add_argument("--full", action="store_true", help="reload from 2005")
+    p.set_defaults(fn=cmd_macro)
     p = sub.add_parser("overlay", help="book overlays: status | check [--as-of D] [--dry-run] (regime filter, entry gate)")
     p.add_argument("sub", choices=["status", "check"])
     p.add_argument("--as-of")
