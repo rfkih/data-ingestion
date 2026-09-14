@@ -57,7 +57,7 @@ def _idx_bars(conn: psycopg.Connection, code: str, since: date | None) -> list[d
         cur.execute(
             """
             SELECT trade_date, open, high, low, close, volume, adj_factor
-              FROM idx.bar WHERE code = %s AND source = 'idx' AND (%s::date IS NULL OR trade_date >= %s)
+              FROM idx.bar WHERE code = %s AND source IN ('idx', 'yahoo') AND (%s::date IS NULL OR trade_date >= %s)
              ORDER BY trade_date
             """,
             (code, since, since),
@@ -69,7 +69,7 @@ def _idx_bars(conn: psycopg.Connection, code: str, since: date | None) -> list[d
 
 def _first_idx_date(conn: psycopg.Connection, code: str) -> date | None:
     with conn.cursor() as cur:
-        cur.execute("SELECT min(trade_date) FROM idx.bar WHERE code = %s AND source = 'idx'", (code,))
+        cur.execute("SELECT min(trade_date) FROM idx.bar WHERE code = %s AND source IN ('idx', 'yahoo')", (code,))
         row = cur.fetchone()
     return row[0] if isinstance(row, tuple) else next(iter(row.values()))
 
@@ -161,7 +161,7 @@ def publish(conn: psycopg.Connection, *, codes: list[str] | None = None, since: 
             yahoo_dir = None
         if codes is None:
             with conn.cursor() as cur:
-                cur.execute("SELECT DISTINCT code FROM idx.bar WHERE source = 'idx' ORDER BY code")
+                cur.execute("SELECT DISTINCT code FROM idx.bar WHERE source IN ('idx', 'yahoo') ORDER BY code")
                 codes = [x[0] if isinstance(x, tuple) else x["code"] for x in cur.fetchall()]
         created = datetime.now(UTC).replace(tzinfo=None)
         total = 0

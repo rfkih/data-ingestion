@@ -182,7 +182,7 @@ def breadth_asof(conn: psycopg.Connection, D: date) -> float | None:
     rows = _rows(conn, """
         WITH last AS (
             SELECT code, close * adj_factor AS c, row_number() OVER (PARTITION BY code ORDER BY trade_date DESC) AS rn
-              FROM idx.bar WHERE source = 'idx' AND trade_date <= %s AND close IS NOT NULL AND close > 0),
+              FROM idx.bar WHERE source IN ('idx', 'yahoo') AND trade_date <= %s AND close IS NOT NULL AND close > 0),
         agg AS (SELECT code, count(*) AS n, avg(c) AS sma, max(CASE WHEN rn = 1 THEN c END) AS last_c FROM last WHERE rn <= %s GROUP BY code)
         SELECT count(*) FILTER (WHERE n = %s) AS n_valid, count(*) FILTER (WHERE n = %s AND last_c > sma) AS n_above FROM agg""",
                  (D, SMA_DAYS, SMA_DAYS, SMA_DAYS), ["n_valid", "n_above"])
@@ -253,7 +253,7 @@ def name_trend(conn: psycopg.Connection, D: date, codes: list[str]) -> dict[str,
     rows = _rows(conn, """
         SELECT code, trade_date AS d, c FROM (
             SELECT code, trade_date, close * adj_factor AS c, row_number() OVER (PARTITION BY code ORDER BY trade_date DESC) AS rn
-              FROM idx.bar WHERE source = 'idx' AND code = ANY(%s) AND trade_date <= %s AND close IS NOT NULL) t
+              FROM idx.bar WHERE source IN ('idx', 'yahoo') AND code = ANY(%s) AND trade_date <= %s AND close IS NOT NULL) t
          WHERE rn <= %s ORDER BY code, trade_date""", (list(codes), D, SMA_DAYS), ["code", "d", "c"])
     by: dict[str, list[Any]] = {}
     for r in rows:
@@ -268,7 +268,7 @@ def rsi14(conn: psycopg.Connection, D: date, codes: list[str]) -> dict[str, Deci
     rows = _rows(conn, """
         SELECT code, trade_date AS d, c FROM (
             SELECT code, trade_date, close * adj_factor AS c, row_number() OVER (PARTITION BY code ORDER BY trade_date DESC) AS rn
-              FROM idx.bar WHERE source = 'idx' AND code = ANY(%s) AND trade_date <= %s AND close IS NOT NULL) t
+              FROM idx.bar WHERE source IN ('idx', 'yahoo') AND code = ANY(%s) AND trade_date <= %s AND close IS NOT NULL) t
          WHERE rn <= 60 ORDER BY code, trade_date""", (list(codes), D), ["code", "d", "c"])
     by: dict[str, list[Any]] = {}
     for r in rows:
@@ -285,13 +285,13 @@ def previous_check_date(conn: psycopg.Connection, D: date) -> date | None:
     """The first trading day of the month before D's month (the previous monthly check)."""
     first = D.replace(day=1)
     prev_month_last = first - timedelta(days=1)
-    rows = _rows(conn, "SELECT min(trade_date) AS d FROM idx.bar WHERE source = 'idx' AND trade_date >= %s AND trade_date < %s",
+    rows = _rows(conn, "SELECT min(trade_date) AS d FROM idx.bar WHERE source IN ('idx', 'yahoo') AND trade_date >= %s AND trade_date < %s",
                  (prev_month_last.replace(day=1), first), ["d"])
     return rows[0]["d"] if rows and rows[0]["d"] else None
 
 
 def first_trading_day_of_month(conn: psycopg.Connection, D: date) -> bool:
-    rows = _rows(conn, "SELECT min(trade_date) AS d FROM idx.bar WHERE source = 'idx' AND trade_date >= %s AND trade_date <= %s",
+    rows = _rows(conn, "SELECT min(trade_date) AS d FROM idx.bar WHERE source IN ('idx', 'yahoo') AND trade_date >= %s AND trade_date <= %s",
                  (D.replace(day=1), D), ["d"])
     return bool(rows and rows[0]["d"] == D)
 
@@ -403,7 +403,7 @@ def monthly_check(conn: psycopg.Connection, D: date, build: bool = True) -> dict
                 continue
         if meta.get("take_profit_pct") and held:
             px = {r["code"]: r["close"] for r in _rows(conn, """SELECT DISTINCT ON (code) code, close FROM idx.bar
-                       WHERE code = ANY(%s) AND source = 'idx' AND trade_date <= %s ORDER BY code, trade_date DESC""", (sorted(held), D), ["code", "close"])}
+                       WHERE code = ANY(%s) AND source IN ('idx', 'yahoo') AND trade_date <= %s ORDER BY code, trade_date DESC""", (sorted(held), D), ["code", "close"])}
             hits = take_profit_hits(positions, px, meta["take_profit_pct"])
             if hits:
                 entry["action"] = (entry["action"] + "+" if entry["action"] else "") + "take-profit"

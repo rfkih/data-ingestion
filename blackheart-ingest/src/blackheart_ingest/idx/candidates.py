@@ -52,7 +52,7 @@ def board_from_remarks(remarks: str | None) -> str | None:
 
 
 def build(conn: psycopg.Connection, as_of: date | None = None) -> dict[str, Any]:
-    last = _rows(conn, "SELECT max(trade_date) FROM idx.bar WHERE source='idx' AND (%s::date IS NULL OR trade_date <= %s)",
+    last = _rows(conn, "SELECT max(trade_date) FROM idx.bar WHERE source IN ('idx', 'yahoo') AND (%s::date IS NULL OR trade_date <= %s)",
                  (as_of, as_of), ["d"])[0]["d"]
     D: date = last
     # raw close x listed shares of the day = market cap on the day's own basis (the adjusted close is on today's split basis,
@@ -62,7 +62,7 @@ def build(conn: psycopg.Connection, as_of: date | None = None) -> dict[str, Any]
                s.listed_shares, f.value_60d_median, f.foreign_net_share_20d, f.foreign_net_share_5d, l.sector
           FROM idx.bar b JOIN idx.daily_summary s USING (trade_date, code) LEFT JOIN idx.listing l USING (code)
           LEFT JOIN idx.feature_daily f USING (trade_date, code)
-         WHERE b.trade_date = %s AND b.source = 'idx'
+         WHERE b.trade_date = %s AND b.source IN ('idx', 'yahoo')
         """, (D,), ["code", "name", "remarks", "board_now", "status_now", "close", "adj_close", "volume", "shares", "v60", "f20", "f5", "sector"])
     for p in px:
         p["board"] = board_from_remarks(p["remarks"]) or p["board_now"]
@@ -113,12 +113,12 @@ def momentum_at(conn: psycopg.Connection, D: date, codes: list[str], long: int =
     """12-1 month price momentum on the day: close ``skip`` bars before D over close ``long`` bars before D, minus one
     (the same definition as research/idx_top10.py). Empty when the calendar is too short."""
     dates = [r["d"] for r in _rows(conn, """
-        SELECT trade_date FROM (SELECT DISTINCT trade_date FROM idx.bar WHERE source = 'idx' AND trade_date <= %s
+        SELECT trade_date FROM (SELECT DISTINCT trade_date FROM idx.bar WHERE source IN ('idx', 'yahoo') AND trade_date <= %s
                                  ORDER BY trade_date DESC LIMIT %s) t ORDER BY trade_date""", (D, long + 1), ["d"])]
     if len(dates) < long + 1 or not codes:
         return {}
     far_d, near_d = dates[0], dates[-1 - skip]
-    q = "SELECT code, close * adj_factor AS c FROM idx.bar WHERE source = 'idx' AND trade_date = %s AND code = ANY(%s)"
+    q = "SELECT code, close * adj_factor AS c FROM idx.bar WHERE source IN ('idx', 'yahoo') AND trade_date = %s AND code = ANY(%s)"
     far = {r["code"]: Decimal(r["c"]) for r in _rows(conn, q, (far_d, codes), ["code", "c"]) if r["c"]}
     near = {r["code"]: Decimal(r["c"]) for r in _rows(conn, q, (near_d, codes), ["code", "c"]) if r["c"]}
     return {c: near[c] / far[c] - 1 for c in codes if c in near and c in far and far[c] > 0}

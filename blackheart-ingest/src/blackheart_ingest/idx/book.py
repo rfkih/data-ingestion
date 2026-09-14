@@ -179,7 +179,7 @@ def import_csv(conn: psycopg.Connection, book: str, path: str | Path) -> int:
 # marks, NAV, corporate actions, dividends
 # ---------------------------------------------------------------------------
 def _trading_days(conn: psycopg.Connection, start: date, end: date) -> list[date]:
-    return [r["d"] for r in _rows(conn, "SELECT DISTINCT trade_date FROM idx.bar WHERE source = 'idx' AND trade_date BETWEEN %s AND %s ORDER BY 1",
+    return [r["d"] for r in _rows(conn, "SELECT DISTINCT trade_date FROM idx.bar WHERE source IN ('idx', 'yahoo') AND trade_date BETWEEN %s AND %s ORDER BY 1",
                                   (start, end), ["d"])]
 
 
@@ -219,7 +219,7 @@ def mark(conn: psycopg.Connection, book: str, as_of: date | None = None, rebuild
             reset_marks(conn, book)
         b = get_book(conn, book)
         first = _rows(conn, "SELECT min(trade_date) FROM idx.fill WHERE book = %s", (book,), ["d"])[0]["d"]
-        last_bar = _rows(conn, "SELECT max(trade_date) FROM idx.bar WHERE source = 'idx' AND (%s::date IS NULL OR trade_date <= %s)",
+        last_bar = _rows(conn, "SELECT max(trade_date) FROM idx.bar WHERE source IN ('idx', 'yahoo') AND (%s::date IS NULL OR trade_date <= %s)",
                          (as_of, as_of), ["d"])[0]["d"]
         if first is None or last_bar is None:
             r.status = "skipped"
@@ -261,7 +261,7 @@ def mark(conn: psycopg.Connection, book: str, as_of: date | None = None, rebuild
                     with conn.cursor() as cur:
                         cur.execute("UPDATE idx.position SET dividends = dividends + %s WHERE book = %s AND code = %s", (net, book, x["code"]))
             cash += div_cash
-            closes = {c["code"]: Decimal(c["close"]) for c in _rows(conn, "SELECT code, close FROM idx.bar WHERE trade_date = %s AND code = ANY(%s) AND source = 'idx'",
+            closes = {c["code"]: Decimal(c["close"]) for c in _rows(conn, "SELECT code, close FROM idx.bar WHERE trade_date = %s AND code = ANY(%s) AND source IN ('idx', 'yahoo')",
                                                                    (d, list(held)), ["code", "close"])} if held else {}
             total = Decimal(0)
             with conn.cursor() as cur:
@@ -353,12 +353,12 @@ def paper_seed(conn: psycopg.Connection, book: str, run_date: date, cash: Decima
     if not sel:
         raise ValueError(f"no selected candidates for {run_date}; run `idx candidates --as-of {run_date}` first")
     if fill == "next_open":
-        nxt = _rows(conn, "SELECT min(trade_date) FROM idx.bar WHERE source = 'idx' AND trade_date > %s", (run_date,), ["d"])[0]["d"]
-        px = {p["code"]: (p["open"] if p["open"] else p["close"]) for p in _rows(conn, "SELECT code, open, close FROM idx.bar WHERE trade_date = %s AND code = ANY(%s) AND source = 'idx'",
+        nxt = _rows(conn, "SELECT min(trade_date) FROM idx.bar WHERE source IN ('idx', 'yahoo') AND trade_date > %s", (run_date,), ["d"])[0]["d"]
+        px = {p["code"]: (p["open"] if p["open"] else p["close"]) for p in _rows(conn, "SELECT code, open, close FROM idx.bar WHERE trade_date = %s AND code = ANY(%s) AND source IN ('idx', 'yahoo')",
                                                                                      (nxt, sel), ["code", "open", "close"])}
         d = nxt
     else:
-        px = {p["code"]: p["close"] for p in _rows(conn, "SELECT code, close FROM idx.bar WHERE trade_date = %s AND code = ANY(%s) AND source = 'idx'",
+        px = {p["code"]: p["close"] for p in _rows(conn, "SELECT code, close FROM idx.bar WHERE trade_date = %s AND code = ANY(%s) AND source IN ('idx', 'yahoo')",
                                                    (run_date, sel), ["code", "close"])}
         d = run_date
     b = get_book(conn, book)

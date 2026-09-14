@@ -43,7 +43,7 @@ def build(conn: psycopg.Connection, code: str, as_of: date | None = None) -> str
         SELECT b.trade_date, b.close, s.listed_shares, s.foreign_buy, s.foreign_sell, s.volume, s.value, f.value_60d_median,
                f.foreign_net_share_5d, f.foreign_net_share_20d, f.mcap_quintile
           FROM idx.bar b JOIN idx.daily_summary s USING (trade_date, code) LEFT JOIN idx.feature_daily f USING (trade_date, code)
-         WHERE b.code = %s AND b.source = 'idx' AND (%s::date IS NULL OR b.trade_date <= %s) ORDER BY b.trade_date DESC LIMIT 1
+         WHERE b.code = %s AND b.source IN ('idx', 'yahoo') AND (%s::date IS NULL OR b.trade_date <= %s) ORDER BY b.trade_date DESC LIMIT 1
         """, (code, as_of, as_of), ["d", "close", "shares", "fb", "fs", "vol", "value", "v60", "f5", "f20", "mcap_q"])
     if not bar:
         return f"# {code}\n\nno price data."

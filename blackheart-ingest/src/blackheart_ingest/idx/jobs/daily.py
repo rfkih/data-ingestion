@@ -11,7 +11,7 @@ scheduler decides whether that is late (retry) or a holiday.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -189,6 +189,71 @@ def replay(conn: psycopg.Connection, d: date) -> runlog.RunResult:
         conn.rollback()
         r.status = "failed"
         r.error = f"{type(e).__name__}: {e}"[:500]
+    runlog.finish(conn, run_id, r)
+    return r
+
+
+_FALLBACK_SQL = """
+INSERT INTO idx.bar (code, trade_date, source, basis, open, high, low, close, volume, value, open_missing, quality_flags)
+VALUES (%(code)s, %(trade_date)s, 'yahoo', 'split_only', %(open)s, %(high)s, %(low)s, %(close)s, %(volume)s, %(value)s, false, '{fallback}')
+ON CONFLICT (code, trade_date) DO UPDATE SET
+    open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close, volume = EXCLUDED.volume,
+    value = EXCLUDED.value, updated_at = now()
+WHERE idx.bar.source <> 'idx'
+"""
+
+
+def fallback_yahoo(conn: psycopg.Connection, d: date, codes: list[str], index_symbol: str = "^JKSE") -> runlog.RunResult:
+    """The day's closes from Yahoo Finance when IDX has not published (or answers with a challenge) by the evening.
+    Rows carry source 'yahoo' and the flag 'fallback'; an IDX row for the same day replaces them later. The index goes
+    into idx.index_daily as COMPOSITE only if that day is missing. Value is close x volume (Yahoo has no traded value)."""
+    r = runlog.RunResult(JOB + ":fallback", d.isoformat())
+    run_id = runlog.start(conn, JOB + ":fallback", r.run_key)
+    try:
+        import yfinance as yf
+        rows: list[dict[str, Any]] = []
+        for i in range(0, len(codes), 100):
+            batch = codes[i:i + 100]
+            df = yf.download([f"{c}.JK" for c in batch], start=d.isoformat(), end=(d + timedelta(days=1)).isoformat(), auto_adjust=False,
+                             progress=False, group_by="ticker", threads=True)
+            for c in batch:
+                try:
+                    sub = df[f"{c}.JK"] if len(batch) > 1 else df
+                    if sub.empty or sub["Close"].dropna().empty:
+                        continue
+                    last = sub.dropna(subset=["Close"]).iloc[-1]
+                    if last.name.date() != d:
+                        continue
+                    close = float(last["Close"])
+                    vol = float(last["Volume"]) if last["Volume"] == last["Volume"] else 0.0
+                    rows.append({"code": c, "trade_date": d, "open": float(last["Open"]) if last["Open"] == last["Open"] else None,
+                                 "high": float(last["High"]) if last["High"] == last["High"] else None,
+                                 "low": float(last["Low"]) if last["Low"] == last["Low"] else None,
+                                 "close": close, "volume": int(vol), "value": int(close * vol)})
+                except (KeyError, IndexError, TypeError):
+                    continue
+        r.rows_in = len(codes)
+        with conn.cursor() as cur:
+            cur.executemany(_FALLBACK_SQL, rows)
+            cur.execute("SELECT 1 FROM idx.index_daily WHERE index_code = 'COMPOSITE' AND trade_date = %s", (d,))
+            if cur.fetchone() is None:
+                jk = yf.download(index_symbol, start=d.isoformat(), end=(d + timedelta(days=1)).isoformat(), auto_adjust=False, progress=False)
+                if not jk.empty:
+                    last = jk.iloc[-1]
+                    closev = float(last["Close"].iloc[0] if hasattr(last["Close"], "iloc") else last["Close"])
+                    cur.execute("""INSERT INTO idx.index_daily (trade_date, index_code, previous, open, high, low, close, volume, value, bronze_id, fetched_at)
+                                   VALUES (%s, 'COMPOSITE', NULL, NULL, NULL, NULL, %s, NULL, NULL, NULL, now()) ON CONFLICT DO NOTHING""", (d, closev))
+                    r.detail["index"] = closev
+        conn.commit()
+        r.rows_out = len(rows)
+        if not rows:
+            r.status, r.error = "failed", "Yahoo returned no closes for the day"
+        runlog.alert(conn, "warning", JOB, f"{d}: IDX bar missing; {len(rows)} closes taken from Yahoo as a fallback (flag 'fallback'); "
+                                            f"replaced when IDX publishes")
+    except Exception as e:
+        conn.rollback()
+        r.status, r.error = "failed", f"{type(e).__name__}: {e}"[:500]
+        logger.exception("idx daily fallback %s failed", d)
     runlog.finish(conn, run_id, r)
     return r
 

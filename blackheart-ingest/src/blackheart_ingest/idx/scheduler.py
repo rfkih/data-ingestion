@@ -189,6 +189,25 @@ def run_annual() -> None:
         logger.info("idx annual: downloaded=%s extracted sections=%s", r.rows_out, e.rows_out)
 
 
+def run_daily_fallback() -> None:
+    """19:40 WIB on a weekday with no IDX bar yet: take the day's closes from Yahoo so marks, NAV and the ticket see
+    today's prices; the chain keeps trying IDX until 20:00 and the watcher/backfill replaces the rows later."""
+    from .metrics import universe_codes
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        if job_daily.latest_bar_date(conn) == d:
+            return
+        r = job_daily.fallback_yahoo(conn, d, universe_codes(conn))
+        _fail_alert(conn, r)
+        logger.info("idx daily fallback %s %s rows=%s", d, r.status, r.rows_out)
+        if r.status == "ok":
+            for bk in ("live", "paper"):
+                rm = book.mark(conn, bk)
+                _fail_alert(conn, rm)
+
+
 def check_no_bar() -> None:
     d = today_wib()
     if d.weekday() >= 5:
@@ -222,6 +241,7 @@ def build() -> BlockingScheduler:  # noqa: F821
               id="daily_chain")
     s.add_job(run_daily_chain, CronTrigger(day_of_week="mon-fri", hour=20, minute=0, timezone=WIB), id="daily_last")
     s.add_job(check_no_bar, CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=WIB), id="no_bar_alert")
+    s.add_job(run_daily_fallback, CronTrigger(day_of_week="mon-fri", hour=19, minute=40, timezone=WIB), id="daily_fallback")
     s.add_job(run_announce_recent, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="announce_recent")
     s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=7, minute=30, timezone=WIB), id="macro")
     s.add_job(run_annual, CronTrigger(day=6, hour=10, minute=0, timezone=WIB), id="annual")

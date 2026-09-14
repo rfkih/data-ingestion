@@ -203,7 +203,7 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
         held_back = overlay.gate(targets, overlay.name_trend(conn, D, new), set(held), overlay.rsi14(conn, D, new))
     codes = sorted(set(targets) | set(held))
     px = {p["code"]: Decimal(p["close"]) for p in _rows(conn, """
-        SELECT DISTINCT ON (code) code, close FROM idx.bar WHERE code = ANY(%s) AND source = 'idx' AND trade_date <= %s
+        SELECT DISTINCT ON (code) code, close FROM idx.bar WHERE code = ANY(%s) AND source IN ('idx', 'yahoo') AND trade_date <= %s
          ORDER BY code, trade_date DESC""", (codes, D), ["code", "close"])}
     answers = {a["code"]: a for a in _rows(conn, """
         SELECT DISTINCT ON (code) code, doc_id AS pack_date, event_type AS stance, veto, rationale FROM idx.sentiment_score
@@ -357,14 +357,14 @@ def paper_fill(conn: psycopg.Connection, book: str = "paper", dry_run: bool = Fa
     reports = []
     for t_id in [r["id"] for r in _rows(conn, "SELECT id FROM idx.ticket WHERE book = %s AND status IN ('draft', 'issued') ORDER BY id", (book,), ["id"])]:
         t = load(conn, t_id)
-        d = _rows(conn, "SELECT min(trade_date) AS d FROM idx.bar WHERE source = 'idx' AND trade_date > %s", (t["ticket_date"],), ["d"])[0]["d"]
+        d = _rows(conn, "SELECT min(trade_date) AS d FROM idx.bar WHERE source IN ('idx', 'yahoo') AND trade_date > %s", (t["ticket_date"],), ["d"])[0]["d"]
         rep = {"ticket": t_id, "ticket_date": t["ticket_date"], "fill_date": d, "fills": [], "cash_after": None, "dry_run": dry_run}
         if d is None:
             rep["why"] = "no bar after the ticket date yet"
             reports.append(rep)
             continue
         codes = [ln["code"] for ln in t["lines"] if ln["status"] in ("open", "partial")]
-        px = {r["code"]: (r["open"] or r["close"]) for r in _rows(conn, "SELECT code, open, close FROM idx.bar WHERE trade_date = %s AND source = 'idx' AND code = ANY(%s)",
+        px = {r["code"]: (r["open"] or r["close"]) for r in _rows(conn, "SELECT code, open, close FROM idx.bar WHERE trade_date = %s AND source IN ('idx', 'yahoo') AND code = ANY(%s)",
                                                                     (d, codes), ["code", "open", "close"])}
         b = bk.get_book(conn, book)
         fills, cash_after = paper_fill_plan(t["lines"], px, b["cash"], b)

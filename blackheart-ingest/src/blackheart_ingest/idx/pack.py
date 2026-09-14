@@ -64,7 +64,7 @@ a selected name - then `veto_reason` is mandatory.
 
 def _price_stats(conn: psycopg.Connection, code: str, D: date) -> dict[str, Any]:
     rows = _rows(conn, """
-        SELECT trade_date, close * adj_factor AS c FROM idx.bar WHERE code = %s AND source = 'idx' AND trade_date <= %s
+        SELECT trade_date, close * adj_factor AS c FROM idx.bar WHERE code = %s AND source IN ('idx', 'yahoo') AND trade_date <= %s
          ORDER BY trade_date DESC LIMIT 260""", (code, D), ["d", "c"])
     if not rows:
         return {}
@@ -116,7 +116,7 @@ def _name_section(conn: psycopg.Connection, code: str, D: date, since: datetime,
     px = _rows(conn, """
         SELECT b.close * b.adj_factor AS close, s.listed_shares, f.value_60d_median
           FROM idx.bar b JOIN idx.daily_summary s USING (trade_date, code) LEFT JOIN idx.feature_daily f USING (trade_date, code)
-         WHERE b.code = %s AND b.source = 'idx' AND b.trade_date <= %s ORDER BY b.trade_date DESC LIMIT 1""", (code, D),
+         WHERE b.code = %s AND b.source IN ('idx', 'yahoo') AND b.trade_date <= %s ORDER BY b.trade_date DESC LIMIT 1""", (code, D),
         ["close", "shares", "v60"])
     p = px[0] if px else {"close": None, "shares": None, "v60": None}
     price = Decimal(p["close"]) if p["close"] else None
@@ -196,7 +196,7 @@ def _market(conn: psycopg.Connection, D: date) -> str:
 def build(conn: psycopg.Connection, as_of: date | None = None, *, next_n: int = 10, codes: list[str] | None = None) -> dict[str, Any]:
     """Build the pack for the latest candidate run on/before as_of (running the candidate list first if needed)."""
     run = _rows(conn, "SELECT max(run_date) FROM idx.candidate WHERE (%s::date IS NULL OR run_date <= %s)", (as_of, as_of), ["d"])[0]["d"]
-    last_bar = _rows(conn, "SELECT max(trade_date) FROM idx.bar WHERE source='idx' AND (%s::date IS NULL OR trade_date <= %s)",
+    last_bar = _rows(conn, "SELECT max(trade_date) FROM idx.bar WHERE source IN ('idx', 'yahoo') AND (%s::date IS NULL OR trade_date <= %s)",
                      (as_of, as_of), ["d"])[0]["d"]
     if run is None or (last_bar and run < last_bar):
         res = cand.build(conn, as_of)
@@ -364,7 +364,7 @@ def score_answers(conn: psycopg.Connection, horizons: tuple[int, ...] = HORIZONS
     scored = []
     for r in rows:
         D = date.fromisoformat(r["pack_date"])
-        px = _rows(conn, """SELECT trade_date, close * adj_factor AS c FROM idx.bar WHERE code = %s AND source = 'idx' AND trade_date >= %s
+        px = _rows(conn, """SELECT trade_date, close * adj_factor AS c FROM idx.bar WHERE code = %s AND source IN ('idx', 'yahoo') AND trade_date >= %s
                             ORDER BY trade_date LIMIT %s""", (r["code"], D, max(horizons) + 1), ["d", "c"])
         if not px or not px[0]["c"]:
             continue

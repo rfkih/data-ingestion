@@ -183,6 +183,7 @@ class IdxClient:
         path = path_t.format(**params)
         referer = BASE + referer_t.format(**params)
         last_err = ""
+        challenged = 0
         for wait in (0, *self.backoff):
             if wait:
                 logger.info("idx fetch retry %s key=%s in %ss (%s)", endpoint, key, wait, last_err)
@@ -210,6 +211,11 @@ class IdxClient:
             self._failure()
             if status == 404:
                 break
+            if status == 403:                                              # one retry clears a transient challenge; a second
+                challenged += 1                                            # 403 is a block, and retrying only feeds it
+                if challenged >= 2:
+                    last_err += " (Cloudflare challenge; not retried further)"
+                    break
         raise IdxFetchError(f"{endpoint} key={key}: {last_err}")
 
     def download(self, path: str, referer_path: str = "/id/perusahaan-tercatat/laporan-keuangan-dan-tahunan/") -> bytes:
@@ -217,6 +223,7 @@ class IdxClient:
         ``path`` is the site-relative File_Path (spaces allowed; quoted here)."""
         url = BASE + quote(path)
         last_err = ""
+        challenged = 0
         for wait in (0, *self.backoff):
             if wait:
                 logger.info("idx download retry %s in %ss (%s)", path[-60:], wait, last_err)
@@ -235,6 +242,11 @@ class IdxClient:
             self._failure()
             if status == 404:
                 break
+            if status == 403:
+                challenged += 1
+                if challenged >= 2:
+                    last_err += " (Cloudflare challenge; not retried further)"
+                    break
         raise IdxFetchError(f"download {path[-80:]}: {last_err}")
 
     def _pace(self) -> None:
