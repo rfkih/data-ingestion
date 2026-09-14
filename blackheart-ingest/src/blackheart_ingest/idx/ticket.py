@@ -223,9 +223,16 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
                 exits[c] = f"pack {a['pack_date']}: sell - {(a['rationale'] or '')[:100]}"
     nav_now = Decimal(b["cash"]) + sum(Decimal(h["lots"]) * LOT * px[c] for c, h in held.items() if c in px)
     min_trade = min_trade_for(nav_now) if min_trade is None else min_trade
+    reserve, stress_state = CASH_RESERVE, None
+    if overlay.uses_cash_buffer(b):                                        # the standing / stress cash buffer as the plan's reserve
+        sig = overlay.latest_stress(conn) or overlay.stress_signals(conn, D)
+        stress_state = {"check_date": str(sig["check_date"]), "n_on": sig["n_on"], "on": overlay.stress_on(sig, b.get("stress_rule") or "ma")}
+        reserve = max(CASH_RESERVE, overlay.cash_target(b, stress_state["on"]))
     res = plan(targets, held, px, Decimal(b["cash"]), book=b, band=band, min_trade=min_trade, mode="exits" if mode == "cash" else mode,
-               exits=exits, hold_back=set(held_back), buys_only=(mode == "entry"))
+               exits=exits, hold_back=set(held_back), buys_only=(mode == "entry"), reserve=reserve)
     res["min_trade"] = min_trade
+    res["cash_target"] = str(reserve)
+    res["stress"] = stress_state
     for line in res["lines"]:
         c = cmap.get(line["code"])
         a = answers.get(line["code"])

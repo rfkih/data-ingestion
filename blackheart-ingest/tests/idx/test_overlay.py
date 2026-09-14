@@ -60,3 +60,21 @@ def test_trend_breaks_need_a_cross_from_above() -> None:
     now = {"A": {"close": 8, "sma": Decimal(9), "on": False}, "B": {"close": 7, "sma": Decimal(9), "on": False}, "C": {"close": 11, "sma": Decimal(9), "on": True}}
     hits = OV.trend_breaks(prev, now, {"A", "B", "C"})
     assert set(hits) == {"A"}                                              # B was already below (no cross), C still above
+
+
+def test_stress_signals_and_the_cash_target() -> None:
+    from decimal import Decimal
+
+    flat = [100.0] * 1000
+    s = OV.stress_from_series(flat, breadth=0.6)
+    assert s["n_on"] == 0 and not any(s["signals"].values())
+    crash = [100.0] * 900 + [100.0 * (0.97 ** i) for i in range(1, 101)]      # a hundred days of -3 %: under MA200, vol spike, -95 % from high
+    s = OV.stress_from_series(crash, breadth=0.2)
+    assert s["signals"] == {"ma": True, "vol": True, "dd": True, "breadth": True} and s["n_on"] == 4
+    assert OV.stress_on(s, "ma") and OV.stress_on(s, "any2")
+    mild = OV.stress_from_series([100.0 + 0.5 * (i % 2) for i in range(990)] + [99.0] * 10, breadth=0.5)   # a touch under the average only
+    assert mild["signals"]["ma"] and mild["n_on"] == 1 and OV.stress_on(mild, "ma") and not OV.stress_on(mild, "any2")
+    book = {"cash_floor_pct": Decimal("30"), "stress_cash_pct": Decimal("50")}
+    assert OV.cash_target(book, False) == Decimal("0.3") and OV.cash_target(book, True) == Decimal("0.5")
+    assert OV.cash_target({"cash_floor_pct": 0, "stress_cash_pct": 0}, True) == 0 and not OV.uses_cash_buffer({"cash_floor_pct": 0, "stress_cash_pct": 0})
+    assert OV.cash_target({"cash_floor_pct": 30, "stress_cash_pct": 0}, True) == Decimal("0.3")   # no stress level set: the floor holds

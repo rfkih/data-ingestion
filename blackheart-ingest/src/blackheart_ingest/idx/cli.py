@@ -312,12 +312,22 @@ def cmd_overlay(a: argparse.Namespace) -> int:
                 sma = f"{r['sma']:,.0f}" if r["sma"] is not None else "n/a"
                 print(f"regime {'ON (invested)' if r['on'] else 'OFF (cash)'} since check {r['check_date']}: {r['index_code']} {r['close']:,.0f} vs 200-day average {sma}")
             with conn.cursor() as cur:
-                cur.execute("SELECT book, regime_filter, entry_gate, take_profit_pct, trend_exit FROM idx.book ORDER BY book")
+                cur.execute("SELECT book, regime_filter, entry_gate, take_profit_pct, trend_exit, cash_floor_pct, stress_cash_pct, stress_rule FROM idx.book ORDER BY book")
                 for row in cur.fetchall():
-                    row = dict(row) if isinstance(row, dict) else dict(zip(["book", "regime_filter", "entry_gate", "take_profit_pct", "trend_exit"], row, strict=True))
+                    row = dict(row) if isinstance(row, dict) else dict(zip(["book", "regime_filter", "entry_gate", "take_profit_pct", "trend_exit",
+                                                                            "cash_floor_pct", "stress_cash_pct", "stress_rule"], row, strict=True))
                     tp = f"take profit +{row['take_profit_pct']:.0f} %" if row["take_profit_pct"] is not None else "take profit off"
+                    cb = (f"cash buffer {row['cash_floor_pct']:.0f} % -> {row['stress_cash_pct']:.0f} % on stress ({row['stress_rule']})"
+                          if (row["cash_floor_pct"] or row["stress_cash_pct"]) else "cash buffer off")
                     print(f"  {row['book']:6s} regime filter {'on' if row['regime_filter'] else 'off'}, entry gate {'on' if row['entry_gate'] else 'off'}, "
-                          f"trend exit {'on' if row['trend_exit'] else 'off'}, {tp}")
+                          f"trend exit {'on' if row['trend_exit'] else 'off'}, {tp}, {cb}")
+            s = overlay.latest_stress(conn)
+            if s is not None:
+                g = s["signals"]
+                print(f"stress check {s['check_date']}: {s['n_on']} of 4 on  (under MA200 {g['ma']}, vol spike {g['vol']}, >10 % under 52w high {g['dd']}, "
+                      f"breadth<40 % {g['breadth']}; breadth {100 * s['breadth']:.0f} %, vol {100 * s['vol20']:.0f} % vs p80 {100 * s['vol_p80']:.0f} %)"
+                      if s["vol20"] is not None and s["vol_p80"] is not None and s["breadth"] is not None else
+                      f"stress check {s['check_date']}: {s['n_on']} of 4 on")
             for h in overlay.history(conn, 12):
                 print(f"  {h['check_date']} {'on ' if h['on'] else 'off'} {h['close']:,.0f} / {h['sma']:,.0f}" if h["sma"] is not None else f"  {h['check_date']} {'on' if h['on'] else 'off'}")
             return 0
@@ -455,7 +465,8 @@ def cmd_book(a: argparse.Namespace) -> int:
             book.ensure_book(conn, a.book, cash=Decimal(a.amount))
             print(f"{a.book}: cash set to Rp {float(Decimal(a.amount)):,.0f}")
         elif a.sub == "set":
-            fields = {k: v for k, v in (("fee_buy_pct", a.fee_buy), ("fee_sell_pct", a.fee_sell), ("div_tax_pct", a.div_tax), ("broker", a.broker)) if v is not None}
+            fields = {k: v for k, v in (("fee_buy_pct", a.fee_buy), ("fee_sell_pct", a.fee_sell), ("div_tax_pct", a.div_tax), ("broker", a.broker),
+                                        ("cash_floor_pct", a.cash_floor), ("stress_cash_pct", a.stress_cash), ("stress_rule", a.stress_rule)) if v is not None}
             book.ensure_book(conn, a.book, **fields)
             print(f"{a.book}: {book.get_book(conn, a.book)}")
         elif a.sub == "import":
@@ -658,6 +669,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--amount", help="cash amount (cash / paper-seed)")
     p.add_argument("--fee-buy")
     p.add_argument("--fee-sell")
+    p.add_argument("--cash-floor", help="set: standing cash buffer, %% of NAV (0 = off)")
+    p.add_argument("--stress-cash", help="set: cash while the stress detector is on, %% of NAV (0 = off)")
+    p.add_argument("--stress-rule", choices=["ma", "any2"], help="set: the detector (ma = index under MA200; any2 = two of four signals)")
     p.add_argument("--div-tax")
     p.add_argument("--broker")
     p.add_argument("--file")

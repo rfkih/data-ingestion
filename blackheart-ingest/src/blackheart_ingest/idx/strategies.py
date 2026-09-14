@@ -119,6 +119,18 @@ OVERLAYS: list[dict[str, Any]] = [
              "crash insurance; with the crash filter, drawdown 21 %, 2008 flat, 2020 -2 %. Executed one session after the signal (the desk is not automated) it keeps the drawdown "
              "edge and gives up about 1.3 points of CAGR; five sessions late, 2.7 points (research/IDX_EXECUTION_DELAY_2026-09-13.md).",
      "history": {"asym": "asym_rsi"}},
+    {"key": "overlay:cash_buffer", "label": "Cash buffer: 30 % in cash, 50 % under stress", "status": "option",
+     "rule": "Keep cash_floor_pct of NAV in cash at every rebalance; while the stress detector is on, keep stress_cash_pct instead. "
+             "Detector 'ma' = the COMPOSITE under its 200-day average; 'any2' = two of {under MA200, 20-day volatility above its "
+             "3-year 80th percentile, more than 10 % under the 52-week high, fewer than 40 % of names above their MA200}. Checked "
+             "monthly; a ticket moves the book when the target shifts by 5 points or more.",
+     "note": "At 30 % / 50 % on the strict book 2021-2026 (record = the 'ma' detector): 13.4 % a year against 18.3 % for the plain "
+             "rule, Sharpe higher in all four calendars (1.05-1.25 against 0.83-1.11), worst drawdown 15 % against 26 %, the "
+             "2025 dip -9..-10 % against -17..-20 %. From 2008 on the 100-name basket: drawdown 32 % against 56 %, 2008 -28 %, "
+             "2020 -28 %. The detector adds 1-3 points of drawdown protection over a plain 30 % buffer at a cost of about one point "
+             "of return; the buffer itself does most of the work. Missed the pre-registered return floor (75 % of the rule) by two "
+             "points, so an option, not the default. No news or sentiment input yet: the detector reads prices and breadth.",
+     "history": {"cash": "ma"}},
     {"key": "overlay:take_profit", "label": "Take profit: sell a name once it has doubled", "status": "option",
      "rule": "At each monthly check, a held name at or above twice its purchase price is sold and its cash waits for the next "
              "rebalance. Set per book (take profit %, 100 tested).",
@@ -247,6 +259,16 @@ def history_rows_from_json(doc: dict[str, Any]) -> list[dict[str, Any]]:
                     rows.append({"strategy": s["key"], "size": 3, "month": int(m), "source": f"top3:{hk}", "n_trials": doc.get("n_trials"),
                                  "stats": {k: v.get(k) for k in STATS}, "yearly": v.get("yearly"), "periods": v.get("periods"),
                                  "holdings": _holdings(mdoc[hk].get("picks")), "generated_at": doc.get("generated")})
+        return rows
+    if "part_a" in doc and any("cash30" in m for m in (doc.get("part_a") or {}).values()):   # research/idx_cash_buffer.py
+        for m, mdoc in doc["part_a"].items():
+            for s in OVERLAYS:
+                hk = s["history"].get("cash")
+                if hk and hk in mdoc:
+                    v = mdoc[hk]
+                    rows.append({"strategy": s["key"], "size": 0, "month": int(m), "source": f"cash:{hk}", "n_trials": doc.get("n_trials"),
+                                 "stats": {k: v.get(k) for k in STATS}, "yearly": v.get("yearly"), "periods": v.get("periods"),
+                                 "holdings": None, "generated_at": doc.get("generated")})
         return rows
     if "part_b" in doc:                                                   # research/idx_trend_overlay.py
         for m, mdoc in (doc["part_b"] or {}).items():

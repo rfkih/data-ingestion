@@ -10,6 +10,10 @@
   trend_exit     at each monthly check, a held name that was above its 200-day average at the previous check and is
                  below it now (a trend break) is sold with an "exits" ticket. With entry_gate this is the asymmetric rule
                  of research/IDX_ASYMMETRIC_2026-09-13.md: sell the break, buy the oversold.
+  cash buffer    cash_floor_pct of NAV stays in cash at every rebalance; stress_cash_pct replaces it while the stress
+                 detector (stress_rule 'ma' or 'any2') is on. The monthly check records the four stress signals and, when
+                 the book's cash target moves by more than 5 points, issues a rebalance ticket at the new target
+                 (research/IDX_CASH_BUFFER_2026-09-14.md).
 
 The rules themselves are pure (``regime_from_closes``, ``gate``); the rest reads the tables and builds tickets, which the
 operator (live) or the paper fill (paper) then works. Every check is recorded in idx.regime_check.
@@ -31,6 +35,11 @@ SMA_DAYS = 200
 INDEX = "COMPOSITE"
 RSI_N = 14
 RSI_MAX = Decimal(30)
+VOL_N, VOL_WINDOW, VOL_MIN, VOL_Q = 20, 750, 250, 0.8      # realised-vol spike: 20-day vol above its trailing 3-year 80th percentile
+DD_LIMIT = -0.10                                             # index more than 10 % under its 252-day high
+BREADTH_MIN = 0.40                                           # fewer than 40 % of names above their own 200-day average
+STRESS_RULES = ("ma", "any2")
+CASH_MOVE_MIN = Decimal("0.05")                              # re-issue a ticket only when the cash target moves 5+ points
 
 
 def _rows(conn: psycopg.Connection, sql: str, params: tuple, cols: list[str]) -> list[dict[str, Any]]:
@@ -124,6 +133,108 @@ def trend_breaks(prev: dict[str, dict[str, Any]], now: dict[str, dict[str, Any]]
 # ---------------------------------------------------------------------------
 # signals from the tables
 # ---------------------------------------------------------------------------
+def stress_from_series(closes: list[Any], breadth: float | None) -> dict[str, Any]:
+    """Pure. Oldest-first index closes (up to ~1000 bars) and today's breadth -> the four stress signals and their inputs."""
+    import math
+    xs = [float(c) for c in closes]
+    n = len(xs)
+    close = xs[-1] if n else float("nan")
+    sma = sum(xs[-SMA_DAYS:]) / SMA_DAYS if n >= SMA_DAYS else None
+    vol20 = vol_p80 = None
+    if n >= VOL_N + 1:
+        rets = [math.log(b / a) for a, b in pairwise(xs) if a > 0 and b > 0]
+        vols = []
+        for i in range(VOL_N, len(rets) + 1):
+            w = rets[i - VOL_N:i]
+            m = sum(w) / VOL_N
+            vols.append(math.sqrt(sum((x - m) ** 2 for x in w) / (VOL_N - 1)) * math.sqrt(252))
+        vol20 = vols[-1]
+        hist = vols[-VOL_WINDOW:]
+        if len(hist) >= VOL_MIN:
+            vol_p80 = sorted(hist)[min(len(hist) - 1, round(VOL_Q * (len(hist) - 1)))]
+    hi = max(xs[-252:]) if n >= 120 else None
+    dd = close / hi - 1 if hi else None
+    s = {"ma": bool(sma is not None and close < sma), "vol": bool(vol20 is not None and vol_p80 is not None and vol20 > vol_p80),
+         "dd": bool(dd is not None and dd < DD_LIMIT), "breadth": bool(breadth is not None and breadth < BREADTH_MIN)}
+    return {"close": close, "sma": sma, "vol20": vol20, "vol_p80": vol_p80, "dd": dd, "breadth": breadth, "signals": s, "n_on": sum(s.values())}
+
+
+def stress_on(sig: dict[str, Any], rule: str) -> bool:
+    """Pure. Whether the detector fires under the book's rule."""
+    if rule == "any2":
+        return int(sig.get("n_on", 0)) >= 2
+    return bool(sig["signals"]["ma"])
+
+
+def cash_target(book: dict[str, Any], stressed: bool) -> Decimal:
+    """Pure. The fraction of NAV the book keeps in cash: the stress level while the detector is on, else the floor."""
+    floor = Decimal(str(book.get("cash_floor_pct") or 0)) / 100
+    stress = Decimal(str(book.get("stress_cash_pct") or 0)) / 100
+    return max(floor, stress) if stressed and stress > 0 else floor
+
+
+def uses_cash_buffer(book: dict[str, Any]) -> bool:
+    return bool(Decimal(str(book.get("cash_floor_pct") or 0)) > 0 or Decimal(str(book.get("stress_cash_pct") or 0)) > 0)
+
+
+def breadth_asof(conn: psycopg.Connection, D: date) -> float | None:
+    """Share of names with a full 200-bar history whose last adjusted close is above their own 200-day average."""
+    rows = _rows(conn, """
+        WITH last AS (
+            SELECT code, close * adj_factor AS c, row_number() OVER (PARTITION BY code ORDER BY trade_date DESC) AS rn
+              FROM idx.bar WHERE source = 'idx' AND trade_date <= %s AND close IS NOT NULL AND close > 0),
+        agg AS (SELECT code, count(*) AS n, avg(c) AS sma, max(CASE WHEN rn = 1 THEN c END) AS last_c FROM last WHERE rn <= %s GROUP BY code)
+        SELECT count(*) FILTER (WHERE n = %s) AS n_valid, count(*) FILTER (WHERE n = %s AND last_c > sma) AS n_above FROM agg""",
+                 (D, SMA_DAYS, SMA_DAYS, SMA_DAYS), ["n_valid", "n_above"])
+    if not rows or not rows[0]["n_valid"]:
+        return None
+    return float(rows[0]["n_above"]) / float(rows[0]["n_valid"])
+
+
+def stress_signals(conn: psycopg.Connection, D: date) -> dict[str, Any]:
+    rows = _rows(conn, "SELECT trade_date AS d, close FROM idx.index_daily WHERE index_code = %s AND trade_date <= %s ORDER BY trade_date DESC LIMIT %s",
+                 (INDEX, D, VOL_WINDOW + VOL_N + 260), ["d", "close"])
+    if not rows:
+        raise ValueError(f"no {INDEX} history on or before {D}")
+    rows.reverse()
+    sig = stress_from_series([r["close"] for r in rows], breadth_asof(conn, D))
+    sig.update({"check_date": rows[-1]["d"], "index_code": INDEX})
+    return sig
+
+
+STRESS_COLS = ["check_date", "index_code", "close", "sma", "vol20", "vol_p80", "dd_pct", "breadth_pct", "s_ma", "s_vol", "s_dd", "s_breadth", "n_on", "created_at"]
+
+
+def record_stress(conn: psycopg.Connection, s: dict[str, Any]) -> None:
+    g = s["signals"]
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO idx.stress_check (check_date, index_code, close, sma, vol20, vol_p80, dd_pct, breadth_pct, s_ma, s_vol, s_dd, s_breadth, n_on)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (check_date) DO UPDATE SET close = EXCLUDED.close, sma = EXCLUDED.sma, vol20 = EXCLUDED.vol20, vol_p80 = EXCLUDED.vol_p80,
+                           dd_pct = EXCLUDED.dd_pct, breadth_pct = EXCLUDED.breadth_pct, s_ma = EXCLUDED.s_ma, s_vol = EXCLUDED.s_vol, s_dd = EXCLUDED.s_dd,
+                           s_breadth = EXCLUDED.s_breadth, n_on = EXCLUDED.n_on""",
+                    (s["check_date"], s["index_code"], s["close"], s["sma"], s["vol20"], s["vol_p80"], s["dd"], s["breadth"],
+                     g["ma"], g["vol"], g["dd"], g["breadth"], s["n_on"]))
+    conn.commit()
+
+
+def _to_stress(row: dict[str, Any]) -> dict[str, Any]:
+    f = lambda v: None if v is None else float(v)  # noqa: E731
+    return {"check_date": row["check_date"], "index_code": row["index_code"], "close": f(row["close"]), "sma": f(row["sma"]), "vol20": f(row["vol20"]),
+            "vol_p80": f(row["vol_p80"]), "dd": f(row["dd_pct"]), "breadth": f(row["breadth_pct"]),
+            "signals": {"ma": bool(row["s_ma"]), "vol": bool(row["s_vol"]), "dd": bool(row["s_dd"]), "breadth": bool(row["s_breadth"])}, "n_on": int(row["n_on"])}
+
+
+def latest_stress(conn: psycopg.Connection) -> dict[str, Any] | None:
+    rows = _rows(conn, f"SELECT {', '.join(STRESS_COLS)} FROM idx.stress_check ORDER BY check_date DESC LIMIT 1", (), STRESS_COLS)
+    return _to_stress(rows[0]) if rows else None
+
+
+def stress_history(conn: psycopg.Connection, limit: int = 24) -> list[dict[str, Any]]:
+    rows = _rows(conn, f"SELECT {', '.join(STRESS_COLS)} FROM idx.stress_check ORDER BY check_date DESC LIMIT %s", (limit,), STRESS_COLS)
+    return [_to_stress(r) for r in rows]
+
+
 def index_regime(conn: psycopg.Connection, D: date) -> dict[str, Any]:
     rows = _rows(conn, "SELECT trade_date AS d, close FROM idx.index_daily WHERE index_code = %s AND trade_date <= %s ORDER BY trade_date DESC LIMIT %s",
                  (INDEX, D, SMA_DAYS), ["d", "close"])
@@ -240,16 +351,39 @@ def monthly_check(conn: psycopg.Connection, D: date, build: bool = True) -> dict
     prev = latest(conn, r["check_date"])
     if build:
         record(conn, r)
-    report: dict[str, Any] = {"regime": r, "previous_on": prev["on"] if prev else None, "books": []}
-    for row in _rows(conn, "SELECT book FROM idx.book ORDER BY book", (), ["book"]):
-        b = row["book"]
-        meta = bk.get_book(conn, b)
-        if not (meta.get("regime_filter") or meta.get("entry_gate") or meta.get("take_profit_pct") or meta.get("trend_exit")):
+    report: dict[str, Any] = {"regime": r, "previous_on": prev["on"] if prev else None, "books": [], "stress": None}
+    books = [row["book"] for row in _rows(conn, "SELECT book FROM idx.book ORDER BY book", (), ["book"])]
+    metas = {b: bk.get_book(conn, b) for b in books}
+    stress = None
+    if any(uses_cash_buffer(m) for m in metas.values()):
+        stress = stress_signals(conn, D)
+        report["stress"] = stress
+        if build:
+            record_stress(conn, stress)
+    for b in books:
+        meta = metas[b]
+        if not (meta.get("regime_filter") or meta.get("entry_gate") or meta.get("take_profit_pct") or meta.get("trend_exit") or uses_cash_buffer(meta)):
             continue
-        positions = bk.snapshot(conn, b)["positions"]
+        snap = bk.snapshot(conn, b)
+        positions = snap["positions"]
         held = {p["code"] for p in positions}
         entry: dict[str, Any] = {"book": b, "action": None, "ticket": None, "names": []}
         report["books"].append(entry)
+        if stress is not None and uses_cash_buffer(meta):
+            want = cash_target(meta, stress_on(stress, meta.get("stress_rule") or "ma"))
+            nav = Decimal(str(snap.get("nav") or 0))
+            have = (Decimal(str(meta["cash"])) / nav) if nav > 0 else None
+            entry["cash_target"] = str(want)
+            if have is not None and abs(have - want) > CASH_MOVE_MIN:
+                entry["action"] = f"cash {round(100 * float(have))}% -> {round(100 * float(want))}%"
+                if build:
+                    res = tk.build(conn, b, mode="rebalance", run_date=D)
+                    tid = tk.store(conn, res, notes=f"cash target {round(100 * float(want))} % on {stress['check_date']} "
+                                                    f"({'stress on' if stress_on(stress, meta.get('stress_rule') or 'ma') else 'stress off'}, {stress['n_on']} of 4 signals)")
+                    entry["ticket"] = tid
+                    runlog.alert(conn, "warning" if want > have else "info", f"ticket:{b}",
+                                 f"cash target {round(100 * float(want))} % of NAV ({stress['n_on']} of 4 stress signals on, rule {meta.get('stress_rule') or 'ma'}): "
+                                 f"ticket #{tid} moves the {b} book from {round(100 * float(have))} % cash. Work it at the next open.")
         if meta.get("regime_filter"):
             if not r["on"] and held:
                 entry["action"] = "cash"

@@ -84,9 +84,9 @@ def default_fee(gross: Decimal, side: str, book: dict[str, Any]) -> Decimal:
 # ---------------------------------------------------------------------------
 def get_book(conn: psycopg.Connection, book: str) -> dict[str, Any]:
     rows = _rows(conn, "SELECT book, cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note, strategy, max_names, regime_filter, entry_gate, "
-                       "take_profit_pct, trend_exit FROM idx.book WHERE book = %s",
+                       "take_profit_pct, trend_exit, cash_floor_pct, stress_cash_pct, stress_rule FROM idx.book WHERE book = %s",
                  (book,), ["book", "cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
-                           "take_profit_pct", "trend_exit"])
+                           "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule"])
     if not rows:
         raise ValueError(f"no book {book!r}")
     return rows[0]
@@ -100,7 +100,11 @@ def ensure_book(conn: psycopg.Connection, book: str, **fields: Any) -> None:
             cur.execute("UPDATE idx.book SET strategy = %s WHERE book = %s", (deployed(), book))
         for k, v in fields.items():
             if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
-                     "take_profit_pct", "trend_exit"):
+                     "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule"):
+                if k in ("cash_floor_pct", "stress_cash_pct") and v is not None and not 0 <= Decimal(str(v)) <= 80:
+                    raise ValueError(f"{k} must be between 0 and 80")
+                if k == "stress_rule" and v not in ("ma", "any2"):
+                    raise ValueError("stress_rule must be 'ma' or 'any2'")
                 if k == "take_profit_pct":
                     v = None if v in (None, "", 0, "0") else Decimal(str(v))
                     if v is not None and v <= 0:
