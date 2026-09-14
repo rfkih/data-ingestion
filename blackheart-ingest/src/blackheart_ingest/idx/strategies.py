@@ -61,8 +61,9 @@ CATALOG: list[dict[str, Any]] = [
      "note": "The operator's 'three names with the most upside' (research/IDX_TOP3_UPSIDE_2026-09-14.md, nine definitions tested). "
              "Momentum was the only cut above the full list in all four calendars (31 / 50 / 22 / 15 % CAGR against 18 / 29 / 18 / "
              "14 %), but one name carries each calendar (TAPG, PTRO, ENRG, DSNG): without it 25 / 17 / 18 / 9 %, ahead in two of four, "
-             "and the worst drawdown is 36 % against 25 %. A lottery ticket that paid four times, not an edge; kept for a book that "
-             "wants to run it small.",
+             "and the worst drawdown is 36 % against 25 %. From 2008 on the 100-name liquid basket (price only, survivors) the same cut "
+             "averages 2.5 % a year with a 94 % drawdown against the basket's 10.9 % and 54 % (IDX_MOMENTUM3_2008): the last five years "
+             "were the exception. A lottery ticket that paid four times, not an edge; kept for a book that wants to run it small.",
      "params": {"gate": "strict", "order": "mom", "weight": "eq", "size": 3},
      "history": {"top3": "momentum"}},
     {"key": "value", "label": "Pure earnings yield", "status": "tested",
