@@ -133,3 +133,24 @@ def test_history_rows_from_the_overlay_format() -> None:
     assert by[("overlay:entry_gate", 0, 5)]["stats"]["total_pct"] == 131.0 and by[("overlay:none", 0, 5)]["stats"]["mdd_pct"] == 18.0
     cat = ST.catalog()
     assert {s["key"] for s in cat} >= {"overlay:regime", "overlay:entry_gate"} and ST.get_any("overlay:regime")["status"] == "option"
+
+
+def test_a_family_can_carry_its_own_cut_and_top3_records_import() -> None:
+    from decimal import Decimal
+
+    from blackheart_ingest.idx import strategies as ST
+
+    rows = []
+    for i in range(20):
+        rows.append({"code": f"C{i:02d}", "ep": Decimal(20 - i) / 100, "bp": Decimal(1), "dy": Decimal("0.03"), "mom": Decimal(i) / 10,
+                     "np_yoy": None, "gate_loose": True, "gate_strict": True, "tradable": True, "price": Decimal(100)})
+    out = ST.pick("strict_top3_mom", rows)
+    chosen = [r["code"] for r in out if r["selected"]]
+    assert len(chosen) == 3 and all(abs(r["weight"] - Decimal(1) / 3) < Decimal("0.001") for r in out if r["selected"])
+    doc = {"generated": "2026-09-14", "n_trials": 146, "verdicts": {},
+           "months": {"5": {"strict_full": {"stats": {"cagr_pct": 18.3}},
+                            "momentum": {"stats": {"cagr_pct": 31.2, "sharpe": 1.03, "mdd_pct": 30.0, "total_pct": 200.0},
+                                         "picks": {"2021-05-03": ["AKRA", "ENRG", "WIIM"]}}}}}
+    hist = ST.history_rows_from_json(doc)
+    assert len(hist) == 1 and hist[0]["strategy"] == "strict_top3_mom" and hist[0]["size"] == 3 and hist[0]["stats"]["cagr_pct"] == 31.2
+    assert hist[0]["holdings"] == [{"date": "2021-05-03", "n": 3, "names": ["AKRA", "ENRG", "WIIM"]}]

@@ -55,6 +55,16 @@ CATALOG: list[dict[str, Any]] = [
              "eight points in every calendar. Offered for a book that wants the extra input; not the default.",
      "params": {"gate": "strict", "order": "composite", "weight": "eq", "keys": ["ep", "bp", "dy", "conv"]},
      "history": {"conv": "strict+conv", "conv10": "strict10+conv"}},
+    {"key": "strict_top3_mom", "label": "Strict list, three names by momentum", "status": "tested",
+     "rule": "The strict composite's list, cut to the three names with the highest 12-month return, equal weight (a third each), "
+             "held to the next annual rebalance.",
+     "note": "The operator's 'three names with the most upside' (research/IDX_TOP3_UPSIDE_2026-09-14.md, nine definitions tested). "
+             "Momentum was the only cut above the full list in all four calendars (31 / 50 / 22 / 15 % CAGR against 18 / 29 / 18 / "
+             "14 %), but one name carries each calendar (TAPG, PTRO, ENRG, DSNG): without it 25 / 17 / 18 / 9 %, ahead in two of four, "
+             "and the worst drawdown is 36 % against 25 %. A lottery ticket that paid four times, not an edge; kept for a book that "
+             "wants to run it small.",
+     "params": {"gate": "strict", "order": "mom", "weight": "eq", "size": 3},
+     "history": {"top3": "momentum"}},
     {"key": "value", "label": "Pure earnings yield", "status": "tested",
      "rule": "The light gate, then the cheapest names by earnings yield alone, equal weight.",
      "note": "The highest total return at May and the most fragile: +55 % at August, holds Sritex to zero, deeper drawdowns. "
@@ -171,6 +181,7 @@ def pick(key: str, rows: list[dict[str, Any]], size: int | None = None, weight: 
         f = p["order"]
         ordered = sorted(fifth, key=lambda r: (r.get(f) is None, -(Decimal(r[f]) if r.get(f) is not None else 0), r["code"]))
         chosen = [r for r in ordered if r.get(f) is not None]
+    size = size or p.get("size")                                         # a family may carry its own cut (the three-name sleeves)
     if size:
         chosen = chosen[:size]
     w = weights([r["code"] for r in chosen], weight or p["weight"])
@@ -223,6 +234,16 @@ def history_rows_from_json(doc: dict[str, Any]) -> list[dict[str, Any]]:
                     rows.append({"strategy": s["key"], "size": 0, "month": int(m), "source": f"sell:{hk}", "n_trials": doc.get("n_trials"),
                                  "stats": {k: v.get(k) for k in STATS}, "yearly": v.get("yearly"), "periods": v.get("periods"),
                                  "holdings": None, "generated_at": doc.get("generated")})
+        return rows
+    if "verdicts" in doc and any("strict_full" in m for m in months.values()):   # research/idx_top3_upside.py
+        for m, mdoc in months.items():
+            for s in CATALOG:
+                hk = s["history"].get("top3")
+                if hk and hk in mdoc:
+                    v = mdoc[hk]["stats"]
+                    rows.append({"strategy": s["key"], "size": 3, "month": int(m), "source": f"top3:{hk}", "n_trials": doc.get("n_trials"),
+                                 "stats": {k: v.get(k) for k in STATS}, "yearly": v.get("yearly"), "periods": v.get("periods"),
+                                 "holdings": _holdings(mdoc[hk].get("picks")), "generated_at": doc.get("generated")})
         return rows
     if "part_b" in doc:                                                   # research/idx_trend_overlay.py
         for m, mdoc in (doc["part_b"] or {}).items():
