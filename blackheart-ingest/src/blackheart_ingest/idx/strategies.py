@@ -44,7 +44,9 @@ CATALOG: list[dict[str, Any]] = [
      "note": "Led the rule in all four calendars in rev. 3 (10 to 15 names at its natural size). Cut to ten it matched or beat "
              "the rule everywhere with a higher Sharpe. Every later question (ten names, weights, holding rules, quality, cash "
              "conversion) left it the best robust choice, and the books follow it since 2026-09-12 by the operator's decision, "
-             "ahead of the pre-registered May 2027 date.",
+             "ahead of the pre-registered May 2027 date. Started one year earlier, at the May 2020 rebalance (FY2019 audits, the "
+             "earliest IDX serves): 22.1 / 18.2 / 18.1 % a year at May / Aug / Nov with the same 22-25 % drawdowns "
+             "(IDX_VALUE_QUALITY_2020); the rebound year was +22..+44 %, behind the liquid basket in two calendars of three.",
      "params": {"gate": "strict", "order": "composite", "weight": "eq"},
      "history": {"rev3": "composite_q", "topn": "strict/eq"}},
     {"key": "strict_cash", "label": "Strict composite plus cash conversion", "status": "tested",

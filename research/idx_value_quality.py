@@ -324,8 +324,11 @@ def main():
     ap.add_argument("--months", default="5,2,8,11", help="rebalance months; the first is the reported one")
     ap.add_argument("--no-spread", action="store_true", help="commission only (25 bps/side), no half-tick spread")
     ap.add_argument("--out", default=os.path.join(OUTDIR, "value_quality_results.json"))
+    ap.add_argument("--first-year", type=int, default=None, help="first rebalance year (default 2021; 2020 needs the FY2019 audits parsed)")
     a = ap.parse_args()
     months = [int(m) for m in a.months.split(",")]
+    if a.first_year:
+        globals()["FIRST_YEAR"] = a.first_year
     conn = connect()
     close, vol, delisted, div, ix = load(conn)
     print(f"loaded: {close.shape[1]} codes, {len(close)} days ({close.index[0].date()}..{close.index[-1].date()}), "
