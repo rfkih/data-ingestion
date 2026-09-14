@@ -22,6 +22,7 @@ from __future__ import annotations
 import http.cookiejar
 import json
 import logging
+import os
 import threading
 import time
 import urllib.error
@@ -106,8 +107,15 @@ def yyyymmdd(d: date) -> str:
 
 
 def _urllib_fetcher(timeout: float = 60.0) -> FetchFn:
-    """Default transport: one opener with a cookie jar for the client's lifetime."""
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    """Default transport: one opener with a cookie jar for the client's lifetime. INGEST_IDX_PROXY (e.g.
+    http://127.0.0.1:8118, an HTTP CONNECT proxy reached over an SSH forward) routes the calls through another host for
+    a recovery session; unset = this machine's own address."""
+    handlers: list[urllib.request.BaseHandler] = [urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())]
+    proxy = os.environ.get("INGEST_IDX_PROXY", "").strip()
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        logger.info("idx client: via proxy %s", proxy)
+    opener = urllib.request.build_opener(*handlers)
 
     def fetch(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
         req = urllib.request.Request(url, headers=headers)
