@@ -161,4 +161,8 @@ def build(conn: psycopg.Connection, code: str, as_of: date | None = None) -> str
             o.append(f"- {a['ex_date']} {a['kind']} factor {float(a['factor']):.4f}")
         for x in divs[:5]:
             o.append(f"- {x['ex_date']} cash dividend Rp {float(x['dps']):,.1f}/share ({x['source']})")
+    from . import annual
+    plan = annual.render(conn, code)
+    if plan:
+        o += ["", plan]
     return "\n".join(o)

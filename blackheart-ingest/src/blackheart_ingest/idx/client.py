@@ -54,7 +54,7 @@ ENDPOINTS: dict[str, tuple[str, str, str | None]] = {
     "trading_info": ("/primary/ListedCompany/GetTradingInfoSS?code={code}&start=0&length=10000",
                      "/id/perusahaan-tercatat/profil-perusahaan-tercatat/{code}", "replies"),
     "financial_report": ("/primary/ListedCompany/GetFinancialReport?indexFrom={index_from}&pageSize={page_size}"
-                         "&year={year}&reportType=rdf&EmitenType=s&periode={period}&kodeEmiten={code}"
+                         "&year={year}&reportType={report_type}&EmitenType=s&periode={period}&kodeEmiten={code}"
                          "&SortColumn=KodeEmiten&SortOrder=asc",
                          "/id/perusahaan-tercatat/laporan-keuangan-dan-tahunan/", "Results"),
     "announcement": ("/primary/ListedCompany/GetAnnouncement?kodeEmiten={code}&indexFrom={index_from}"
@@ -156,10 +156,11 @@ class IdxClient:
         return self.fetch("trading_info", key=code.upper(), code=quote(code.upper()))
 
     def financial_report(self, year: int, period: str, code: str = "", index_from: int = 0,
-                         page_size: int = 100) -> FetchResult:
-        key = f"{year}:{period}:{code.upper() or '*'}:{index_from}"
+                         page_size: int = 100, report_type: str = "rdf") -> FetchResult:
+        """``report_type`` rdf = financial statements (the default, key unchanged), ar = annual reports."""
+        key = f"{year}:{period}:{code.upper() or '*'}:{index_from}" + ("" if report_type == "rdf" else f":{report_type}")
         return self.fetch("financial_report", key=key, year=year, period=period,
-                          code=quote(code.upper()), index_from=index_from, page_size=page_size)
+                          code=quote(code.upper()), index_from=index_from, page_size=page_size, report_type=report_type)
 
     def announcement(self, code: str, date_from: date, date_to: date, index_from: int = 0,
                      page_size: int = 100) -> FetchResult:

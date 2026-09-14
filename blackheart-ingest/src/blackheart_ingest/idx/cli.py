@@ -301,6 +301,59 @@ def cmd_card(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_annual(a: argparse.Namespace) -> int:
+    from . import annual
+    from .metrics import universe_codes
+    codes = [c.strip().upper() for c in a.codes.split(",")] if a.codes else None
+    years = _years(a.years) if a.years else None
+    with get_connection() as conn:
+        if a.sub == "discover":
+            with IdxClient() as cl:
+                for y in years or [date.today().year - 1]:
+                    r = annual.discover(conn, cl, y)
+                    print(f"annual discover {y}: {r.status} listed={r.rows_in} stored={r.rows_out}" + (f" {r.error}" if r.error else ""))
+            return 0
+        if a.sub == "download":
+            if a.list:
+                codes = (codes or []) + _list_codes(conn)
+            if a.universe:
+                codes = (codes or []) + universe_codes(conn)
+            with IdxClient() as cl:
+                r = annual.download(conn, cl, codes=codes, years=years, limit=a.limit)
+            print(f"annual download: {r.status} pending={r.rows_in} downloaded={r.rows_out}")
+            for w in r.warnings[:10]:
+                print("  !", w)
+            return 0
+        if a.sub == "extract":
+            r = annual.extract(conn, codes=codes, years=years, reparse=a.reparse)
+            print(f"annual extract: {r.status} reports={r.rows_in} sections={r.rows_out}")
+            for k, v in r.detail.items():
+                print(f"  {k}: {', '.join(v)}")
+            return 0
+        if a.sub == "show":
+            print(annual.render(conn, a.codes.upper()) or f"no annual-report excerpts for {a.codes}")
+            return 0
+        for row in annual.status(conn):
+            print(f"  FY{row['fiscal_year']} {row['parse_status']:16s} {row['n']}")
+    return 0
+
+
+def _list_codes(conn) -> list[str]:
+    """Today's selected names (the rule) plus the strict list plus every book's holdings."""
+    from . import strategies
+    cols = ["code", "rank", "selected", "ep", "bp", "dy", "np_yoy", "mom", "gate_loose", "gate_strict", "strict_fails", "warnings", "sector"]
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(run_date) FROM idx.candidate")
+        row = cur.fetchone()
+        D = next(iter(row.values())) if isinstance(row, dict) else row[0]
+        cur.execute(f"SELECT {', '.join(cols)} FROM idx.candidate WHERE run_date = %s ORDER BY rank", (D,))
+        cands = [r if isinstance(r, dict) else dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+        codes = {r["code"] for r in cands if r["selected"]} | {r["code"] for r in strategies.pick("strict", cands) if r["selected"]}
+        cur.execute("SELECT DISTINCT code FROM idx.fill")
+        codes |= {(r["code"] if isinstance(r, dict) else r[0]) for r in cur.fetchall()}
+    return sorted(codes)
+
+
 def cmd_macro(a: argparse.Namespace) -> int:
     from . import macro
     with get_connection() as conn:
@@ -666,6 +719,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["list", "import-history"])
     p.add_argument("files", nargs="*")
     p.set_defaults(fn=cmd_strategies)
+    p = sub.add_parser("annual", help="annual reports: discover [--years] | download [--codes|--list|--universe] [--years] [--limit] | extract [--codes] [--years] [--reparse] | status | show CODE")
+    p.add_argument("sub", choices=["discover", "download", "extract", "status", "show"])
+    p.add_argument("--codes", help="comma list, or the code for `show`")
+    p.add_argument("--years", help="e.g. 2024-2025 or 2025")
+    p.add_argument("--list", action="store_true", help="download: today's lists and book holdings")
+    p.add_argument("--universe", action="store_true", help="download: the whole liquid universe (large)")
+    p.add_argument("--limit", type=int)
+    p.add_argument("--reparse", action="store_true")
+    p.set_defaults(fn=cmd_annual)
     p = sub.add_parser("macro", help="macro series: pull [--keys a,b] [--full] | show")
     p.add_argument("sub", choices=["pull", "show"])
     p.add_argument("--keys", help="comma list of series keys (default all)")

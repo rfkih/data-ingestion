@@ -175,6 +175,20 @@ def run_macro() -> None:
         logger.info("idx macro %s rows=%s failed=%s", r.status, r.rows_out, r.detail.get("failed"))
 
 
+def run_annual() -> None:
+    """Annual reports for today's lists and holdings: discover this year and last, download, extract the plan pages."""
+    from . import annual
+    from .cli import _list_codes
+    with get_connection() as conn, IdxClient() as cl:
+        y = today_wib().year
+        for year in (y - 1, y):
+            annual.discover(conn, cl, year)
+        r = annual.download(conn, cl, codes=_list_codes(conn), years=[y - 1, y])
+        e = annual.extract(conn)
+        _fail_alert(conn, r)
+        logger.info("idx annual: downloaded=%s extracted sections=%s", r.rows_out, e.rows_out)
+
+
 def check_no_bar() -> None:
     d = today_wib()
     if d.weekday() >= 5:
@@ -210,6 +224,7 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(check_no_bar, CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=WIB), id="no_bar_alert")
     s.add_job(run_announce_recent, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="announce_recent")
     s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=7, minute=30, timezone=WIB), id="macro")
+    s.add_job(run_annual, CronTrigger(day=6, hour=10, minute=0, timezone=WIB), id="annual")
     s.add_job(run_fundamentals, CronTrigger(day_of_week="mon-fri", hour=21, minute=0, timezone=WIB), id="fundamentals")
     s.add_job(run_fundamentals, CronTrigger(day_of_week="sat", hour=9, minute=0, timezone=WIB), id="fundamentals_full",
               kwargs={"previous_year": True})
