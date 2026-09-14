@@ -29,23 +29,39 @@ JOB = "idx.annual"
 PAGE = 100
 MAX_CHARS = 6000
 
-# section key -> (label, heading patterns). Uppercase headings are what the report's own section titles look like;
-# matching is case-sensitive on purpose so running text and the table of contents do not count.
+# section key -> (label, heading patterns). A heading is a SHORT line (see HEADING_MAX) that starts with one of these,
+# matched case-insensitively: reports title these sections in upper case, title case or English, and the same words in
+# running text sit on long lines, which do not count.
 SECTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("proyeksi", "Proyeksi dan target tahun depan",
-     (r"PROYEKSI KINERJA", r"PROYEKSI (PERUSAHAAN|USAHA|TAHUN)", r"TARGET (TAHUN )?20\d\d", r"RKAP 20\d\d", r"PROJECTION FOR 20\d\d", r"20\d\d TARGETS?")),
+     (r"proyeksi (kinerja|perusahaan|usaha|tahun|20\d\d)", r"target(,)? realisasi dan proyeksi", r"target (tahun )?20\d\d", r"rkap 20\d\d",
+      r"(company )?(performance )?projection(s)? (for )?20\d\d", r"20\d\d (targets?|projection)", r"pandangan 20\d\d", r"20\d\d outlook", r"outlook 20\d\d")),
     ("prospek", "Prospek usaha",
-     (r"PROSPEK USAHA", r"PROSPEK BISNIS", r"BUSINESS PROSPECTS?", r"PROSPEK DAN STRATEGI")),
+     (r"prospek (usaha|bisnis|perusahaan|perseroan|industri|ke depan|20\d\d)", r"business (prospects?|outlook)", r"prospek dan (strategi|tantangan)",
+      r"prospects? (for|in) 20\d\d", r"tinjauan prospek")),
     ("strategi", "Strategi",
-     (r"STRATEGI (PERUSAHAAN|USAHA|BISNIS|KORPORAT|PERSEROAN|TAHUN 20\d\d|20\d\d)", r"(BUSINESS|CORPORATE|COMPANY) STRATEG(Y|IES)",
-      r"ARAH(AN)? (STRATEGIS|MASA DEPAN|KE DEPAN)", r"INISIATIF STRATEGIS", r"STRATEGIC (INITIATIVES|DIRECTION)")),
+     (r"strategi (perusahaan|usaha|bisnis|korporat|perseroan|pengembangan|tahun 20\d\d|20\d\d|dan kebijakan|ke depan)", r"fokus strategi",
+      r"(business|corporate|company) strateg(y|ies)", r"arah(an)? (strategis|masa depan|ke depan)", r"inisiatif strategis", r"strategic (initiatives|direction|priorities)")),
     ("rencana", "Rencana kerja dan belanja modal",
-     (r"RENCANA (KERJA|BISNIS|STRATEGIS|PENGEMBANGAN|INVESTASI)", r"BELANJA MODAL", r"CAPITAL EXPENDITURES?", r"(WORK|BUSINESS) PLAN 20\d\d")),
+     (r"rencana (kerja|bisnis|strategis|pengembangan|investasi|usaha|20\d\d|tahun 20\d\d)", r"belanja modal", r"capital expenditures?",
+      r"(work|business) plan (for )?20\d\d", r"rencana dan (target|strategi)")),
     ("risiko", "Risiko usaha",
-     (r"FAKTOR RISIKO", r"RISIKO (USAHA|UTAMA|BISNIS)", r"RISK FACTORS", r"(BUSINESS|KEY) RISKS")),
+     (r"faktor risiko", r"risiko (usaha|utama|bisnis|yang dihadapi)", r"risk factors", r"(business|key|principal) risks", r"peluang dan risiko", r"opportunities and risks")),
     ("dividen", "Kebijakan dividen",
-     (r"KEBIJAKAN DIVIDEN", r"DIVIDEND POLICY")),
+     (r"kebijakan dividen", r"dividend policy")),
 )
+HEADING_MAX = 60
+SMALL_WORDS = {"dan", "and", "of", "for", "the", "atas", "untuk", "di", "ke", "&", "-", "serta", "tahun", "year", "in", "on", "to", "at", "yang", "dengan"}
+
+
+def looks_like_heading(s: str) -> bool:
+    """Pure. Upper case, or title case with the usual small words in lower case; a wrapped sentence fragment is neither."""
+    words = [w for w in re.split(r"[\s,;:()\[\]\"'“”/|]+", s) if w and any(ch.isalpha() for ch in w)]
+    if not words:
+        return False
+    if all(w.upper() == w for w in words):
+        return True
+    return all(w[0].isupper() or w.lower() in SMALL_WORDS for w in words)
 ORDER = [s[0] for s in SECTIONS]
 LABELS = {s[0]: s[1] for s in SECTIONS}
 _HEADER_LINE = re.compile(r"^\s*(\d{1,4}|20\d\d Annual Report|Laporan Tahunan 20\d\d|PT [A-Za-z .]+Tbk\.?|[A-Za-z ]{0,40}Tbk)\s*$")
@@ -71,23 +87,47 @@ def clean_page(text: str) -> str:
     return re.sub(r"\n{2,}", "\n", "\n".join(out))
 
 
+def heading_lines(text: str) -> list[tuple[str, int]]:
+    """Pure. (section, line index) for every heading on a page: a short line, in heading case, beginning with one of
+    the section's patterns."""
+    found: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    compiled = [(key, [re.compile(p, re.IGNORECASE) for p in pats]) for key, _, pats in SECTIONS]
+    for i, line in enumerate(text.splitlines()):
+        s = re.sub(r"[ \t]+", " ", line).strip(" :.-\u2013\u2014|")
+        if not 4 <= len(s) <= HEADING_MAX or not looks_like_heading(s):
+            continue
+        for key, pats in compiled:
+            if key in seen:
+                continue
+            if any((m := p.search(s)) and m.start() <= 3 for p in pats):
+                found.append((key, i))
+                seen.add(key)
+    return found
+
+
+def heading_sections(text: str) -> list[str]:
+    return [k for k, _ in heading_lines(text)]
+
+
 def find_sections(pages: list[str], max_pages: int = 2) -> dict[str, tuple[int, str]]:
     """Pure. Page texts (1-based order) -> {section: (first page number, cleaned text of that page and the next)}.
     The first fifth of the report (contents, highlights, profile) and pages that look like a table of contents (four
-    or more different section headings) are skipped; the first later page carrying an uppercase heading wins."""
+    or more different section headings) are skipped; the first later page carrying a heading wins."""
     n = len(pages)
     start = max(1, n // 5)
     hits: dict[str, tuple[int, str]] = {}
-    compiled = [(key, [re.compile(p) for p in pats]) for key, _, pats in SECTIONS]
     for i in range(start, n):
-        raw = pages[i] or ""
-        matched = [key for key, pats in compiled if any(p.search(raw) for p in pats)]
+        matched = heading_lines(pages[i] or "")
         if len(matched) >= 4:
             continue                                                      # a contents page
-        for key in matched:
+        for key, line_no in matched:
             if key in hits:
                 continue
-            text = "\n".join(clean_page(pages[j] or "") for j in range(i, min(n, i + max_pages)))
+            first = "\n".join((pages[i] or "").splitlines()[line_no:])       # from the heading, not the top of the page
+            text = "\n".join(clean_page(t) for t in [first, *[(pages[j] or "") for j in range(i + 1, min(n, i + max_pages))]])
+            if len(text) < 300:
+                continue                                                  # a mention, not a section
             hits[key] = (i + 1, text[:MAX_CHARS])
     return hits
 
