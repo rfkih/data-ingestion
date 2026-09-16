@@ -5,9 +5,12 @@ documented API. They sit behind Cloudflare, which occasionally answers a
 "Just a moment..." challenge page (HTTP 403, HTML) instead of JSON. The
 client therefore:
 
-* uses stdlib ``urllib`` with a cookie jar - Cloudflare fingerprints the TLS
-  handshake and answers ``httpx``/``requests`` with 403 while ``urllib`` passes
-  (verified 2026-09-12: same headers, urllib 200 vs httpx 403),
+* talks through ``curl`` (a subprocess, cookie jar in a temp file) when one is on the
+  PATH, else stdlib ``urllib`` - Cloudflare fingerprints the TLS handshake, not the
+  headers: ``httpx``/``requests`` were challenged from the start, ``urllib`` passed until
+  2026-09-14 and has been challenged since, while curl (Schannel on Windows) passes
+  (verified 2026-09-16: same headers, curl 200 vs urllib 403). ``INGEST_IDX_TRANSPORT``
+  = ``curl`` | ``urllib`` | ``auto`` (default) picks the transport,
 * paces requests (``idx_rps``) and enforces a per-day request budget,
 * retries challenges / 5xx / non-JSON bodies with exponential backoff,
 * opens a circuit after N consecutive failures (one long pause, then raise),
@@ -23,6 +26,9 @@ import http.cookiejar
 import json
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -128,6 +134,72 @@ def _urllib_fetcher(timeout: float = 60.0) -> FetchFn:
     return fetch
 
 
+def find_curl() -> str | None:
+    """The system curl (Schannel on Windows) first, then whatever the PATH offers."""
+    sysroot = os.environ.get("SystemRoot")
+    if sysroot:
+        cand = os.path.join(sysroot, "System32", "curl.exe")
+        if os.path.exists(cand):
+            return cand
+    return shutil.which("curl")
+
+
+def _curl_fetcher(timeout: float = 60.0) -> FetchFn | None:
+    """Transport through a ``curl`` subprocess: same headers, same cookie jar for the client's lifetime, body written to
+    a temp file (binary-safe), status code read from ``-w``. None when no curl is installed."""
+    curl = find_curl()
+    if not curl:
+        return None
+    jfd, jar = tempfile.mkstemp(prefix="idx-cookies-", suffix=".txt")
+    os.close(jfd)
+    proxy = os.environ.get("INGEST_IDX_PROXY", "").strip()
+    if proxy:
+        logger.info("idx client: via proxy %s", proxy)
+
+    def fetch(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        fd, out = tempfile.mkstemp(prefix="idx-body-")
+        os.close(fd)
+        cmd = [curl, "-sS", "--compressed", "--max-time", str(int(timeout)), "-b", jar, "-c", jar, "-o", out,
+               "-w", "%{http_code}"]
+        for k, v in headers.items():
+            cmd += ["-H", f"{k}: {v}"]
+        if proxy:
+            cmd += ["-x", proxy]
+        cmd.append(url)
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 15)
+            if res.returncode != 0:
+                raise OSError(f"curl exit {res.returncode}: {(res.stderr or '').strip()[:120]}")
+            try:
+                status = int((res.stdout or "").strip()[-3:])
+            except ValueError as e:
+                raise OSError(f"curl: no status code ({res.stdout[:40]!r})") from e
+            with open(out, "rb") as f:
+                return status, f.read()
+        finally:
+            try:
+                os.unlink(out)
+            except OSError:
+                pass
+
+    fetch.jar = jar                                                      # type: ignore[attr-defined]  # removed by close()
+    return fetch
+
+
+def default_fetcher(timeout: float = 60.0) -> FetchFn:
+    """INGEST_IDX_TRANSPORT: ``curl`` (fail if absent), ``urllib``, or ``auto`` = curl when installed."""
+    mode = os.environ.get("INGEST_IDX_TRANSPORT", "auto").strip().lower() or "auto"
+    if mode == "urllib":
+        return _urllib_fetcher(timeout)
+    fetch = _curl_fetcher(timeout)
+    if fetch is None:
+        if mode == "curl":
+            raise RuntimeError("INGEST_IDX_TRANSPORT=curl but no curl executable was found")
+        logger.warning("idx client: no curl on this host, falling back to urllib (Cloudflare may challenge it)")
+        return _urllib_fetcher(timeout)
+    return fetch
+
+
 class IdxClient:
     def __init__(self, *, rps: float | None = None, daily_budget: int | None = None,
                  circuit_threshold: int | None = None, circuit_pause_s: int | None = None,
@@ -147,7 +219,7 @@ class IdxClient:
         self._consecutive_failures = 0
         self._circuit_paused_once = False
         self.requests_made = 0
-        self._fetch = fetch_fn or _urllib_fetcher()
+        self._fetch = fetch_fn or default_fetcher()
 
     # -- public endpoint methods --------------------------------------------------------------
 
@@ -277,7 +349,12 @@ class IdxClient:
         self._consecutive_failures = 0
 
     def close(self) -> None:
-        pass
+        jar = getattr(self._fetch, "jar", None)
+        if jar:
+            try:
+                os.unlink(jar)
+            except OSError:
+                pass
 
     def __enter__(self) -> IdxClient:
         return self

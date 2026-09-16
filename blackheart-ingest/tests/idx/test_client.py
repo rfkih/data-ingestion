@@ -3,6 +3,7 @@ Transport is injected (``fetch_fn``) so nothing here touches the network."""
 from __future__ import annotations
 
 import json
+import sys
 from datetime import date
 
 import pytest
@@ -89,3 +90,38 @@ def test_announcement_and_financial_keys() -> None:
     assert a.key == "BBCA:2026-08-01:2026-09-12:0" and a.rows() == [] and a.fingerprint is None
     f = make_client(Fake(ok({"ResultCount": 0, "Results": []}))).financial_report(2025, "tw3", "BBCA")
     assert f.key == "2025:tw3:BBCA:0" and "kodeEmiten=BBCA" in f.url and "periode=tw3" in f.url
+
+
+def test_default_fetcher_honours_transport_env(monkeypatch):
+    monkeypatch.setenv("INGEST_IDX_TRANSPORT", "urllib")
+    assert c.default_fetcher().__name__ == "fetch" and not hasattr(c.default_fetcher(), "jar")
+    monkeypatch.setenv("INGEST_IDX_TRANSPORT", "curl")
+    monkeypatch.setattr(c, "find_curl", lambda: None)
+    with pytest.raises(RuntimeError):
+        c.default_fetcher()
+    monkeypatch.setenv("INGEST_IDX_TRANSPORT", "auto")
+    assert not hasattr(c.default_fetcher(), "jar")                     # no curl -> urllib, no error
+
+
+def test_curl_fetcher_parses_status_and_body(monkeypatch, tmp_path):
+    """The curl transport is driven through a stand-in executable: body to -o, status code on stdout."""
+    import os
+    fake = tmp_path / "curl.py"
+    fake.write_text("import sys\nargs = sys.argv[1:]\nout = args[args.index('-o') + 1]\n"
+                    "open(out, 'wb').write(b'%PDF-x')\nsys.stdout.write('206')\n")
+    real_run = c.subprocess.run
+
+    def run(cmd, **kw):
+        assert cmd[0] == "CURL" and "-b" in cmd and "-c" in cmd and cmd[-1] == "https://x/y"
+        assert "User-Agent: ua" in cmd
+        return real_run([sys.executable, str(fake), *cmd[1:]], **kw)
+
+    monkeypatch.setattr(c, "find_curl", lambda: "CURL")
+    monkeypatch.setattr(c.subprocess, "run", run)
+    fetch = c._curl_fetcher()
+    assert fetch("https://x/y", {"User-Agent": "ua"}) == (206, b"%PDF-x")
+    cl = c.IdxClient(rps=0, fetch_fn=fetch)
+    jar = fetch.jar
+    assert os.path.exists(jar)
+    cl.close()
+    assert not os.path.exists(jar)
