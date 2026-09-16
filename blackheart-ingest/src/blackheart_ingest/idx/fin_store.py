@@ -42,16 +42,25 @@ def _market_at(conn: psycopg.Connection, code: str, when: date) -> tuple[int | N
     return (int(shares) if shares else None), (Decimal(close) if close else None)
 
 
+RATIO_MAX = Decimal(9999)                                  # the NUMERIC(10,6) ratio columns hold |x| < 10^4
+
+
 def _div(a: Decimal | None, b: Decimal | None) -> Decimal | None:
     if a is None or b is None or b == 0:
         return None
     return a / b
 
 
+def _ratio(a: Decimal | None, b: Decimal | None) -> Decimal | None:
+    """A ratio beyond +-9,999 (a near-zero denominator: ANTM 2023-TW2 prior profit) is noise, not a number: NULL."""
+    x = _div(a, b)
+    return None if x is None or abs(x) > RATIO_MAX else x
+
+
 def _yoy(cur: Decimal | None, pri: Decimal | None) -> Decimal | None:
     if cur is None or pri is None or pri == 0:
         return None
-    return (cur - pri) / abs(pri)
+    return _ratio(cur - pri, abs(pri))
 
 
 def fx_table(conn: psycopg.Connection) -> Callable[[date], Decimal | None]:
@@ -199,10 +208,10 @@ def store_report(conn: psycopg.Connection, report: dict[str, Any], fx_fallback: 
         "cfo": cur.get("cfo"), "capex": cur.get("capex"), "dividends_paid": cur.get("dividends_paid"),
         "shares_out": shares, "eps": eps,
         "bvps": _div(eq, Decimal(shares)) if shares else None,
-        "roe": _div(net * ann if net is not None else None, eq),
-        "roa": _div(net * ann if net is not None else None, cur.get("total_assets")),
-        "der": _div(cur.get("total_debt"), eq),
-        "net_margin": _div(net, rev),
+        "roe": _ratio(net * ann if net is not None else None, eq),
+        "roa": _ratio(net * ann if net is not None else None, cur.get("total_assets")),
+        "der": _ratio(cur.get("total_debt"), eq),
+        "net_margin": _ratio(net, rev),
         "revenue_yoy": _yoy(rev, pri.get("revenue")), "net_profit_yoy": _yoy(net, pri.get("net_profit")),
         "net_profit_prior": pri.get("net_profit"), "revenue_prior": pri.get("revenue"), "cfo_prior": pri.get("cfo"),
         "sector": info.get("sector"), "subsector": info.get("subsector"), "rounding": p.rounding_eff, "facts_n": len(p.facts),
