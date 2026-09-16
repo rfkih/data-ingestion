@@ -105,3 +105,23 @@ cluster in the 2022 cohort (digital banks, coal after the spike) — a turnaroun
 - This is a screen, not a rule: N = 194 trials, five snapshot years, two crash-rebound years (2020, 2024) carrying most of the
   doubles. Position sizing for a D basket, if the operator wants one, belongs to the judgment tier (small, equal weight, accept
   −50 % on one in eight), not to the strict book.
+
+## Second opinion (Fable 5.1, same day) — every feature at once, validated by year
+
+`research/idx_doublers_model.py` (pre-registered; trials 195–196, cumulative **N = 196**): logistic regression and LightGBM on
+the same PIT panel (percentiles of the 15 features + flags + screen memberships), **leave-one-snapshot-year-out**. LightGBM
+passes 5/5 years (AUC 0.65–0.82; OOS top decile touched 2× in 25–62 % of cases vs base 9–33 %, lift 2.2–3.7); logistic 4/5.
+Weights agree with the screens: turnaround, small, low E/P, low ROE, revenue growth, momentum.
+
+Robustness of the SSIA slice (turnaround & small & TTM E/P ≤ 5 %): without 2020 and 2024 still 70 % / 39 % (base 13 % / 6 %);
+**deduplicated by name 61 % / 30 % / median +42 %** (n = 23); 12-month horizon 50 % (base 13 %), but the 2025 snapshots only 25 %.
+
+Today's model ranking (2026-09-16, 158 names): PADA 73 %, GULA 70 %, MINA 68 %, KOTA 60 %, IRSX 55 %, **SSIA 55 % (rank 6)**,
+MDIA, AYAM, SUPA … BULL 33 %, MBMA 35 %, DMAS 36 %, GJTL 27 %, **INKP 8 %, TKIM 12 %, AMMN 12 %** (large cheap names confirmed
+out). The model is over-confident at the top (OOS calibration: predicted 55 % → realized 47 %; 71 % → 52 %), so SSIA ≈ 47–50 %
+touched / 25–30 % kept.
+
+Why the names ranked above SSIA are not the pick — OOS top-decile subsets: **momentum > +150 % ("already ran") 47 % touched but
+18 % kept, median −26 %, 38 % lose > 50 %**; micro caps < Rp 1 T 58 % touched but 29 % lose > 50 %; whereas turnaround & ≥ Rp 3 T &
+momentum ≤ +150 % (SSIA's bucket) 50 % touched, median +32 %, 8 % lose > 50 %. The operator's constraint (not already re-rated,
+minimal risk) is therefore a data statement, not a preference: the lottery names double *and* blow up.
