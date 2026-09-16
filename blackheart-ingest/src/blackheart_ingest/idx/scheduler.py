@@ -208,6 +208,44 @@ def run_daily_fallback() -> None:
                 _fail_alert(conn, rm)
 
 
+def run_news() -> None:
+    from . import news
+    with get_connection() as conn:
+        r = news.run(conn)
+        if r.status == "failed":
+            _fail_alert(conn, r)
+        logger.info("idx news %s items=%s new=%s failed=%s", r.status, r.rows_in, r.rows_out, r.detail.get("failed"))
+
+
+def run_consensus() -> None:
+    """Weekly analyst-consensus snapshot for the universe and every book holding (Yahoo, one call per name)."""
+    from . import consensus
+    from .cli import _list_codes
+    from .metrics import universe_codes
+    with get_connection() as conn:
+        codes = sorted(set(universe_codes(conn)) | set(_list_codes(conn)))
+        r = consensus.run(conn, codes)
+        _fail_alert(conn, r)
+        logger.info("idx consensus %s names=%s covered=%s", r.status, r.rows_in, r.detail.get("covered"))
+
+
+def run_fin_backlog(limit: int = 60) -> None:
+    """Quarterly workbooks 2021-2023 for the universe, a few dozen a day at a gentle pace, so the earnings-acceleration
+    signal can be tested on more than two years. Skips the day when the IDX client is being challenged."""
+    with get_connection() as conn:
+        codes = universe_codes(conn)
+        try:
+            with IdxClient(rps=0.3) as cl:
+                rd = job_fin.download(conn, cl, codes=codes, years=[2021, 2022, 2023], periods=["tw1", "tw2", "tw3"], limit=limit)
+        except IdxFetchError as e:
+            runlog.alert(conn, "info", "fin:backlog", f"skipped today: {e}")
+            return
+        logger.info("idx fin backlog %s pending=%s ok=%s", rd.status, rd.rows_in, rd.rows_out)
+        if rd.rows_out:
+            rp = fin_store.run(conn, codes=codes)
+            logger.info("idx fin backlog parse %s reports=%s", rp.status, rp.rows_out)
+
+
 def check_no_bar() -> None:
     d = today_wib()
     if d.weekday() >= 5:
@@ -244,6 +282,9 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_daily_fallback, CronTrigger(day_of_week="mon-fri", hour=19, minute=40, timezone=WIB), id="daily_fallback")
     s.add_job(run_announce_recent, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="announce_recent")
     s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=7, minute=30, timezone=WIB), id="macro")
+    s.add_job(run_news, CronTrigger(hour="6,12,18,22", minute=10, timezone=WIB), id="news")
+    s.add_job(run_consensus, CronTrigger(day_of_week="sat", hour=11, minute=0, timezone=WIB), id="consensus")
+    s.add_job(run_fin_backlog, CronTrigger(day_of_week="tue-sat", hour=5, minute=30, timezone=WIB), id="fin_backlog")
     s.add_job(run_annual, CronTrigger(day=6, hour=10, minute=0, timezone=WIB), id="annual")
     s.add_job(run_fundamentals, CronTrigger(day_of_week="mon-fri", hour=21, minute=0, timezone=WIB), id="fundamentals")
     s.add_job(run_fundamentals, CronTrigger(day_of_week="sat", hour=9, minute=0, timezone=WIB), id="fundamentals_full",

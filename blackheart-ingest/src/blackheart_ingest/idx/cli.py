@@ -354,6 +354,35 @@ def _list_codes(conn) -> list[str]:
     return sorted(codes)
 
 
+def cmd_news(a: argparse.Namespace) -> int:
+    from . import news
+    with get_connection() as conn:
+        if a.sub == "pull":
+            r = news.run(conn)
+            print(f"news {r.status}: {r.rows_in} items seen, {r.rows_out} new" + (f"; failed feeds: {', '.join(r.detail.get('failed') or [])}" if r.detail.get("failed") else ""))
+            return 0
+        for it in news.recent(conn, a.codes.upper() if a.codes else None, a.limit or 30):
+            print(f"  {str(it['published_at'])[:16]:16s} {','.join(it['codes']) or '-':12s} {it['title'][:90]}  [{it['source']}]")
+    return 0
+
+
+def cmd_consensus(a: argparse.Namespace) -> int:
+    from . import consensus
+    from .metrics import universe_codes
+    with get_connection() as conn:
+        if a.sub == "pull":
+            codes = [c.strip().upper() for c in a.codes.split(",")] if a.codes else sorted(set(universe_codes(conn)) | set(_list_codes(conn)))
+            r = consensus.run(conn, codes)
+            print(f"consensus {r.status}: {r.rows_in} names, {r.detail.get('covered')} with coverage")
+            return 0
+        codes = [c.strip().upper() for c in a.codes.split(",")] if a.codes else None
+        print(f"{'code':5s} {'date':>10s} {'price':>8s} {'target':>8s} {'low':>7s} {'high':>7s} {'n':>3s} {'upside':>7s} {'reco':>5s} {'key':10s}")
+        for r in consensus.latest(conn, codes):
+            f = lambda v, w=8, d=0: "" if v is None else f"{float(v):{w}.{d}f}"  # noqa: E731
+            print(f"{r['code']:5s} {r['snapshot_date']!s:>10s} {f(r['price']):>8s} {f(r['target_mean']):>8s} {f(r['target_low'], 7):>7s} {f(r['target_high'], 7):>7s} {r['n_analysts']:3d} {f(r['upside_pct'], 6, 0):>6s}% {f(r['reco_mean'], 5, 1):>5s} {r['reco_key'] or '':10s}")
+    return 0
+
+
 def cmd_macro(a: argparse.Namespace) -> int:
     from . import macro
     with get_connection() as conn:
@@ -728,6 +757,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int)
     p.add_argument("--reparse", action="store_true")
     p.set_defaults(fn=cmd_annual)
+    p = sub.add_parser("news", help="news feeds: pull | show [--codes C] [--limit N]")
+    p.add_argument("sub", choices=["pull", "show"])
+    p.add_argument("--codes")
+    p.add_argument("--limit", type=int)
+    p.set_defaults(fn=cmd_news)
+    p = sub.add_parser("consensus", help="analyst consensus snapshots: pull [--codes A,B] | show [--codes A,B]")
+    p.add_argument("sub", choices=["pull", "show"])
+    p.add_argument("--codes")
+    p.set_defaults(fn=cmd_consensus)
     p = sub.add_parser("macro", help="macro series: pull [--keys a,b] [--full] | show")
     p.add_argument("sub", choices=["pull", "show"])
     p.add_argument("--keys", help="comma list of series keys (default all)")
