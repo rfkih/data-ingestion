@@ -175,15 +175,16 @@ def run_macro() -> None:
         logger.info("idx macro %s rows=%s failed=%s", r.status, r.rows_out, r.detail.get("failed"))
 
 
-def run_annual() -> None:
-    """Annual reports for today's lists and holdings: discover this year and last, download, extract the plan pages."""
+def run_annual(limit: int = 8) -> None:
+    """Annual reports for today's lists and holdings: discover this year and last, download at most ``limit`` reports
+    (each one is 20-60 MB and several attachments; the rest wait for the next run), extract the plan pages."""
     from . import annual
     from .cli import _list_codes
-    with get_connection() as conn, IdxClient() as cl:
+    with get_connection() as conn, IdxClient(rps=0.2) as cl:
         y = today_wib().year
         for year in (y - 1, y):
             annual.discover(conn, cl, year)
-        r = annual.download(conn, cl, codes=_list_codes(conn), years=[y - 1, y])
+        r = annual.download(conn, cl, codes=_list_codes(conn), years=[y - 1, y], limit=limit)
         e = annual.extract(conn)
         _fail_alert(conn, r)
         logger.info("idx annual: downloaded=%s extracted sections=%s", r.rows_out, e.rows_out)

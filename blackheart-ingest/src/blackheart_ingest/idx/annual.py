@@ -112,23 +112,28 @@ def heading_sections(text: str) -> list[str]:
 
 def find_sections(pages: list[str], max_pages: int = 2) -> dict[str, tuple[int, str]]:
     """Pure. Page texts (1-based order) -> {section: (first page number, cleaned text of that page and the next)}.
-    The first fifth of the report (contents, highlights, profile) and pages that look like a table of contents (four
-    or more different section headings) are skipped; the first later page carrying a heading wins."""
+    Pages that look like a table of contents (four or more different section headings) are skipped. The first fifth of
+    the report (contents, highlights, profile) is searched only afterwards, for the sections still missing, from 5 % in:
+    the first page carrying a heading wins within each pass."""
     n = len(pages)
-    start = max(1, n // 5)
     hits: dict[str, tuple[int, str]] = {}
-    for i in range(start, n):
-        matched = heading_lines(pages[i] or "")
-        if len(matched) >= 4:
-            continue                                                      # a contents page
-        for key, line_no in matched:
-            if key in hits:
-                continue
-            first = "\n".join((pages[i] or "").splitlines()[line_no:])       # from the heading, not the top of the page
-            text = "\n".join(clean_page(t) for t in [first, *[(pages[j] or "") for j in range(i + 1, min(n, i + max_pages))]])
-            if len(text) < 300:
-                continue                                                  # a mention, not a section
-            hits[key] = (i + 1, text[:MAX_CHARS])
+
+    def scan(lo: int, hi: int) -> None:
+        for i in range(lo, hi):
+            matched = heading_lines(pages[i] or "")
+            if len(matched) >= 4:
+                continue                                                  # a contents page
+            for key, line_no in matched:
+                if key in hits:
+                    continue
+                first = "\n".join((pages[i] or "").splitlines()[line_no:])   # from the heading, not the top of the page
+                text = "\n".join(clean_page(t) for t in [first, *[(pages[j] or "") for j in range(i + 1, min(n, i + max_pages))]])
+                if len(text) < 300:
+                    continue                                              # a mention, not a section
+                hits[key] = (i + 1, text[:MAX_CHARS])
+
+    scan(max(1, n // 5), n)
+    scan(max(1, n // 20), max(1, n // 5))                                  # a short MD&A can sit early (PNLF p.51/472, AADI p.85/438)
     return hits
 
 

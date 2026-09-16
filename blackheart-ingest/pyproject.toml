@@ -57,7 +57,7 @@ idx = [
     "apscheduler>=3.10,<4",
     "openpyxl>=3.1,<4",
     "feedparser>=6.0,<7",
-    "pypdf>=5.0,<7",
+    "pypdf[crypto]>=5.0,<7",                     # [crypto] = AES-encrypted annual reports (SRTG)
 ]
 
 # HTML scraping for the (currently unused) ForexFactory HTML fallback.
