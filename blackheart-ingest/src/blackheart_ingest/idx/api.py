@@ -337,4 +337,44 @@ def make_router(require_token) -> APIRouter:
             conn.commit()
         return {"codes": sorted(codes)}
 
+    @router.get("/study")
+    def study_list(name: str | None = None) -> dict[str, Any]:
+        """Research runs stored in the DB (migration 0020), newest first."""
+        from . import research_store as rs
+        with get_connection() as conn:
+            return {"studies": rs.studies(conn, name)}
+
+    @router.get("/study/latest")
+    def study_latest(name: str) -> dict[str, Any]:
+        from . import research_store as rs
+        with get_connection() as conn:
+            st = rs.study(conn, None, name)
+        if not st:
+            raise HTTPException(status_code=404, detail="no run of that study")
+        return st
+
+    @router.get("/study/{study_id}")
+    def study_get(study_id: int) -> dict[str, Any]:
+        from . import research_store as rs
+        with get_connection() as conn:
+            st = rs.study(conn, study_id)
+        if not st:
+            raise HTTPException(status_code=404, detail="study not found")
+        return st
+
+    @router.get("/name/{code}")
+    def name_get(code: str) -> dict[str, Any]:
+        """One name's whole picture: the studies that flag it, evidence by kind, plan sections, pack answers, consensus."""
+        from . import research_store as rs
+        with get_connection() as conn:
+            return rs.name_view(conn, code)
+
+    @router.post("/name/{code}/evidence", dependencies=[Depends(require_token)])
+    def name_evidence_add(code: str, body: dict[str, Any] = _BODY) -> dict[str, Any]:
+        from . import research_store as rs
+        with get_connection() as conn:
+            new = rs.add_evidence(conn, code, body["kind"], body["title"], source=body.get("source"), url=body.get("url"),
+                                  summary=body.get("summary"), tags=body.get("tags"), study_id=body.get("study_id"))
+        return {"added": new}
+
     return router

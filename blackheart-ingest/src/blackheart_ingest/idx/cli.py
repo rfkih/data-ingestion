@@ -383,6 +383,42 @@ def cmd_consensus(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_study(a: argparse.Namespace) -> int:
+    from . import research_store as rs
+    with get_connection() as conn:
+        if a.sub == "list":
+            for s in rs.studies(conn, a.name):
+                print(f"  #{s['id']:<4d} {s['name']:16s} as of {s['as_of']}  run {str(s['run_at'])[:16]}  names={s['names']}  {s['report_path'] or ''}")
+        elif a.sub == "show":
+            st = rs.study(conn, a.id, a.name)
+            if not st:
+                print("no such study")
+                return 1
+            print(f"#{st['id']} {st['name']} as of {st['as_of']} (run {str(st['run_at'])[:16]}) {st['report_path'] or ''}")
+            for n in st["names"]:
+                print(f"  {n['code']:6s} rank={n['rank'] if n['rank'] is not None else '-':>3} score={n['score'] if n['score'] is not None else '-':>7} screens={list(n['screens'])}")
+        elif a.sub == "name":
+            print(rs.render_name(rs.name_view(conn, a.code)))
+    return 0
+
+
+def cmd_evidence(a: argparse.Namespace) -> int:
+    from . import research_store as rs
+    with get_connection() as conn:
+        if a.sub == "collect":
+            for code in [c.strip().upper() for c in a.code.split(",")]:
+                print(code, rs.collect_evidence(conn, code, days=a.days or 365, study_id=a.study))
+        elif a.sub == "add":
+            ts = datetime.fromisoformat(a.ts) if a.ts else None
+            new = rs.add_evidence(conn, a.code, a.kind, a.title, ts=ts, source=a.source, url=a.url, summary=a.summary,
+                                  tags=[t.strip() for t in (a.tags or "").split(",") if t.strip()], study_id=a.study)
+            print("added" if new else "already there")
+        elif a.sub == "show":
+            for e in rs.evidence(conn, a.code, [a.kind] if a.kind else None, a.limit or 100):
+                print(f"  {str(e['ts'])[:10] if e['ts'] else '          '} [{e['kind']}] {e['title'][:110]}  {e['url'] or ''}")
+    return 0
+
+
 def cmd_macro(a: argparse.Namespace) -> int:
     from . import macro
     with get_connection() as conn:
@@ -766,6 +802,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["pull", "show"])
     p.add_argument("--codes")
     p.set_defaults(fn=cmd_consensus)
+    p = sub.add_parser("study", help="research results in the DB: list [--name N] | show [--id I | --name N] | name CODE")
+    p.add_argument("sub", choices=["list", "show", "name"])
+    p.add_argument("--name")
+    p.add_argument("--id", type=int)
+    p.add_argument("code", nargs="?")
+    p.set_defaults(fn=cmd_study)
+    p = sub.add_parser("evidence", help="per-name evidence: collect CODE[,CODE] [--days N] | add CODE --kind K --title T [...] | show CODE [--kind K]")
+    p.add_argument("sub", choices=["collect", "add", "show"])
+    p.add_argument("code")
+    p.add_argument("--kind", choices=["news", "announcement", "annual", "web", "analyst", "note"])
+    p.add_argument("--title")
+    p.add_argument("--url")
+    p.add_argument("--source")
+    p.add_argument("--summary")
+    p.add_argument("--tags", help="comma list, e.g. operational,guidance")
+    p.add_argument("--ts", help="ISO timestamp of publication")
+    p.add_argument("--days", type=int)
+    p.add_argument("--study", type=int, help="study id to attach the evidence to")
+    p.add_argument("--limit", type=int)
+    p.set_defaults(fn=cmd_evidence)
     p = sub.add_parser("macro", help="macro series: pull [--keys a,b] [--full] | show")
     p.add_argument("sub", choices=["pull", "show"])
     p.add_argument("--keys", help="comma list of series keys (default all)")
