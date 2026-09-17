@@ -383,6 +383,29 @@ def cmd_consensus(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_levels(a: argparse.Namespace) -> int:
+    from . import levels
+    with get_connection() as conn:
+        if a.sub == "set":
+            if a.stop is not None:
+                print(levels.set_level(conn, a.book, a.code, "stop", a.stop, a.note))
+            if a.tp is not None:
+                print(levels.set_level(conn, a.book, a.code, "take_profit", a.tp, a.note))
+            if a.warn is not None:
+                print(levels.set_level(conn, a.book, a.code, "warn", a.warn, a.note))
+        elif a.sub == "clear":
+            print("removed", levels.clear(conn, a.book, a.code, a.kind))
+        elif a.sub == "reset":
+            print("re-armed", levels.reset(conn, a.book, a.code, a.kind))
+        elif a.sub == "check":
+            r = levels.check(conn, a.book)
+            print(f"levels check {r.status}: {r.rows_in} armed, {r.rows_out} fired")
+        else:
+            rows = levels.levels(conn, a.book if a.book != "all" else None, a.code)
+            print(levels.render(rows, levels._closes(conn, sorted({x["code"] for x in rows}))))
+    return 0
+
+
 def cmd_study(a: argparse.Namespace) -> int:
     from . import research_store as rs
     with get_connection() as conn:
@@ -802,6 +825,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["pull", "show"])
     p.add_argument("--codes")
     p.set_defaults(fn=cmd_consensus)
+    p = sub.add_parser("levels", help="price alerts per held name: set CODE [--stop L] [--tp L] [--warn L] [--note] | list | clear CODE [--kind] | reset CODE | check")
+    p.add_argument("sub", choices=["set", "list", "clear", "reset", "check"])
+    p.add_argument("code", nargs="?")
+    p.add_argument("--book", default="live")
+    p.add_argument("--stop")
+    p.add_argument("--tp")
+    p.add_argument("--warn")
+    p.add_argument("--kind", choices=["stop", "take_profit", "warn"])
+    p.add_argument("--note")
+    p.set_defaults(fn=cmd_levels)
     p = sub.add_parser("study", help="research results in the DB: list [--name N] | show [--id I | --name N] | name CODE")
     p.add_argument("sub", choices=["list", "show", "name"])
     p.add_argument("--name")

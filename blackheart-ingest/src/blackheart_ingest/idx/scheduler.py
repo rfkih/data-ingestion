@@ -29,7 +29,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..shared.db import get_connection
-from . import book, candidates, features, fin_store, overlay, publish, runlog, ticket
+from . import book, candidates, features, fin_store, levels, overlay, publish, runlog, ticket
 from .client import IdxClient, IdxFetchError
 from .jobs import announce as job_announce
 from .jobs import crosscheck as job_crosscheck
@@ -102,6 +102,7 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
             _fail_alert(conn, rm)
             if rm.status == "ok":
                 _fail_alert(conn, book.check(conn, bk))
+                _fail_alert(conn, levels.check(conn, bk))                   # stop / take-profit / index levels
 
 
 def run_announce_recent(days: int = 3) -> None:
@@ -207,6 +208,8 @@ def run_daily_fallback() -> None:
             for bk in ("live", "paper"):
                 rm = book.mark(conn, bk)
                 _fail_alert(conn, rm)
+                if rm.status == "ok":
+                    _fail_alert(conn, levels.check(conn, bk))
 
 
 def run_news() -> None:
