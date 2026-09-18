@@ -22,6 +22,7 @@ from .metrics import LIQ, fundamentals_asof
 
 logger = logging.getLogger(__name__)
 LOT = 100
+TREND_TRAIL = Decimal("0.10")               # the trend rule sells 10 % under the peak close since entry (see trend_book.TRAIL)
 WIB = ZoneInfo("Asia/Jakarta")
 DRAWDOWN_ALERT = Decimal("0.25")
 ALERT_KINDS = ("exchange_query", "suspension", "rights", "control_change", "legal", "auditor", "affiliated_tx", "material_info",
@@ -417,12 +418,13 @@ def snapshot(conn: psycopg.Connection, book: str) -> dict[str, Any]:
     b = get_book(conn, book)
     pos = _rows(conn, """
         SELECT p.code, l.name, p.lots, p.avg_price, p.cost_basis, p.realized_pnl, p.dividends, p.opened_at,
-               m.trade_date AS mark_date, m.close, m.value, m.unrealized
+               m.trade_date AS mark_date, m.close, m.value, m.unrealized,
+               (SELECT max(bb.close) FROM idx.bar bb WHERE bb.code = p.code AND bb.source = 'idx' AND bb.trade_date >= p.opened_at) AS peak
           FROM idx.position p LEFT JOIN idx.listing l USING (code)
           LEFT JOIN LATERAL (SELECT trade_date, close, value, unrealized FROM idx.book_mark WHERE book = p.book AND code = p.code
                              ORDER BY trade_date DESC LIMIT 1) m ON true
          WHERE p.book = %s AND p.lots > 0 ORDER BY m.value DESC NULLS LAST, p.code""", (book,),
-        ["code", "name", "lots", "avg_price", "cost_basis", "realized_pnl", "dividends", "opened_at", "mark_date", "close", "value", "unrealized"])
+        ["code", "name", "lots", "avg_price", "cost_basis", "realized_pnl", "dividends", "opened_at", "mark_date", "close", "value", "unrealized", "peak"])
     closed = _rows(conn, "SELECT code, realized_pnl, dividends FROM idx.position WHERE book = %s AND lots = 0", (book,), ["code", "realized_pnl", "dividends"])
     nav = _rows(conn, "SELECT trade_date, cash, positions, nav, n_positions, dividends FROM idx.book_nav WHERE book = %s ORDER BY trade_date DESC LIMIT 260",
                 (book,), ["trade_date", "cash", "positions", "nav", "n_positions", "dividends"])
@@ -433,6 +435,13 @@ def snapshot(conn: psycopg.Connection, book: str) -> dict[str, Any]:
         p["candidate_rank"] = cand.get(p["code"], {}).get("rank")
         p["candidate_selected"] = bool(cand.get(p["code"], {}).get("selected"))
         p["pnl_pct"] = (Decimal(p["unrealized"]) / Decimal(p["cost_basis"])) if p["unrealized"] is not None and Decimal(p["cost_basis"]) else None
+        # trailing-stop gauge (the trend rule's 10 % under the peak close since entry; meaningful for trend books,
+        # computed for all): high-water peak, the stop it implies, and how far the last close sits above it
+        peak = Decimal(p["peak"]) if p.get("peak") is not None else None
+        close = Decimal(p["close"]) if p["close"] is not None else None
+        p["high"] = peak
+        p["stop"] = (peak * (Decimal(1) - TREND_TRAIL)) if peak is not None else None
+        p["dist_to_stop"] = ((close - p["stop"]) / close) if (close and p["stop"] is not None) else None
     total_val = sum(Decimal(p["value"] or 0) for p in pos)
     for p in pos:
         p["weight"] = (Decimal(p["value"] or 0) / (total_val + Decimal(b["cash"]))) if (total_val + Decimal(b["cash"])) else None

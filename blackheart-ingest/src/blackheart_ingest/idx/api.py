@@ -130,6 +130,23 @@ def make_router(require_token) -> APIRouter:
         rep["text"] = rp.render(rep)
         return _plain(rep)
 
+    @router.get("/index")
+    def index_series(codes: str = "COMPOSITE,LQ45", start: str | None = None) -> dict[str, Any]:
+        """Daily closes for the named indices (idx.index_daily) since `start` — the Portfolio's benchmark overlay.
+        -> {series: {CODE: [{trade_date, close}, ...]}}. Unknown codes come back empty."""
+        wanted = [c.strip().upper() for c in codes.split(",") if c.strip()][:6]
+        d0 = date.fromisoformat(start) if start else None
+        out: dict[str, list[dict[str, Any]]] = {}
+        with get_connection() as conn, conn.cursor() as cur:
+            for code in wanted:
+                cur.execute(
+                    "SELECT trade_date, close FROM idx.index_daily WHERE index_code = %s AND (%s::date IS NULL OR trade_date >= %s) "
+                    "ORDER BY trade_date",
+                    (code, d0, d0),
+                )
+                out[code] = [{"trade_date": r["trade_date"].isoformat(), "close": r["close"]} for r in cur.fetchall()]
+        return _plain({"series": out})
+
     @router.get("/quote")
     def quote(codes: str) -> list[dict[str, Any]]:
         """Latest close per code (comma-separated): {code, name, trade_date, close, open, volume, prev_close, chg_pct, v60, tick,
