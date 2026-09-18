@@ -38,6 +38,7 @@ from . import (
     overlay,
     publish,
     runlog,
+    scores,
     ticket,
     trend_book,
 )
@@ -122,6 +123,11 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
             except Exception as e:
                 runlog.alert(conn, "warning", f"ticket:{bk}", f"trend ticket failed: {type(e).__name__}: {e}")
                 _fail_alert(conn, levels.check(conn, bk))                   # stop / take-profit / index levels
+        try:                                                                # the public scores for the day (spec §04); fails soft
+            rep = scores.build(conn)
+            logger.info("idx scores: %s", rep)
+        except Exception as e:
+            runlog.alert(conn, "warning", "scores", f"scores failed: {type(e).__name__}: {e}")
 
 
 def run_announce_recent(days: int = 3) -> None:
@@ -356,12 +362,12 @@ def build() -> BlockingScheduler:  # noqa: F821
 LOCK_KEY = "idx-scheduler"
 
 
-def try_singleton_lock(conn) -> bool:
+def try_singleton_lock(conn, key: str = LOCK_KEY) -> bool:
     """Session-level Postgres advisory lock shared by every scheduler on every host that uses this database. Held until
     ``conn`` closes, so a second ``run-scheduler`` (a task restart that left the old one alive, a second host) sees
     False and must exit instead of running the daily chain twice."""
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_try_advisory_lock(hashtext(%s)) AS got", (LOCK_KEY,))
+        cur.execute("SELECT pg_try_advisory_lock(hashtext(%s)) AS got", (key,))
         r = cur.fetchone()
     conn.commit()
     got = r["got"] if isinstance(r, dict) else r[0]

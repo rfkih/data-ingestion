@@ -372,6 +372,10 @@ from ..idx.accounts import make_router as _accounts_router  # noqa: E402
 from ..idx.api import make_router as _idx_router  # noqa: E402
 
 app.include_router(_idx_router(require_token))
+# Public read-only surface for the signals app (no auth): scores, screener, signal statistics, research archive.
+from ..idx.pub import make_router as _pub_router  # noqa: E402
+
+app.include_router(_pub_router())
 # Desk accounts in the trading JVM's user-API shape, so the Papan app signs people in here (INTERNAL_TRADING_URL).
 app.include_router(_accounts_router())
 

@@ -35,10 +35,11 @@ def _held_elsewhere(conn, key: str) -> bool:
 
 def test_second_scheduler_is_refused_until_the_first_closes(two_conns) -> None:
     a, b = two_conns
-    assert scheduler.try_singleton_lock(a) is True
-    assert scheduler.try_singleton_lock(b) is False
+    key = "idx-scheduler:test"                       # the real scheduler may hold the production key on this database
+    assert scheduler.try_singleton_lock(a, key) is True
+    assert scheduler.try_singleton_lock(b, key) is False
     a.close()
-    assert scheduler.try_singleton_lock(b) is True
+    assert scheduler.try_singleton_lock(b, key) is True
 
 
 def test_paper_fill_lock_is_held_for_the_duration_and_released_after(two_conns) -> None:

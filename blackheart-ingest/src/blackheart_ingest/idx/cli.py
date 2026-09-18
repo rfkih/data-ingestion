@@ -891,6 +891,41 @@ def cmd_trend(a: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_scores(a: argparse.Namespace) -> int:
+    from . import scores
+    with get_connection() as conn:
+        d = _d(a.as_of) if a.as_of else None
+        if a.sub == "build":
+            res = scores.compute(conn, d)
+            n = scores.store(conn, res)
+            print(scores.render(res, top=a.top))
+            print(f"stored {n} rows for {res['as_of']}")
+        elif a.sub == "show":
+            rows = scores.rows_for(conn, d, [a.code.upper()] if a.code else None)
+            if a.code and rows:
+                r = rows[0]
+                print(f"{r['code']} {r['name'] or ''} {r['trade_date']}: value {r['value']} quality {r['quality']} trend {r['trend']} gates {r['gates']} "
+                      f"breakout {r['trend_flag']} turnaround {r['turnaround']} bucket {r['bucket']}")
+                print(json.dumps(r["inputs"], indent=1, default=str)[:4000])
+            else:
+                print(scores.render({"as_of": rows[0]["trade_date"] if rows else d, "rows": rows, "n": len(rows),
+                                     "n_value": sum(1 for r in rows if r["value"] is not None), "n_quality": sum(1 for r in rows if r["gates"] is not None),
+                                     "n_trend_flag": sum(1 for r in rows if r["trend_flag"]), "n_turnaround": sum(1 for r in rows if r["turnaround"])}, top=a.top))
+        elif a.sub == "stats":
+            from . import signal_stats
+            if a.refresh:
+                rep = signal_stats.refresh(conn)
+                print(json.dumps(rep, indent=1, default=str))
+            for r in signal_stats.rows(conn, a.criteria):
+                print(f"{r['criteria']:15s} {r['bucket']:24s} h{r['horizon_days']:<4d} n={r['n']:<5d} hit={_pct_or(r['hit'])} med={_pct_or(r['median'])} "
+                      f"mean={_pct_or(r['mean'])} loss50={_pct_or(r['p_loss50'])} mdd={_pct_or(r['mdd_book'])} {r['sample_from']}..{r['sample_to']} ({r['source'] or r['study_id']})")
+    return 0
+
+
+def _pct_or(v) -> str:
+    return "-" if v is None else f"{float(v) * 100:.1f}%"
+
+
 def cmd_report(a: argparse.Namespace) -> int:
     from . import report as rp
     with get_connection() as conn:
@@ -1170,6 +1205,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--book", default="paper_trend")
     p.add_argument("--as-of")
     p.set_defaults(fn=cmd_trend)
+    p = sub.add_parser("scores", help="public factor scores (spec §04): build [--as-of D] | show [--code X] [--as-of D] | stats [--refresh] [--criteria C]")
+    p.add_argument("sub", choices=["build", "show", "stats"])
+    p.add_argument("--as-of")
+    p.add_argument("--code")
+    p.add_argument("--criteria")
+    p.add_argument("--refresh", action="store_true", help="stats: re-import signal_stats from the recorded research")
+    p.add_argument("--top", type=int, default=20)
+    p.set_defaults(fn=cmd_scores)
     p = sub.add_parser("report", help="NAV vs IHSG/LQ45/IDXV30/IDX30 + per-name contribution: --book B --period since|mtd|ytd|1m|3m|6m|1y|A:B")
     p.add_argument("--book", default="paper")
     p.add_argument("--period", default="since")
