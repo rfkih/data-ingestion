@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from contextlib import contextmanager
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -527,6 +528,25 @@ def paper_fill(conn: psycopg.Connection, book: str = "paper", dry_run: bool = Fa
     reports = []
     if bk.is_halted(bk.get_book(conn, book)):
         return reports                                                     # kill switch: nothing fills until resume
+    with _book_lock(conn, f"paper_fill:{book}"):                          # two chains can never fill the same ticket twice
+        return _paper_fill_locked(conn, book, dry_run, reports)
+
+
+@contextmanager
+def _book_lock(conn: psycopg.Connection, key: str):
+    """Session-level advisory lock (survives the commits inside); released on exit even on error."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
+    conn.commit()
+    try:
+        yield
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
+        conn.commit()
+
+
+def _paper_fill_locked(conn: psycopg.Connection, book: str, dry_run: bool, reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for t_id in [r["id"] for r in _rows(conn, "SELECT id FROM idx.ticket WHERE book = %s AND status IN ('draft', 'issued') ORDER BY id", (book,), ["id"])]:
         t = load(conn, t_id)
         checks = validate(conn, t_id)

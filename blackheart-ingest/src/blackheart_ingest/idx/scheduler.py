@@ -197,8 +197,9 @@ def run_broker_snapshot() -> None:
     Off unless STOCKBIT_TOKEN (or STOCKBIT_REFRESH_TOKEN) is set. Auto-refreshes the token when a refresh token
     is present; a paywall/expired key stops the run cleanly and raises one warning, not a crash.
     """
-    from . import broker
     import os as _os
+
+    from . import broker
     if not (_os.environ.get(broker.TOKEN_ENV) or _os.environ.get(broker.REFRESH_ENV)):
         return
     d = today_wib()
@@ -352,11 +353,56 @@ def build() -> BlockingScheduler:  # noqa: F821
     return s
 
 
+LOCK_KEY = "idx-scheduler"
+
+
+def try_singleton_lock(conn) -> bool:
+    """Session-level Postgres advisory lock shared by every scheduler on every host that uses this database. Held until
+    ``conn`` closes, so a second ``run-scheduler`` (a task restart that left the old one alive, a second host) sees
+    False and must exit instead of running the daily chain twice."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(hashtext(%s)) AS got", (LOCK_KEY,))
+        r = cur.fetchone()
+    conn.commit()
+    got = r["got"] if isinstance(r, dict) else r[0]
+    return bool(got)
+
+
+def _lock_connection():
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from ..shared.settings import get_settings
+    return psycopg.connect(**get_settings().db_kwargs(), row_factory=dict_row, autocommit=False)
+
+
 def main() -> int:
+    lock = _lock_connection()
+    if not try_singleton_lock(lock):
+        logger.warning("idx scheduler already running (advisory lock %r held by another session) - exiting", LOCK_KEY)
+        lock.close()
+        return 0
     s = build()
+
+    def keep_lock() -> None:
+        """If the lock connection died (Postgres restart) the lock is gone and another instance may have started:
+        stop this one and let the service manager restart it, which re-acquires the lock cleanly."""
+        nonlocal lock
+        try:
+            with lock.cursor() as cur:
+                cur.execute("SELECT 1")
+            lock.commit()
+        except Exception as e:
+            logger.critical("idx scheduler lost its lock connection (%s) - shutting down for a clean restart", e)
+            s.shutdown(wait=False)
+
+    from apscheduler.triggers.interval import IntervalTrigger
+    s.add_job(keep_lock, IntervalTrigger(minutes=5), id="singleton_lock")
     logger.info("idx scheduler starting (Asia/Jakarta); jobs: %s", [j.id for j in s.get_jobs()])
     try:
         s.start()
     except (KeyboardInterrupt, SystemExit):
         pass
+    finally:
+        lock.close()
     return 0
