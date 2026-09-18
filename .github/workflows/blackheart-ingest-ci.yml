@@ -43,9 +43,9 @@ jobs:
           cache: pip
           cache-dependency-path: "blackheart-ingest/pyproject.toml"
 
-      - name: Install (with dev + kafka extras)
+      - name: Install (with dev + idx + kafka extras)
         working-directory: blackheart-ingest
-        run: pip install ".[dev,kafka]"
+        run: pip install ".[dev,idx,kafka]"          # idx extra = apscheduler/openpyxl/pypdf[crypto]; the idx tests need it
 
       - name: Run tests
         working-directory: blackheart-ingest
