@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "idx-desk": {
+      "command": "blackheart-idx-mcp/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "idx_mcp"
+      ],
+      "env": {
+        "IDX_API_URL": "http://127.0.0.1:8001",
+        "INGEST_AUTH_TOKEN": "${INGEST_AUTH_TOKEN:-}",
+        "IDX_AGENT_USER": "${IDX_AGENT_USER:-}"
+      }
+    }
+  }
+}
