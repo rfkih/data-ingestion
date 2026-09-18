@@ -364,6 +364,9 @@ def monthly_check(conn: psycopg.Connection, D: date, build: bool = True) -> dict
         meta = metas[b]
         if not (meta.get("regime_filter") or meta.get("entry_gate") or meta.get("take_profit_pct") or meta.get("trend_exit") or uses_cash_buffer(meta)):
             continue
+        if bk.is_halted(meta):                                               # kill switch: no overlay ticket either
+            report["books"].append({"book": b, "action": None, "ticket": None, "names": [], "why": "halted"})
+            continue
         snap = bk.snapshot(conn, b)
         positions = snap["positions"]
         held = {p["code"] for p in positions}

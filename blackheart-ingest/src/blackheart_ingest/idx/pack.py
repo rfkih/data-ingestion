@@ -312,7 +312,9 @@ def validate_answer(answer: Any, pack_codes: list[str], pack_date: date) -> dict
             "names": out, "notes": (answer.get("notes") or "").strip(), "missing": missing}
 
 
-def import_answer(conn: psycopg.Connection, pack_date: date, answer: Any) -> dict[str, Any]:
+def import_answer(conn: psycopg.Connection, pack_date: date, answer: Any, model: str = "claude-chat-manual") -> dict[str, Any]:
+    """Store an answer under ``model`` (``claude-chat-manual`` = pasted from chat; the MCP tools send ``claude-code``).
+    The conflict key includes the model, so a manual and an agent answer coexist per pack date."""
     p = load(conn, pack_date)
     if p is None:
         raise AnswerError(f"no pack for {pack_date}")
@@ -324,13 +326,13 @@ def import_answer(conn: psycopg.Connection, pack_date: date, answer: Any) -> dic
             """
             INSERT INTO idx.sentiment_score (doc_type, doc_id, code, model, prompt_version, event_type, stance, materiality, confidence,
                                              rationale, veto, scored_at)
-            VALUES ('pack', %(doc_id)s, %(code)s, 'claude-chat-manual', %(pv)s, %(stance_word)s, %(stance)s, NULL, %(conf)s, %(rationale)s,
+            VALUES ('pack', %(doc_id)s, %(code)s, %(model)s, %(pv)s, %(stance_word)s, %(stance)s, NULL, %(conf)s, %(rationale)s,
                     %(veto)s, %(now)s)
             ON CONFLICT (doc_type, doc_id, code, model, prompt_version) DO UPDATE SET event_type = EXCLUDED.event_type,
                 stance = EXCLUDED.stance, confidence = EXCLUDED.confidence, rationale = EXCLUDED.rationale, veto = EXCLUDED.veto,
                 scored_at = EXCLUDED.scored_at
             """,
-            [{"doc_id": pack_date.isoformat(), "code": n["code"], "pv": a["prompt_version"], "stance_word": n["stance"],
+            [{"doc_id": pack_date.isoformat(), "code": n["code"], "model": model, "pv": a["prompt_version"], "stance_word": n["stance"],
               "stance": STANCES[n["stance"]], "conf": Decimal(n["conviction"]) / 5,
               "rationale": n["thesis"] + ((" | risks: " + n["risks"]) if n["risks"] else "") + ((" | VETO: " + n["veto_reason"]) if n["veto"] else ""),
               "veto": "skip" if n["veto"] else None, "now": now} for n in a["names"]])

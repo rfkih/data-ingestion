@@ -29,7 +29,18 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..shared.db import get_connection
-from . import book, candidates, features, fin_store, levels, overlay, publish, runlog, ticket
+from . import (
+    book,
+    candidates,
+    features,
+    fin_store,
+    levels,
+    overlay,
+    publish,
+    runlog,
+    ticket,
+    trend_book,
+)
 from .client import IdxClient, IdxFetchError
 from .jobs import announce as job_announce
 from .jobs import crosscheck as job_crosscheck
@@ -92,16 +103,24 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
                 logger.info("idx overlay check %s regime_on=%s books=%s", d, rep["regime"]["on"], [(x["book"], x["action"]) for x in rep["books"]])
         except Exception as e:                                          # the chain must go on
             runlog.alert(conn, "warning", "overlay", f"monthly check failed: {type(e).__name__}: {e}")
-        try:
-            for rep in ticket.paper_fill(conn, "paper"):
-                logger.info("idx paper fill ticket #%s at %s: %s lines", rep["ticket"], rep["fill_date"], len(rep["fills"]))
-        except Exception as e:                                          # the chain must go on to the marks
-            runlog.alert(conn, "warning", "ticket:paper", f"paper fill failed: {type(e).__name__}: {e}")
-        for bk in ("live", "paper"):
+        books = [r["book"] for r in _all_books(conn)]
+        for bk in [x for x in books if ticket.is_paper(x)]:
+            try:
+                for rep in ticket.paper_fill(conn, bk):
+                    logger.info("idx paper fill %s ticket #%s at %s: %s lines", bk, rep["ticket"], rep["fill_date"], len(rep["fills"]))
+            except Exception as e:                                      # the chain must go on to the marks
+                runlog.alert(conn, "warning", f"ticket:{bk}", f"paper fill failed: {type(e).__name__}: {e}")
+        for bk in books:
             rm = book.mark(conn, bk)
             _fail_alert(conn, rm)
             if rm.status == "ok":
                 _fail_alert(conn, book.check(conn, bk))
+        for bk in trend_book.trend_books(conn):                          # tonight's breakout/trailing-stop ticket per trend book
+            try:
+                rep = trend_book.run(conn, bk)
+                logger.info("idx trend %s: %s", bk, rep)
+            except Exception as e:
+                runlog.alert(conn, "warning", f"ticket:{bk}", f"trend ticket failed: {type(e).__name__}: {e}")
                 _fail_alert(conn, levels.check(conn, bk))                   # stop / take-profit / index levels
 
 
@@ -142,6 +161,12 @@ def run_fundamentals(previous_year: bool = False) -> None:
         logger.info("idx fin parse %s reports=%s", rp.status, rp.rows_out)
 
 
+def _all_books(conn) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT book FROM idx.book WHERE book NOT LIKE 'test%%' AND archived_at IS NULL ORDER BY book")
+        return [r if isinstance(r, dict) else {"book": r[0]} for r in cur.fetchall()]
+
+
 def check_rebalance_due() -> None:
     """Early May: remind the operator to build the annual ticket if none exists for this year's run."""
     d = today_wib()
@@ -164,6 +189,33 @@ def run_dividends() -> None:
         if r.detail.get("failed_codes", 0) > len(codes) // 10:
             runlog.alert(conn, "warning", "dividends", f"{r.detail['failed_codes']} of {len(codes)} codes failed on Yahoo")
         logger.info("idx dividends %s codes=%s rows=%s", r.status, len(codes), r.rows_out)
+
+
+def run_broker_snapshot() -> None:
+    """Today's free broker-distribution snapshot for the liquid universe (card context; not a desk dependency).
+
+    Off unless STOCKBIT_TOKEN (or STOCKBIT_REFRESH_TOKEN) is set. Auto-refreshes the token when a refresh token
+    is present; a paywall/expired key stops the run cleanly and raises one warning, not a crash.
+    """
+    from . import broker
+    import os as _os
+    if not (_os.environ.get(broker.TOKEN_ENV) or _os.environ.get(broker.REFRESH_ENV)):
+        return
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        try:
+            cfg = broker.config_fresh()
+            codes = universe_codes(conn)
+            res = broker.snapshot(conn, codes, cfg, expected_date=job_daily.latest_bar_date(conn), log=logger.info)
+        except broker.BrokerFetchError as e:
+            runlog.alert(conn, "warning", "broker", f"broker snapshot: {e}")
+            logger.warning("idx broker snapshot: %s", e)
+            return
+        if res["stopped"]:
+            runlog.alert(conn, "warning", "broker", f"broker snapshot stopped: {res['stopped']}")
+        logger.info("idx broker snapshot %s ok=%s failed=%s rows=%s", res.get("date"), res["ok"], res["failed"], res["rows"])
 
 
 def run_macro() -> None:
@@ -285,6 +337,7 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(check_no_bar, CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=WIB), id="no_bar_alert")
     s.add_job(run_daily_fallback, CronTrigger(day_of_week="mon-fri", hour=19, minute=40, timezone=WIB), id="daily_fallback")
     s.add_job(run_announce_recent, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="announce_recent")
+    s.add_job(run_broker_snapshot, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="broker_snapshot")
     s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=7, minute=30, timezone=WIB), id="macro")
     s.add_job(run_news, CronTrigger(hour="6,12,18,22", minute=10, timezone=WIB), id="news")
     s.add_job(run_consensus, CronTrigger(day_of_week="sat", hour=11, minute=0, timezone=WIB), id="consensus")

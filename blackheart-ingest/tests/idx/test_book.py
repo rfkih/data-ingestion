@@ -92,3 +92,34 @@ def test_round_trip(conn) -> None:
             cur.execute("DELETE FROM idx.alert WHERE job = %s", (f"book:{bk}",))
             cur.execute("DELETE FROM idx.book WHERE book = %s", (bk,))
         conn.commit()
+
+
+def test_rebuild_after_backdated_fills_marks_each_day_with_that_days_positions(conn) -> None:
+    """Regression (found 2026-09-17): mark used the CURRENT positions for every past day, so a --rebuild after back-dated
+    fills painted today's book over the whole history."""
+    bk = "test_book_bd"
+    with conn.cursor() as cur:
+        for t in ("book_mark", "book_nav", "position", "fill", "decision"):
+            cur.execute(f"DELETE FROM idx.{t} WHERE book = %s", (bk,))
+        cur.execute("DELETE FROM idx.book WHERE book = %s", (bk,))
+    conn.commit()
+    try:
+        book.ensure_book(conn, bk, cash=Decimal(100_000_000))
+        book.add_fill(conn, bk, date(2026, 5, 5), "GJTL", "buy", Decimal(100), Decimal(1200))
+        assert book.mark(conn, bk, date(2026, 5, 12)).status == "ok"
+        # a fill dated in the past, entered late: sell GJTL and buy BBCA on May 8
+        book.add_fill(conn, bk, date(2026, 5, 8), "GJTL", "sell", Decimal(100), Decimal(1250))
+        book.add_fill(conn, bk, date(2026, 5, 8), "BBCA", "buy", Decimal(10), Decimal(9000))
+        assert book.mark(conn, bk, date(2026, 5, 12), rebuild=True).status == "ok"
+        with conn.cursor() as cur:
+            cur.execute("SELECT trade_date, string_agg(code, ',' ORDER BY code) FROM idx.book_mark WHERE book = %s GROUP BY 1 ORDER BY 1", (bk,))
+            marks = {str(d): codes for d, codes in cur.fetchall()}
+        assert marks["2026-05-05"] == "GJTL" and marks["2026-05-07"] == "GJTL" and marks["2026-05-08"] == "BBCA" and marks["2026-05-12"] == "BBCA"
+        assert [p["code"] for p in book.snapshot(conn, bk)["positions"]] == ["BBCA"]
+    finally:
+        with conn.cursor() as cur:
+            for t in ("book_mark", "book_nav", "position", "fill", "decision"):
+                cur.execute(f"DELETE FROM idx.{t} WHERE book = %s", (bk,))
+            cur.execute("DELETE FROM idx.alert WHERE job = %s", (f"book:{bk}",))
+            cur.execute("DELETE FROM idx.book WHERE book = %s", (bk,))
+        conn.commit()

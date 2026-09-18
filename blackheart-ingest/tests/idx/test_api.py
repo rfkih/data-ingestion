@@ -53,3 +53,23 @@ def test_candidates_shape(client) -> None:
         assert {"code", "ep", "bp", "dy", "gate_strict", "strict_fails", "warnings"} <= set(row)
         assert len(body["rows"]) == body["selected"]
         assert len(client.get("/idx/candidates", params={"all": 1}).json()["rows"]) == body["pool"]
+
+
+def test_push_register_needs_an_account(client, monkeypatch) -> None:
+    """The per-account paths are in test_multiuser.py; here: a phone belongs to an account, the desk's own routes still answer."""
+    from blackheart_ingest.idx import push
+    monkeypatch.delenv(push.SA_ENV, raising=False)
+    assert client.post("/idx/push/register", json={"token": "test-device-api-" + "x" * 24}).status_code == 401
+    d = client.get("/idx/push/devices").json()
+    assert d["configured"] is False and isinstance(d["devices"], list)
+    t = client.post("/idx/push/test", json={}).json()
+    assert t["sent"] == 0 and t["configured"] is False                                     # no Firebase file: a no-op that says so
+
+
+def test_books_list(client) -> None:
+    r = client.get("/idx/books")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    assert rows and {"book", "kind", "rule", "nav_now", "cash", "positions", "open_ticket", "halted"} <= set(rows[0])
+    assert all(x["kind"] in ("live", "paper") and x["rule"] in ("annual", "trend") and not x["book"].startswith("test") for x in rows)
+    assert [x["kind"] for x in rows] == sorted((x["kind"] for x in rows), key=lambda k: k != "live")    # live first

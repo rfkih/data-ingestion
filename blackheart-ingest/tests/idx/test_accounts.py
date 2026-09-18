@@ -8,6 +8,7 @@ import uuid
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.rows import dict_row
 
 from blackheart_ingest.idx import accounts as AC
 
@@ -22,7 +23,8 @@ def test_password_hashes_verify_and_differ_per_salt() -> None:
 
 
 def test_password_policy_is_the_platforms() -> None:
-    assert AC.password_problem("short1!A") is not None
+    assert AC.password_problem("sho1!A") is not None  # 6 chars: under the 8 minimum
+    assert AC.password_problem("short1!A") is None  # 8 chars with every class: the minimum
     assert AC.password_problem("alllowercase123!") is not None
     assert AC.password_problem("Correct-Horse-9!") is None
     assert AC.email_ok("a@b.co") and not AC.email_ok("nope") and not AC.email_ok("a @b.co")
@@ -87,3 +89,36 @@ def test_register_login_me_logout(client) -> None:
     assert r.status_code == 200 and r.json()["data"]["email"] == email and "password_hash" not in r.text
     assert client.get("/api/v1/users/me", headers={"authorization": "Bearer nonsense"}).status_code == 401
     assert client.post("/api/v1/users/logout").status_code == 200
+
+
+def test_password_reset_link_is_one_time(client) -> None:
+    """A reset token (made on the desk) sets a new password once, within its lifetime; the old password stops working."""
+    dsn = os.environ["INGEST_DB_DSN"]
+    email = "test-reset@papan.test"
+    with psycopg.connect(dsn, row_factory=dict_row) as conn:
+        AC.create_user(conn, email, "Reset", None, "Correct-Horse-9!")
+        assert AC.make_reset(conn, "nobody@papan.test") is None
+        tok = AC.make_reset(conn, email)
+        assert tok and len(tok) > 30
+        r = client.post("/api/v1/users/password-reset", json={"token": tok, "password": "short"})
+        assert r.status_code == 400                                                        # policy first, token untouched
+        r = client.post("/api/v1/users/password-reset", json={"token": "not-a-token", "password": "Another-Horse-10!"})
+        assert r.status_code == 400 and "not valid" in r.json()["errorMessage"]
+        r = client.post("/api/v1/users/password-reset", json={"token": tok, "password": "Another-Horse-10!"})
+        assert r.status_code == 200 and r.json()["data"]["email"] == email
+        r = client.post("/api/v1/users/password-reset", json={"token": tok, "password": "Third-Horse-11!"})
+        assert r.status_code == 400 and "already been used" in r.json()["errorMessage"]
+        assert client.post("/api/v1/users/login", json={"email": email, "password": "Correct-Horse-9!"}).status_code == 401
+        ok = client.post("/api/v1/users/login", json={"email": email, "password": "Another-Horse-10!"})
+        assert ok.status_code == 200
+        bearer = ok.json()["data"]["accessToken"]
+        # a signed-in person changes their own password; the wrong current password is refused
+        r = client.post("/api/v1/users/password", json={"currentPassword": "wrong", "newPassword": "Fourth-Horse-12!"}, headers={"Authorization": f"Bearer {bearer}"})
+        assert r.status_code == 401
+        r = client.post("/api/v1/users/password", json={"currentPassword": "Another-Horse-10!", "newPassword": "Fourth-Horse-12!"}, headers={"Authorization": f"Bearer {bearer}"})
+        assert r.status_code == 200
+        assert client.post("/api/v1/users/login", json={"email": email, "password": "Fourth-Horse-12!"}).status_code == 200
+        # an expired link
+        tok2 = AC.make_reset(conn, email, minutes=0)
+        r = client.post("/api/v1/users/password-reset", json={"token": tok2, "password": "Fifth-Horse-13!"})
+        assert r.status_code == 400 and "expired" in r.json()["errorMessage"]

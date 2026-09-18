@@ -79,6 +79,12 @@ def test_round_trip(conn) -> None:
         mine = [r for r in rows if r["pack_date"] == d.isoformat()]
         assert mine and mine[0]["veto"] == "skip" and mine[0]["stance"] == "avoid" and int(mine[0]["conviction"]) == 3
         assert pack.load(conn, d)["imported_at"] is not None
+        # a second reader under another model coexists with the manual answer for the same pack date
+        pack.import_answer(conn, d, _ans(pack_date=d.isoformat()), model="claude-code")
+        with conn.cursor() as cur:
+            cur.execute("SELECT model, count(*) FROM idx.sentiment_score WHERE doc_type = 'pack' AND doc_id = %s GROUP BY model ORDER BY model",
+                        (d.isoformat(),))
+            assert cur.fetchall() == [("claude-chat-manual", 2), ("claude-code", 2)]
         with pytest.raises(pack.AnswerError):
             pack.import_answer(conn, d, _ans(pack_date="1999-01-01"))
     finally:

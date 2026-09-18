@@ -23,6 +23,7 @@ import psycopg
 import psycopg.types.json
 
 from . import book as bk
+from . import journal
 from .card import _pct, _rows
 from .metrics import fundamentals_asof
 
@@ -33,6 +34,22 @@ MIN_TRADE = Decimal(5_000_000)      # and trades below Rp 5 M
 CASH_RESERVE = Decimal("0.01")      # keep 1 % of NAV in cash for fees/rounding
 TICKS = ((200, 1), (500, 2), (2000, 5), (5000, 10), (10**12, 25))
 BANDS = ((200, Decimal("0.35")), (5000, Decimal("0.25")), (10**12, Decimal("0.20")))
+LIVE_BOOKS = frozenset({"live"})     # kept for callers; the rule itself is is_live(): everything that is not paper/test is live
+
+
+def is_live(book: str) -> bool:
+    """Two-key applies to every book that is not a paper or test book (live, trend_live, ...)."""
+    b = (book or "").lower()
+    return not (b.startswith("paper") or b.startswith("test"))
+
+
+def is_paper(book: str) -> bool:
+    """``paper``, ``paper_trend``, ``paper-3f9a2c`` (created books carry their kind as the id prefix)."""
+    return (book or "").lower().startswith("paper")
+REBALANCE_WINDOW = ((5, 1), (5, 10))  # the annual rebalance: turnover is expected in May 1-10
+TWO_KEY = ("two-key: tickets on the live book are issued and closed by the operator (the Blackridge app or `idx ticket issue`); "
+           "the agent may only draft or cancel its own draft")
+STATUSES = ("draft", "issued", "closed", "cancelled")
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +177,135 @@ def plan(targets: list[str] | dict[str, Any], held: dict[str, dict[str, Any]], p
 # ---------------------------------------------------------------------------
 # build from the database
 # ---------------------------------------------------------------------------
+def in_rebalance_window(d: date) -> bool:
+    (m1, d1), (m2, d2) = REBALANCE_WINDOW
+    return (m1, d1) <= (d.month, d.day) <= (m2, d2)
+
+
+def validate_lines(lines: list[dict[str, Any]], held: dict[str, dict[str, Any]], prices: dict[str, Decimal], cash: Decimal, *,
+                   book: dict[str, Any], sectors: dict[str, str | None], v60: dict[str, Decimal | None], allowed_buys: set[str],
+                   ticket_date: date, mode: str, actor: str = "operator") -> dict[str, Any]:
+    """Pure. The guardrails a ticket must pass before it is issued (or paper-filled), against the book's limits:
+    ``lot`` (whole positive lots left to trade), ``band`` (limit inside the auto-rejection band of its reference close),
+    ``not_in_candidates`` (a buy outside the candidate run / targets), ``liquidity`` (a buy under ``min_v60``),
+    ``max_weight`` / ``max_sector`` (a buy that leaves one name / one sector above the cap, weights on pre-ticket NAV),
+    ``cash_negative`` (buys exceed cash plus sale proceeds after fees), ``turnover`` (an AGENT-built rebalance outside the
+    May window trading more than ``max_turnover_pct`` of NAV - the anti-churn rule; operator and scheduler tickets are exempt).
+    Only open/partial lines count: filled lines are already in ``held``; skipped lines are not traded."""
+    fee_buy, fee_sell = Decimal(book["fee_buy_pct"]) / 100, Decimal(book["fee_sell_pct"]) / 100
+    lim_w, lim_s = Decimal(book["max_weight_pct"]) / 100, Decimal(book["max_sector_pct"]) / 100
+    lim_t, min_v60 = Decimal(book["max_turnover_pct"]) / 100, Decimal(book["min_v60"])
+
+    def price_of(c: str, ln: dict[str, Any] | None = None) -> Decimal | None:
+        if c in prices:
+            return Decimal(prices[c])
+        if ln is not None and ln.get("ref_close") is not None:
+            return Decimal(ln["ref_close"])
+        return None
+
+    value_now = {c: Decimal(h["lots"]) * LOT * price_of(c) for c, h in held.items() if price_of(c) is not None}
+    nav = Decimal(cash) + sum(value_now.values(), Decimal(0))
+    post_lots = {c: Decimal(h["lots"]) for c, h in held.items()}
+    breaches: list[dict[str, Any]] = []
+    traded = buys = sells = Decimal(0)
+    active = [ln for ln in lines if (ln.get("status") or "open") in ("open", "partial")]
+    for ln in active:
+        c, side = ln["code"], ln["side"]
+        left = Decimal(ln["lots"]) - Decimal(ln.get("filled_lots") or 0)
+        lp = Decimal(ln["limit_price"])
+        if left <= 0 or left != left.to_integral_value():
+            breaches.append({"kind": "lot", "code": c, "detail": f"{left} lots left to trade", "value": str(left), "limit": "whole lots > 0"})
+            continue
+        if ln.get("ref_close") is not None:
+            lo, hi = reject_band(Decimal(ln["ref_close"]))
+            if not lo <= lp <= hi:
+                breaches.append({"kind": "band", "code": c, "detail": f"limit {lp} outside auto-rejection band {lo}-{hi} of close {ln['ref_close']}",
+                                 "value": str(lp), "limit": f"{lo}-{hi}"})
+        notional = left * LOT * lp
+        traded += notional
+        if side == "buy":
+            buys += notional
+            post_lots[c] = post_lots.get(c, Decimal(0)) + left
+            if c not in allowed_buys:
+                breaches.append({"kind": "not_in_candidates", "code": c, "detail": "buy of a name outside the candidate run and the ticket's targets",
+                                 "value": c, "limit": "candidates"})
+            liq = v60.get(c)
+            if liq is None:
+                breaches.append({"kind": "liquidity_unknown", "code": c, "detail": "no 60-day traded-value figure for this name", "value": None,
+                                 "limit": str(min_v60)})
+            elif Decimal(liq) < min_v60:
+                breaches.append({"kind": "liquidity", "code": c, "detail": f"60-day median value Rp {float(liq):,.0f}/day under the floor",
+                                 "value": str(liq), "limit": str(min_v60)})
+        else:
+            sells += notional
+            post_lots[c] = max(post_lots.get(c, Decimal(0)) - left, Decimal(0))
+    line_by_code = {ln["code"]: ln for ln in active}
+    post_value = {c: n * LOT * price_of(c, line_by_code.get(c)) for c, n in post_lots.items() if n > 0 and price_of(c, line_by_code.get(c)) is not None}
+    weights = {c: (v / nav if nav > 0 else Decimal(0)) for c, v in post_value.items()}
+    bought = {ln["code"] for ln in active if ln["side"] == "buy"}
+    for c in sorted(bought):
+        if weights.get(c, Decimal(0)) > lim_w:
+            breaches.append({"kind": "max_weight", "code": c, "detail": f"{c} would be {float(weights[c]) * 100:.1f} % of NAV after the ticket",
+                             "value": str(weights[c]), "limit": str(lim_w)})
+    sector_w: dict[str, Decimal] = {}
+    for c, w in weights.items():
+        sec = sectors.get(c)
+        if sec:
+            sector_w[sec] = sector_w.get(sec, Decimal(0)) + w
+    for sec in sorted({sectors.get(c) for c in bought if sectors.get(c)}):
+        if sector_w.get(sec, Decimal(0)) > lim_s:
+            breaches.append({"kind": "max_sector", "code": None, "detail": f"sector {sec} would be {float(sector_w[sec]) * 100:.1f} % of NAV after the ticket",
+                             "value": str(sector_w[sec]), "limit": str(lim_s), "sector": sec})
+    cash_after = Decimal(cash) + sells * (1 - fee_sell) - buys * (1 + fee_buy)
+    if cash_after < 0:
+        breaches.append({"kind": "cash_negative", "code": None, "detail": f"buys exceed cash plus sale proceeds by Rp {float(-cash_after):,.0f}",
+                         "value": str(cash_after), "limit": "0"})
+    turnover = (traded / nav) if nav > 0 else Decimal(0)
+    if actor == "agent" and mode == "rebalance" and not in_rebalance_window(ticket_date) and turnover > lim_t:
+        breaches.append({"kind": "turnover", "code": None, "detail": f"agent rebalance outside May 1-10 trades {float(turnover) * 100:.0f} % of NAV",
+                         "value": str(turnover), "limit": str(lim_t)})
+    return {"ok": not breaches, "breaches": breaches, "n_lines": len(active), "nav": nav, "cash_after": cash_after, "turnover": turnover,
+            "weights": {c: str(w) for c, w in sorted(weights.items())}, "sectors": {k: str(v) for k, v in sorted(sector_w.items())},
+            "actor": actor, "in_rebalance_window": in_rebalance_window(ticket_date)}
+
+
+def validate(conn: psycopg.Connection, ticket_id: int) -> dict[str, Any]:
+    """The guardrails against the live state of the book: current positions, latest closes, the candidate run the ticket was
+    built from (pool + sectors + liquidity), the book's limits and status. Adds ``halted`` when the book is."""
+    t = load(conn, ticket_id)
+    if t is None:
+        raise ValueError(f"no ticket {ticket_id}")
+    b = bk.get_book(conn, t["book"])
+    s = bk.snapshot(conn, t["book"])
+    held = {p["code"]: {"lots": p["lots"], "avg_price": p["avg_price"]} for p in s["positions"]}
+    codes = sorted(set(held) | {ln["code"] for ln in t["lines"]})
+    px = {r["code"]: Decimal(r["close"]) for r in _rows(conn, """
+        SELECT DISTINCT ON (code) code, close FROM idx.bar WHERE code = ANY(%s) AND source IN ('idx', 'yahoo') ORDER BY code, trade_date DESC""",
+        (codes,), ["code", "close"])}
+    cands = _rows(conn, "SELECT code, sector, v60 FROM idx.candidate WHERE run_date = %s", (t["run_date"],), ["code", "sector", "v60"]) if t["run_date"] else []
+    sectors = {r["code"]: r["sector"] for r in _rows(conn, "SELECT code, sector FROM idx.listing WHERE code = ANY(%s)", (codes,), ["code", "sector"])}
+    sectors.update({c["code"]: c["sector"] for c in cands if c["sector"]})
+    v60 = {c["code"]: c["v60"] for c in cands}
+    for r in _rows(conn, """SELECT DISTINCT ON (code) code, value_60d_median FROM idx.feature_daily
+                             WHERE code = ANY(%s) AND value_60d_median IS NOT NULL ORDER BY code, trade_date DESC""",
+                   ([c for c in codes if c not in v60],), ["code", "v60"]):
+        v60.setdefault(r["code"], r["v60"])
+    params = t.get("params") or {}
+    allowed = {c["code"] for c in cands} | set(params.get("targets") or [])
+    res = validate_lines(t["lines"], held, px, Decimal(b["cash"]), book=b, sectors=sectors, v60=v60, allowed_buys=allowed,
+                         ticket_date=t["ticket_date"], mode=t["mode"], actor=str(params.get("actor") or "operator"))
+    if bk.is_halted(b):
+        res["breaches"].insert(0, {"kind": "halted", "code": None, "detail": f"book {t['book']} is halted: {b.get('halt_reason') or ''}".rstrip(": "),
+                                   "value": "halted", "limit": "active"})
+        res["ok"] = False
+    res.update({"ticket_id": ticket_id, "book": t["book"], "status": t["status"], "book_status": b.get("status")})
+    return res
+
+
+def breaches_text(v: dict[str, Any]) -> str:
+    return "; ".join(f"{x['kind']}" + (f" {x['code']}" if x.get("code") else "") + f": {x['detail']}" for x in v["breaches"])
+
+
 def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_date: date | None = None, max_names: int | None = None,
           strategy: str | None = None, band: Decimal = BAND, min_trade: Decimal | None = None, entrants: list[str] | None = None,
           exits: dict[str, str] | None = None) -> dict[str, Any]:
@@ -170,6 +316,8 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
     names under their 200-day average are held back (no buy line, slot kept in cash)."""
     from . import overlay, strategies
     b = bk.get_book(conn, book)
+    if bk.is_halted(b):
+        raise ValueError(f"book {book} is halted ({b.get('halt_reason') or 'no reason given'}); resume it before building a ticket")
     if mode not in ("rebalance", "exits", "cash", "entry"):
         raise ValueError(f"unknown ticket mode {mode!r}")
     strategy = strategy or b.get("strategy") or "rule"
@@ -252,7 +400,10 @@ def build(conn: psycopg.Connection, book: str, *, mode: str = "rebalance", run_d
     return res
 
 
-def store(conn: psycopg.Connection, res: dict[str, Any], notes: str | None = None) -> int:
+def store(conn: psycopg.Connection, res: dict[str, Any], notes: str | None = None, actor: str = "operator") -> int:
+    """``actor`` (agent | operator | scheduler) is kept in params: the turnover guardrail applies to agent-built tickets only."""
+    if actor not in journal.ACTORS:
+        raise ValueError(f"actor must be one of {journal.ACTORS}")
     with conn.cursor() as cur:
         cur.execute("""INSERT INTO idx.ticket (book, ticket_date, run_date, mode, nav, cash, n_targets, params, notes)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
@@ -260,7 +411,7 @@ def store(conn: psycopg.Connection, res: dict[str, Any], notes: str | None = Non
                      psycopg.types.json.Jsonb({"targets": res["targets"], "cash_after": str(res["cash_after"]), "strategy": res.get("strategy"),
                                                "size": res.get("size"), "weights": res.get("weights"), "held_back": res.get("held_back") or [],
                                                "regime": res.get("regime"), "regime_filter": res.get("regime_filter"),
-                                               "entry_gate": res.get("entry_gate")}), notes))
+                                               "entry_gate": res.get("entry_gate"), "actor": actor}), notes))
         row = cur.fetchone()
         tid = int(next(iter(row.values())) if isinstance(row, dict) else row[0])
         for i, line in enumerate(res["lines"], 1):
@@ -287,10 +438,29 @@ def load(conn: psycopg.Connection, ticket_id: int | None = None, book: str | Non
     return t
 
 
-def set_status(conn: psycopg.Connection, ticket_id: int, status: str) -> None:
+def set_status(conn: psycopg.Connection, ticket_id: int, status: str, actor: str = "operator", rationale: str | None = None) -> dict[str, Any]:
+    """Move a ticket between draft | issued | closed | cancelled. Guardrails (all server-side, so no client can skip them):
+    two-key - on a live book only the operator issues or closes (``PermissionError``); a halted book issues nothing;
+    ``issued`` requires ``validate`` to pass (``ValueError`` listing every breach). Every change is journaled."""
+    if status not in STATUSES:
+        raise ValueError(f"status must be one of {STATUSES}")
+    t = load(conn, ticket_id)
+    if t is None:
+        raise ValueError(f"no ticket {ticket_id}")
+    if is_live(t["book"]) and status in ("issued", "closed") and actor != "operator":
+        raise PermissionError(TWO_KEY)
+    checks = None
+    if status == "issued":
+        checks = validate(conn, ticket_id)
+        if not checks["ok"]:
+            raise ValueError(f"ticket #{ticket_id} cannot be issued: " + breaches_text(checks))
     with conn.cursor() as cur:
         cur.execute("UPDATE idx.ticket SET status = %s, updated_at = now() WHERE id = %s", (status, ticket_id))
+    journal.record(conn, t["book"], actor, "ticket_status", ticket_id=ticket_id, rationale=rationale or f"{t['status']} -> {status}",
+                   refs={"from": t["status"], "to": status, "mode": t["mode"], "n_lines": len(t["lines"]),
+                         "turnover": str(checks["turnover"]) if checks else None}, commit=False)
     conn.commit()
+    return {"id": ticket_id, "status": status, "checks": checks}
 
 
 def fill_line(conn: psycopg.Connection, line_id: int, lots: Decimal, price: Decimal, fee: Decimal | None = None, trade_date: date | None = None,
@@ -352,11 +522,20 @@ def paper_fill(conn: psycopg.Connection, book: str = "paper", dry_run: bool = Fa
     """The paper book's convention (as ``book.paper_seed``): open tickets fill at the open of the first trading day after the
     ticket date, sells first, buys trimmed to the cash; lines that cannot fill are skipped with the reason; the ticket closes.
     Refuses any other book: real fills are captured by hand. Returns one report per ticket touched."""
-    if book != "paper":
-        raise ValueError("paper_fill is for the paper book only")
+    if not is_paper(book):
+        raise ValueError("paper_fill is for paper books only")
     reports = []
+    if bk.is_halted(bk.get_book(conn, book)):
+        return reports                                                     # kill switch: nothing fills until resume
     for t_id in [r["id"] for r in _rows(conn, "SELECT id FROM idx.ticket WHERE book = %s AND status IN ('draft', 'issued') ORDER BY id", (book,), ["id"])]:
         t = load(conn, t_id)
+        checks = validate(conn, t_id)
+        if not checks["ok"]:
+            reports.append({"ticket": t_id, "ticket_date": t["ticket_date"], "fill_date": None, "fills": [], "cash_after": None, "dry_run": dry_run,
+                            "why": "guardrails: " + breaches_text(checks)})
+            if not dry_run:
+                bk._alert_once(conn, "warning", f"ticket:{book}", f"paper ticket #{t_id} not filled - " + breaches_text(checks))
+            continue
         d = _rows(conn, "SELECT min(trade_date) AS d FROM idx.bar WHERE source IN ('idx', 'yahoo') AND trade_date > %s", (t["ticket_date"],), ["d"])[0]["d"]
         rep = {"ticket": t_id, "ticket_date": t["ticket_date"], "fill_date": d, "fills": [], "cash_after": None, "dry_run": dry_run}
         if d is None:
@@ -375,9 +554,16 @@ def paper_fill(conn: psycopg.Connection, book: str = "paper", dry_run: bool = Fa
                     fill_line(conn, f["line_id"], f["lots"], f["price"], None, d, note=f"paper fill at the {d} open (ticket {t_id})", source="paper")
                 else:
                     skip_line(conn, f["line_id"], f"paper: {f['why']}")
-            set_status(conn, t_id, "closed")
+            set_status(conn, t_id, "closed", actor="scheduler", rationale=f"paper fill at the {d} open")
         reports.append(rep)
     return reports
+
+
+def line_book(conn: psycopg.Connection, line_id: int) -> dict[str, Any] | None:
+    """Which ticket and book a line belongs to (the routes gate live lines on it)."""
+    rows = _rows(conn, "SELECT l.id, l.ticket_id, l.code, l.side, t.book FROM idx.ticket_line l JOIN idx.ticket t ON t.id = l.ticket_id WHERE l.id = %s",
+                 (line_id,), ["id", "ticket_id", "code", "side", "book"])
+    return rows[0] if rows else None
 
 
 def skip_line(conn: psycopg.Connection, line_id: int, reason: str) -> None:

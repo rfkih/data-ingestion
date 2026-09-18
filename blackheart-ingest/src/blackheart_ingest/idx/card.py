@@ -151,6 +151,30 @@ def build(conn: psycopg.Connection, code: str, as_of: date | None = None) -> str
     o.append(f"- 5-day net share {_pct(b['f5'])} | 20-day net share {_pct(b['f20'])} | 20-day net {net20/1e6:+,.1f} M shares on {vol20/1e6:,.0f} M volume")
     o.append("- last 10 days: " + " ".join(f"{str(x['d'])[5:]}:{int(x['net'] or 0)/1e6:+.1f}M" for x in flow[:10]))
     o.append("")
+    # Most recent broker read available: the daily distribution snapshot (date_from == date_to) once it exists,
+    # otherwise the legacy 20-day window backfill. Same date_to prefers the one-day snapshot (smallest window).
+    bs = _rows(conn, """SELECT date_from, date_to, broker_accdist, top1_pct, top5_pct, total_buyer, total_seller, value FROM idx.broker_detector
+                         WHERE code = %s AND date_to <= %s ORDER BY date_to DESC, (date_to - date_from) ASC LIMIT 1""", (code, D),
+               ["date_from", "date_to", "label", "top1", "top5", "buyers", "sellers", "value"])
+    if bs:
+        w = bs[0]
+        one_day = w["date_from"] == w["date_to"]
+        span = f"{w['date_to']}, one day" if one_day else f"{w['date_from']} -> {w['date_to']}"
+        br = _rows(conn, """SELECT broker, investor, net_value FROM idx.broker_summary WHERE code = %s AND date_from = %s AND date_to = %s
+                            ORDER BY net_value DESC""", (code, w["date_from"], w["date_to"]), ["broker", "investor", "net"])
+        top = [x for x in br if Decimal(x["net"] or 0) > 0][:5]
+        bot = [x for x in br if Decimal(x["net"] or 0) < 0][-5:][::-1]
+        cls: dict[str, Decimal] = {}
+        for x in br:
+            cls[x["investor"] or "?"] = cls.get(x["investor"] or "?", Decimal(0)) + Decimal(x["net"] or 0)
+        o.append(f"## Broker summary (Stockbit feed, {span}, regular market, net)")
+        o.append(f"- label {w['label'] or '-'} | top-1 net buyer {float(w['top1'] or 0):+.1f} % of value, top-5 {float(w['top5'] or 0):+.1f} % | net buyers {w['buyers']} vs net sellers {w['sellers']} "
+                 f"| traded Rp {_t(w['value'], 1e9, 0)} bn")
+        o.append("- by class: " + ", ".join(f"{k} {float(v) / 1e9:+,.0f} bn" for k, v in sorted(cls.items(), key=lambda kv: -kv[1])))
+        o.append("- top net buyers: " + ", ".join(f"{x['broker']} ({(x['investor'] or '?')[0]}) {float(x['net']) / 1e9:+,.0f}" for x in top)
+                 + " | top net sellers: " + ", ".join(f"{x['broker']} ({(x['investor'] or '?')[0]}) {float(x['net']) / 1e9:+,.0f}" for x in bot) + " (Rp bn)")
+        o.append("- research 2026-09-17: broker accumulation did not predict 5-60 day returns (menus 4-5, 19 trials); read this as context, not a signal")
+        o.append("")
     o.append("## Disclosures (last 10, classified)")
     for e in events:
         o.append(f"- {e['pub'].date()} [{e['kind']}] {e['title'][:90]}")

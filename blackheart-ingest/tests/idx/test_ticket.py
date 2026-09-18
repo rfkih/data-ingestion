@@ -91,7 +91,7 @@ def conn():
 def _clean(conn, bk):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM idx.ticket WHERE book = %s", (bk,))
-        for t in ("book_mark", "book_nav", "position", "fill"):
+        for t in ("book_mark", "book_nav", "position", "fill", "decision"):
             cur.execute(f"DELETE FROM idx.{t} WHERE book = %s", (bk,))
         cur.execute("DELETE FROM idx.alert WHERE job = %s", (f"book:{bk}",))
         cur.execute("DELETE FROM idx.book WHERE book = %s", (bk,))
@@ -102,7 +102,7 @@ def test_round_trip(conn) -> None:
     bk = "test_ticket"
     _clean(conn, bk)
     try:
-        book.ensure_book(conn, bk, cash=Decimal(200_000_000))
+        book.ensure_book(conn, bk, cash=Decimal(200_000_000), max_weight_pct=25, max_sector_pct=60)   # a 5-name book: limits to match
         res = ticket.build(conn, bk, run_date=date(2026, 9, 11), max_names=5)
         assert res["run_date"] == date(2026, 9, 11) and len(res["targets"]) == 5
         assert len(res["lines"]) == 5 and all(ln["side"] == "buy" for ln in res["lines"])

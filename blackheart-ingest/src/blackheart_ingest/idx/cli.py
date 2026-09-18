@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -52,6 +53,19 @@ from .jobs import universe as job_universe
 
 def _d(s: str) -> date:
     return date.fromisoformat(s)
+
+
+def _jwt_exp(token: str) -> str | None:
+    """The exp claim of a JWT as a UTC string, for a friendly "expires …" line; None if it cannot be read."""
+    import base64
+    import json as _json
+    try:
+        p = token.split(".")[1]
+        claims = _json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
+        exp = claims.get("exp")
+        return datetime.fromtimestamp(exp, UTC).strftime("%Y-%m-%d %H:%M UTC") if exp else None
+    except Exception:
+        return None
 
 
 def _today() -> date:
@@ -627,7 +641,9 @@ def cmd_book(a: argparse.Namespace) -> int:
             print(f"{a.book}: cash set to Rp {float(Decimal(a.amount)):,.0f}")
         elif a.sub == "set":
             fields = {k: v for k, v in (("fee_buy_pct", a.fee_buy), ("fee_sell_pct", a.fee_sell), ("div_tax_pct", a.div_tax), ("broker", a.broker),
-                                        ("cash_floor_pct", a.cash_floor), ("stress_cash_pct", a.stress_cash), ("stress_rule", a.stress_rule)) if v is not None}
+                                        ("cash_floor_pct", a.cash_floor), ("stress_cash_pct", a.stress_cash), ("stress_rule", a.stress_rule),
+                                        ("max_weight_pct", a.max_weight), ("max_sector_pct", a.max_sector), ("max_turnover_pct", a.max_turnover),
+                                        ("min_v60", a.min_v60)) if v is not None}
             book.ensure_book(conn, a.book, **fields)
             print(f"{a.book}: {book.get_book(conn, a.book)}")
         elif a.sub == "import":
@@ -645,6 +661,26 @@ def cmd_book(a: argparse.Namespace) -> int:
             for al in runlog.open_alerts(conn, 20):
                 if al["job"] == f"book:{a.book}":
                     print(f"  [{al['severity']}] {al['message']}")
+        elif a.sub == "halt":
+            from . import journal
+            b = book.halt(conn, a.book, a.reason or "operator halt")
+            journal.record(conn, a.book, "operator", "halt", rationale=b["halt_reason"])
+            print(f"{a.book}: HALTED ({b['halt_reason']}) - no ticket builds/issues, no paper fills until `idx book resume`")
+        elif a.sub == "resume":
+            from . import journal
+            book.resume(conn, a.book)
+            journal.record(conn, a.book, "operator", "resume")
+            print(f"{a.book}: active")
+        elif a.sub == "journal":
+            from . import journal
+            for r in journal.recent(conn, a.book, a.code, a.limit):
+                print(f"{r['ts']:%Y-%m-%d %H:%M} {r['actor']:<9} {r['action']:<13} {r['code'] or '':<6} #{r['ticket_id'] or '-':<5} {r['rationale'] or ''}")
+        elif a.sub == "reconcile":
+            from . import reconcile as rc
+            rows = rc.parse_csv(Path(a.file).read_text(encoding="utf-8-sig"))
+            rep = rc.reconcile(conn, a.book, rows, source=Path(a.file).name)
+            print(rc.render(rep))
+            return 0 if rep["ok"] else 1
         elif a.sub == "paper-seed":
             fills = book.paper_seed(conn, a.book, _d(a.as_of), Decimal(a.amount), fill=a.fill)
             print(f"{a.book}: {len(fills)} names bought on {fills[0]['date'] if fills else '-'}")
@@ -671,12 +707,27 @@ def cmd_ticket(a: argparse.Namespace) -> int:
         elif a.sub == "show":
             t = ticket.load(conn, a.id, None if a.id else a.book)
             print(ticket.render(t) if t else "no ticket")
+        elif a.sub == "validate":
+            t = ticket.load(conn, a.id, None if a.id else a.book)
+            if not t:
+                print("no ticket")
+                return 1
+            v = ticket.validate(conn, t["id"])
+            print(f"ticket #{t['id']} {t['book']} {t['mode']} {t['status']} built by {v['actor']}: {'OK' if v['ok'] else 'BREACHES'} | "
+                  f"turnover {float(v['turnover']) * 100:.0f} % | cash after Rp {float(v['cash_after']):,.0f}")
+            for x in v["breaches"]:
+                print(f"  - {x['kind']} {x['code'] or ''}: {x['detail']}")
+            return 0 if v["ok"] else 1
         elif a.sub in ("issue", "close", "cancel"):
             t = ticket.load(conn, a.id, None if a.id else a.book)
             if not t:
                 print("no ticket")
                 return 1
-            ticket.set_status(conn, t["id"], {"issue": "issued", "close": "closed", "cancel": "cancelled"}[a.sub])
+            try:
+                ticket.set_status(conn, t["id"], {"issue": "issued", "close": "closed", "cancel": "cancelled"}[a.sub], actor="operator", rationale=a.note)
+            except ValueError as e:
+                print(f"refused: {e}")
+                return 1
             print(f"ticket #{t['id']} {'cancelled' if a.sub == 'cancel' else a.sub + 'd'}")
         elif a.sub == "paper-fill":
             for rep in ticket.paper_fill(conn, "paper", dry_run=a.dry_run):
@@ -693,6 +744,175 @@ def cmd_ticket(a: argparse.Namespace) -> int:
         elif a.sub == "skip":
             ticket.skip_line(conn, a.line, a.reason or "operator skip")
             print(f"line {a.line}: skipped")
+    return 0
+
+
+def cmd_account(a: argparse.Namespace) -> int:
+    """Desk accounts: list | reset-link EMAIL (a one-time password-reset link, 30 minutes, shown once - hand it to the person)."""
+    from . import accounts
+    with get_connection() as conn:
+        if a.sub == "list":
+            with conn.cursor() as cur:
+                cur.execute("SELECT u.email, u.full_name, u.plan, u.created_at, u.last_login_at, "
+                            "(SELECT count(*) FROM idx.book b WHERE b.owner_id = u.id AND b.archived_at IS NULL) AS books "
+                            "FROM idx.app_user u ORDER BY u.created_at")
+                for r in cur.fetchall():
+                    r = dict(r)
+                    print(f"{r['email']:<36} {r['full_name'][:24]:<24} {r['plan']:<6} books {r['books']}  joined {r['created_at']:%Y-%m-%d}"
+                          f"  last login {r['last_login_at']:%Y-%m-%d %H:%M}" if r["last_login_at"] else
+                          f"{r['email']:<36} {r['full_name'][:24]:<24} {r['plan']:<6} books {r['books']}  joined {r['created_at']:%Y-%m-%d}  never signed in")
+            return 0
+        tok = accounts.make_reset(conn, a.email, minutes=a.minutes)
+    if not tok:
+        print(f"no account {a.email!r}")
+        return 1
+    base = (a.base or os.environ.get("IDX_APP_URL") or "https://a8.tailbf9662.ts.net/blackridge").rstrip("/")
+    print(f"{base}/reset?token={tok}")
+    print(f"(one use, {a.minutes} minutes; older unused links for this account are now void)")
+    return 0
+
+
+def cmd_push(a: argparse.Namespace) -> int:
+    from . import push
+    with get_connection() as conn:
+        if a.sub == "devices":
+            print(f"push: {'configured' if push.configured() else 'NOT configured (set ' + push.SA_ENV + ')'}")
+            for d in push.devices(conn, include_disabled=True):
+                print(f"{d['token'][:12]}…  {d['platform']:<8} {d['username'] or '-':<12} {(d['label'] or '-')[:40]:<40} "
+                      f"seen {d['last_seen']:%Y-%m-%d %H:%M}  sent {d['last_sent']:%Y-%m-%d %H:%M}" if d["last_sent"] else
+                      f"{d['token'][:12]}…  {d['platform']:<8} {d['username'] or '-':<12} {(d['label'] or '-')[:40]:<40} seen {d['last_seen']:%Y-%m-%d %H:%M}",
+                      "DISABLED " + (d["error"] or "") if d["disabled"] else (d["error"] or ""))
+            return 0
+        rep = push.send_all(conn, "Blackridge", a.text or "Blackridge: notifikasi aktif", {"route": "/m", "kind": "test"})
+        print(rep)
+        return 0 if rep["sent"] else 1
+
+
+def cmd_notify(a: argparse.Namespace) -> int:
+    from . import notify
+    if a.status or not a.text:
+        ch = notify.channels()
+        print(f"channels: {', '.join(ch) if ch else 'NONE (app: set ' + notify.push.SA_ENV + ' to the Firebase service-account file; telegram: ' + notify.TOKEN_ENV + ' + ' + notify.CHAT_ENV + ')'}")
+        return 0
+    ok = notify.send(a.text)
+    print("sent" if ok else "not sent (see log)")
+    return 0 if ok else 1
+
+
+def cmd_broker(a: argparse.Namespace) -> int:
+    import json
+
+    from . import broker
+    if a.sub == "refresh":
+        try:
+            tok = broker.refresh_and_persist()
+        except broker.BrokerFetchError as e:
+            print(f"refresh failed: {e}")
+            return 1
+        exp = _jwt_exp(tok)
+        print(f"token refreshed and written to idx-local.env (…{tok[-8:]}){f'; expires {exp}' if exp else ''}")
+        return 0
+    with get_connection() as conn:
+        if a.sub == "universe":
+            codes = broker.universe_codes(conn)
+            print(f"{len(codes)} names: {' '.join(codes)}")
+            return 0
+        if a.sub == "day":
+            codes = [c.strip().upper() for c in a.codes.split(",")] if a.codes else broker.universe_codes(conn)
+            try:
+                cfg = broker.config_fresh()                                  # auto-refresh when a refresh token is set
+            except broker.BrokerFetchError as e:
+                print(f"config: {e}")
+                return 1
+            expected = _rows_last_bar(conn)
+            try:
+                res = broker.snapshot(conn, codes, cfg, rps=a.rps, expected_date=expected, log=print)
+            except broker.BrokerFetchError as e:
+                print(f"snapshot stopped: {e}")
+                return 1
+            print(res)
+            return 0 if not res["stopped"] else 1
+        if a.sub == "show":
+            rows = broker.show(conn, a.code)
+            if not rows:
+                print("no rows")
+                return 1
+            print(f"{a.code.upper()} {rows[0]['date_from']} -> {rows[0]['date_to']}  (top by net value)")
+            for r in rows:
+                print(f"  {r['broker']:<4} {(r['broker_name'] or '')[:22]:<22} buy {float(r['buy_value'] or 0) / 1e9:8.2f} bn / {float(r['buy_lot'] or 0):>9,.0f} lot @ {float(r['buy_avg'] or 0):>8,.0f}"
+                      f" | sell {float(r['sell_value'] or 0) / 1e9:8.2f} bn / {float(r['sell_lot'] or 0):>9,.0f} lot @ {float(r['sell_avg'] or 0):>8,.0f} | net {float(r['net_value'] or 0) / 1e9:+8.2f} bn")
+            return 0
+        if a.sub == "reparse":
+            n = broker.reparse(conn, a.code or None)
+            print(f"reparsed: {n} rows")
+            return 0
+        cfg = broker.config()
+        if a.sub == "probe":
+            d_to = _d(a.d_to) if a.d_to else _rows_last_bar(conn)
+            d_from = _d(a.d_from) if a.d_from else d_to
+            status, payload, err = broker.fetch(a.code, d_from, d_to, cfg)
+            rows, diag = broker.parse(payload)
+            print(f"HTTP {status} {err or ''} | payload keys: {list(payload)[:8] if isinstance(payload, dict) else type(payload).__name__} | parsed {diag['n']} rows | lists used {diag['lists_used']}")
+            print(f"keys seen: {diag['keys_seen']}")
+            txt = json.dumps(payload)[:1500] if payload is not None else ""
+            print("payload head:", txt)
+            if status == 200:
+                broker.store(conn, a.code, d_from, d_to, cfg, status, payload, err)
+                for r in rows[:8]:
+                    print(f"  {r['broker']:<4} net {float(r['net_value']) / 1e9:+8.2f} bn  buy {float(r['buy_value'] or 0) / 1e9:.2f} / sell {float(r['sell_value'] or 0) / 1e9:.2f}")
+            return 0 if status == 200 else 1
+        codes = [c.strip().upper() for c in a.codes.split(",")] if a.codes else broker.universe_codes(conn)
+        end = _d(a.end) if a.end else _rows_last_bar(conn)
+        res = broker.backfill(conn, codes, _d(a.start), end, window=a.window, rps=a.rps, cfg=cfg, max_requests=a.max, log=print)
+        print(res)
+        return 0 if not res["stopped"] or res["stopped"].startswith("max_requests") else 1
+
+
+def _rows_last_bar(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(trade_date) FROM idx.bar WHERE source = 'idx'")
+        r = cur.fetchone()
+        return next(iter(r.values())) if isinstance(r, dict) else r[0]
+
+
+def cmd_trend(a: argparse.Namespace) -> int:
+    from . import trend_book
+    with get_connection() as conn:
+        if a.sub == "books":
+            for b in trend_book.trend_books(conn):
+                print(b)
+            return 0
+        d = _d(a.as_of) if a.as_of else None
+        if a.sub == "build":
+            print(trend_book.render(trend_book.build(conn, a.book, d)))
+            return 0
+        rep = trend_book.run(conn, a.book, actor="operator", d=d)
+        print(rep)
+        return 0
+
+
+def cmd_report(a: argparse.Namespace) -> int:
+    from . import report as rp
+    with get_connection() as conn:
+        rep = rp.build(conn, a.book, a.period, _d(a.as_of) if a.as_of else None)
+    text = rp.render(rep, top=a.top)
+    print(text)
+    if a.notify:
+        from . import notify
+        print("sent" if notify.send(text) else "not sent")
+    return 0
+
+
+def cmd_quote(a: argparse.Namespace) -> int:
+    from . import quote as q
+    with get_connection() as conn:
+        for r in q.latest(conn, a.codes.split(",")):
+            if r.get("error"):
+                print(f"{r['code']:<6} {r['error']}")
+                continue
+            chg = f"{float(r['chg_pct']):+.2f} %" if r["chg_pct"] is not None else "-"
+            v60 = f"Rp {float(r['v60']) / 1e9:.1f} bn/d" if r["v60"] is not None else "-"
+            print(f"{r['code']:<6} {r['trade_date']} close {float(r['close']):>9,.0f} ({chg})  v60 {v60}  tick {r['tick']}  band {float(r['band_lo']):,.0f}-{float(r['band_hi']):,.0f}  {r['name'] or ''}")
     return 0
 
 
@@ -871,8 +1091,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--note")
     p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("book", help="position book: live (your fills) and paper (the annual value book)")
-    p.add_argument("sub", choices=["show", "fills", "fill", "cash", "set", "import", "mark", "check", "paper-seed"])
+    p.add_argument("sub", choices=["show", "fills", "fill", "cash", "set", "import", "mark", "check", "paper-seed", "halt", "resume", "journal",
+                                   "reconcile"])
     p.add_argument("--book", default="live")
+    p.add_argument("--reason", help="halt: why (recorded on the book and in the journal)")
+    p.add_argument("--max-weight", help="set: one name after a ticket, %% of NAV")
+    p.add_argument("--max-sector", help="set: one sector after a ticket, %% of NAV")
+    p.add_argument("--max-turnover", help="set: agent rebalance outside May 1-10, traded / NAV %%")
+    p.add_argument("--min-v60", help="set: liquidity floor for a buy, Rp/day")
     p.add_argument("--date")
     p.add_argument("--code")
     p.add_argument("--side", choices=["buy", "sell"])
@@ -895,7 +1121,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(fn=cmd_book)
     p = sub.add_parser("ticket", help="rebalance ticket: target list vs held -> buys/sells in lots; fill capture")
-    p.add_argument("sub", choices=["build", "show", "issue", "close", "cancel", "fill", "skip", "paper-fill"])
+    p.add_argument("sub", choices=["build", "show", "validate", "issue", "close", "cancel", "fill", "skip", "paper-fill"])
     p.add_argument("--book", default="live")
     p.add_argument("--dry-run", action="store_true", help="paper-fill: show what would fill, change nothing")
     p.add_argument("--mode", choices=["rebalance", "exits", "cash"], default="rebalance")
@@ -912,6 +1138,48 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reason")
     p.add_argument("--out")
     p.set_defaults(fn=cmd_ticket)
+    p = sub.add_parser("notify", help="send TEXT to the operator's phone (Blackridge app push; Telegram if configured), or --status")
+    p.add_argument("text", nargs="?")
+    p.add_argument("--status", action="store_true")
+    p.set_defaults(fn=cmd_notify)
+    p = sub.add_parser("broker", help="broker summary feed (Stockbit data account): day [--codes|--universe] (today's free distribution snapshot) | refresh (rotate the token) | probe CODE | backfill [--codes|--universe] (legacy, Pro-only now) | show CODE | reparse [--codes] | universe")
+    p.add_argument("sub", choices=["day", "refresh", "probe", "backfill", "show", "reparse", "universe"])
+    p.add_argument("code", nargs="?")
+    p.add_argument("--codes", help="comma-separated; default for backfill = --universe")
+    p.add_argument("--universe", action="store_true", help="liquid names (60d value >= Rp 20 bn, price >= 1,000)")
+    p.add_argument("--from", dest="d_from")
+    p.add_argument("--to", dest="d_to")
+    p.add_argument("--start", default="2023-09-01")
+    p.add_argument("--end")
+    p.add_argument("--window", type=int, default=20, help="trading days per request window")
+    p.add_argument("--rps", type=float, default=1.0)
+    p.add_argument("--max", type=int, help="stop after this many requests (a first careful run)")
+    p.set_defaults(fn=cmd_broker)
+    p = sub.add_parser("account", help="desk accounts: list | reset-link EMAIL [--minutes 30] [--base URL] (one-time password-reset link)")
+    p.add_argument("sub", choices=["list", "reset-link"])
+    p.add_argument("email", nargs="?")
+    p.add_argument("--minutes", type=int, default=30)
+    p.add_argument("--base")
+    p.set_defaults(fn=cmd_account)
+    p = sub.add_parser("push", help="phone push (Blackridge app): devices | test [--text T]")
+    p.add_argument("sub", choices=["devices", "test"])
+    p.add_argument("--text")
+    p.set_defaults(fn=cmd_push)
+    p = sub.add_parser("trend", help="trend book (breakout + trailing stop): build [--book B] [--as-of D] (dry: print only) | run (store + issue/draft) | books")
+    p.add_argument("sub", choices=["build", "run", "books"])
+    p.add_argument("--book", default="paper_trend")
+    p.add_argument("--as-of")
+    p.set_defaults(fn=cmd_trend)
+    p = sub.add_parser("report", help="NAV vs IHSG/LQ45/IDXV30/IDX30 + per-name contribution: --book B --period since|mtd|ytd|1m|3m|6m|1y|A:B")
+    p.add_argument("--book", default="paper")
+    p.add_argument("--period", default="since")
+    p.add_argument("--as-of")
+    p.add_argument("--top", type=int, default=5)
+    p.add_argument("--notify", action="store_true", help="also send the summary to Telegram")
+    p.set_defaults(fn=cmd_report)
+    p = sub.add_parser("quote", help="latest close, change, liquidity, tick and band for CODE[,CODE]")
+    p.add_argument("codes")
+    p.set_defaults(fn=cmd_quote)
     p = sub.add_parser("crosscheck", help="per-stock endpoint vs idx.bar for a sample of codes")
     p.add_argument("--sample", type=int, default=60)
     p.add_argument("--codes")

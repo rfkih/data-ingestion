@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import csv
 import logging
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
@@ -82,11 +82,25 @@ def default_fee(gross: Decimal, side: str, book: dict[str, Any]) -> Decimal:
 # ---------------------------------------------------------------------------
 # storage
 # ---------------------------------------------------------------------------
+LIMIT_FIELDS = ("max_weight_pct", "max_sector_pct", "max_turnover_pct", "min_v60")
+SETTABLE_FIELDS = ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
+                   "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule", "label", "rule", "trend_variant", *LIMIT_FIELDS)
+RULES = ("annual", "trend")                # annual = the value list rebalanced in May; trend = breakout + trailing stop, daily
+KINDS = ("paper", "live")
+AGENT_SETTABLE_FIELDS = ("note",)          # everything else on a book is the operator's (strategy, size, cash, fees, overlays, limits)
+
+
 def get_book(conn: psycopg.Connection, book: str) -> dict[str, Any]:
     rows = _rows(conn, "SELECT book, cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note, strategy, max_names, regime_filter, entry_gate, "
-                       "take_profit_pct, trend_exit, cash_floor_pct, stress_cash_pct, stress_rule FROM idx.book WHERE book = %s",
+                       "take_profit_pct, trend_exit, cash_floor_pct, stress_cash_pct, stress_rule, status, halted_at, halt_reason, "
+                       "max_weight_pct, max_sector_pct, max_turnover_pct, min_v60, owner_id, label, rule, trend_variant, archived_at, created_at "
+                       "FROM idx.book WHERE book = %s",
                  (book,), ["book", "cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
-                           "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule"])
+                           "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule", "status", "halted_at", "halt_reason",
+                           "max_weight_pct", "max_sector_pct", "max_turnover_pct", "min_v60", "owner_id", "label", "rule", "trend_variant", "archived_at",
+                           "created_at"])
+    if rows and rows[0].get("owner_id") is not None:
+        rows[0]["owner_id"] = str(rows[0]["owner_id"])
     if not rows:
         raise ValueError(f"no book {book!r}")
     return rows[0]
@@ -99,10 +113,15 @@ def ensure_book(conn: psycopg.Connection, book: str, **fields: Any) -> None:
             from .strategies import deployed
             cur.execute("UPDATE idx.book SET strategy = %s WHERE book = %s", (deployed(), book))
         for k, v in fields.items():
-            if k in ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
-                     "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule"):
+            if k in SETTABLE_FIELDS:
                 if k in ("cash_floor_pct", "stress_cash_pct") and v is not None and not 0 <= Decimal(str(v)) <= 80:
                     raise ValueError(f"{k} must be between 0 and 80")
+                if k in LIMIT_FIELDS:
+                    v = Decimal(str(v))
+                    if k != "min_v60" and not 0 < v <= 100:
+                        raise ValueError(f"{k} must be a percent in (0, 100]")
+                    if k == "min_v60" and v < 0:
+                        raise ValueError("min_v60 must be >= 0")
                 if k == "stress_rule" and v not in ("ma", "any2"):
                     raise ValueError("stress_rule must be 'ma' or 'any2'")
                 if k == "take_profit_pct":
@@ -116,8 +135,89 @@ def ensure_book(conn: psycopg.Connection, book: str, **fields: Any) -> None:
                     _get_strategy(str(v))                                # ValueError on an unknown key
                 if k == "max_names":
                     v = int(v) if v not in (None, "", 0, "0") else None
+                if k == "rule" and v not in RULES:
+                    raise ValueError(f"rule must be one of {RULES}")
+                if k == "trend_variant":
+                    v = (str(v).strip().lower() or None) if v is not None else None
+                    if v is not None and v not in ("small", "all"):
+                        raise ValueError("trend_variant must be 'small' or 'all'")
+                if k == "label":
+                    v = (str(v).strip()[:60] or None) if v is not None else None
                 cur.execute(f"UPDATE idx.book SET {k} = %s, updated_at = now() WHERE book = %s", (v, book))
     conn.commit()
+
+
+def create_book(conn: psycopg.Connection, owner_id: str | None, kind: str, label: str, **fields: Any) -> str:
+    """A new book for an account: id ``<kind>-<6 hex>`` (the kind prefix is what ``ticket.is_live`` keys off), the label is
+    what its owner sees. Returns the id."""
+    import secrets
+    if kind not in KINDS:
+        raise ValueError(f"kind must be one of {KINDS}")
+    if not (label or "").strip():
+        raise ValueError("label is required")
+    with conn.cursor() as cur:
+        for _ in range(20):
+            book = f"{kind}-{secrets.token_hex(3)}"
+            cur.execute("INSERT INTO idx.book (book, owner_id, label) VALUES (%s, %s, %s) ON CONFLICT (book) DO NOTHING", (book, owner_id, label.strip()[:60]))
+            if cur.rowcount == 1:
+                break
+        else:                                                              # pragma: no cover - 16 M ids per kind
+            raise RuntimeError("could not allocate a book id")
+    conn.commit()
+    ensure_book(conn, book, **fields)
+    return book
+
+
+def list_books(conn: psycopg.Connection, owner_id: str | None = None, *, include_archived: bool = False, include_test: bool = False) -> list[str]:
+    """Book ids, an owner's or everyone's (owner_id None), live first then by label."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT book FROM idx.book
+                        WHERE (%s::uuid IS NULL OR owner_id = %s::uuid) AND (%s OR archived_at IS NULL) AND (%s OR book NOT LIKE 'test%%')
+                        ORDER BY (book LIKE 'paper%%'), rule, label NULLS LAST, book""",
+                    (owner_id, owner_id, include_archived, include_test))
+        return [r["book"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+
+
+def owner_of(conn: psycopg.Connection, book: str) -> str | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT owner_id FROM idx.book WHERE book = %s", (book,))
+        r = cur.fetchone()
+    if not r:
+        return None
+    v = r["owner_id"] if isinstance(r, dict) else r[0]
+    return str(v) if v else None
+
+
+def archive(conn: psycopg.Connection, book: str) -> dict[str, Any]:
+    """Close a book: it keeps its history but leaves every list and every nightly job."""
+    b = get_book(conn, book)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE idx.book SET archived_at = now(), updated_at = now() WHERE book = %s AND archived_at IS NULL", (book,))
+        cur.execute("UPDATE idx.ticket SET status = 'cancelled' WHERE book = %s AND status IN ('draft', 'issued')", (book,))
+    conn.commit()
+    return {**b, "archived_at": datetime.now(UTC)}
+
+
+def is_halted(b: dict[str, Any]) -> bool:
+    return (b.get("status") or "active") == "halted"
+
+
+def halt(conn: psycopg.Connection, book: str, reason: str) -> dict[str, Any]:
+    """Kill switch: no ticket is built or issued and no paper fill runs on a halted book until ``resume``. Fills entered by
+    hand still record (they are facts about the broker account, not decisions)."""
+    get_book(conn, book)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE idx.book SET status = 'halted', halted_at = now(), halt_reason = %s, updated_at = now() WHERE book = %s", (reason, book))
+    conn.commit()
+    return get_book(conn, book)
+
+
+def resume(conn: psycopg.Connection, book: str) -> dict[str, Any]:
+    get_book(conn, book)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE idx.book SET status = 'active', halted_at = NULL, halt_reason = NULL, updated_at = now() WHERE book = %s", (book,))
+    conn.commit()
+    return get_book(conn, book)
 
 
 def add_fill(conn: psycopg.Connection, book: str, trade_date: date, code: str, side: str, lots: Decimal, price: Decimal,
@@ -160,6 +260,14 @@ def rebuild_positions(conn: psycopg.Connection, book: str) -> dict[str, dict[str
                          kept.get(code, Decimal(0)), p["opened_at"], p["last_fill_at"]))
     conn.commit()
     return pos
+
+
+def positions_asof(conn: psycopg.Connection, book: str, d: date) -> dict[str, dict[str, Any]]:
+    """Positions from the fills dated on or before ``d`` - what the book held at that day's close (marks must use this,
+    not the current ``idx.position``, or a re-mark after back-dated fills paints today's book over the past)."""
+    fills = _rows(conn, "SELECT id, trade_date, code, side, lots, price, fee FROM idx.fill WHERE book = %s AND trade_date <= %s ORDER BY trade_date, id",
+                  (book, d), ["id", "trade_date", "code", "side", "lots", "price", "fee"])
+    return positions_from(fills)
 
 
 def import_csv(conn: psycopg.Connection, book: str, path: str | Path) -> int:
@@ -236,9 +344,12 @@ def mark(conn: psycopg.Connection, book: str, as_of: date | None = None, rebuild
         days = _trading_days(conn, start, last_bar)
         tax = Decimal(b["div_tax_pct"]) / 100
         n_days = 0
+        splits_added = False
+        prev_d = start - timedelta(days=1)
         for d in days:
-            cash += deltas.get(d, Decimal(0))
-            pos = rebuild_positions(conn, book)
+            cash += sum((v for k, v in deltas.items() if prev_d < k <= d), Decimal(0))   # fills dated on a holiday/weekend land on the next bar
+            prev_d = d
+            pos = positions_asof(conn, book, d)
             held = {c: p for c, p in pos.items() if p["lots"] > 0}
             if held:
                 acts = _rows(conn, "SELECT code, kind, factor FROM idx.corporate_action WHERE ex_date = %s AND code = ANY(%s) AND kind IN ('split', 'reverse_split')",
@@ -250,7 +361,8 @@ def mark(conn: psycopg.Connection, book: str, as_of: date | None = None, rebuild
                     add_fill(conn, book, d, a["code"], "split", new_lots, _q(Decimal(p["avg_price"]) * factor), Decimal(0),
                              source="corporate_action", note=f"{a['kind']} factor {factor}", adjust_cash=False)
                 if acts:
-                    pos = rebuild_positions(conn, book)
+                    splits_added = True
+                    pos = positions_asof(conn, book, d)
                     held = {c: p for c, p in pos.items() if p["lots"] > 0}
             div_cash = Decimal(0)
             if held:
@@ -288,6 +400,8 @@ def mark(conn: psycopg.Connection, book: str, as_of: date | None = None, rebuild
                     cur.execute("UPDATE idx.book SET cash = cash + %s, updated_at = now() WHERE book = %s", (div_cash, book))
             conn.commit()
             n_days += 1
+        if splits_added:                                     # the split fills changed today's lots/avg: refresh idx.position
+            rebuild_positions(conn, book)
         r.rows_out = n_days
         r.detail = {"from": str(days[0]) if days else None, "to": str(days[-1]) if days else None}
     except Exception as e:

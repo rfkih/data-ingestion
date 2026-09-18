@@ -62,6 +62,11 @@ def alert(conn: psycopg.Connection, severity: str, job: str | None, message: str
         cur.execute("INSERT INTO idx.alert (severity, job, message) VALUES (%s, %s, %s)", (severity, job, message))
     conn.commit()
     logger.log(logging.CRITICAL if severity == "critical" else logging.WARNING, "idx alert [%s] %s: %s", severity, job, message)
+    try:                                                                   # warning/critical also go out (Telegram), best effort
+        from . import notify
+        notify.on_alert(severity, job, message)
+    except Exception:                                                      # a notification must never fail the job
+        logger.exception("idx alert: notify failed")
 
 
 def open_alerts(conn: psycopg.Connection, limit: int = 50) -> list[dict[str, Any]]:
