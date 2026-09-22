@@ -26,7 +26,7 @@ import pandas as pd
 import psycopg
 
 from . import book as bk
-from . import runlog, ticket
+from . import overlay, runlog, ticket
 from .card import _rows
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,15 @@ def history(conn: psycopg.Connection, codes: list[str], d: date, bars: int = MA_
 
 
 # ---------------------------------------------------------------------------------------------------------------- pure
+def hold_back(entries: list[dict[str, Any]], regime_on: bool) -> tuple[list[dict[str, Any]], list[str]]:
+    """The regime gate (book option ``regime_filter`` on a trend book; menus 22-25, studies #62-#66): while the COMPOSITE closes under
+    its 200-day average no NEW entry is taken and the signals are recorded as held back. Held names are untouched (their trailing
+    stop still runs). Validated as a drawdown rule: mDD -30 % -> -18 % on `small` 2020-26, -27 % -> -19 % on 2005-19, return unchanged."""
+    if regime_on:
+        return entries, []
+    return [], [e["code"] for e in entries]
+
+
 def entry_signals(hist: pd.DataFrame, d: date) -> list[dict[str, Any]]:
     """Pure. Names whose bar on d is a 60-day high, above the 200-day average, on >= 1.5x median volume; ranked by volume ratio."""
     out = []
@@ -191,12 +200,18 @@ def build(conn: psycopg.Connection, book: str, d: date | None = None) -> dict[st
         if len(g):
             peaks[p["code"]] = Decimal(str(g["adj"].max()))
     entries = [e for e in entry_signals(hist[hist["code"].isin(uni)], d) if e["code"] not in held_codes and e["code"] not in open_lines]
+    regime, held_back = None, []
+    if b.get("regime_filter"):                                        # regime gate: no new entry while the COMPOSITE is under its MA200
+        r = overlay.index_regime(conn, d)
+        regime = {"index": r["index_code"], "date": str(r["check_date"]), "close": str(r["close"]), "sma": (str(r["sma"]) if r.get("sma") is not None else None),
+                  "on": bool(r["on"])}
+        entries, held_back = hold_back(entries, regime["on"])
     exits = exit_signals(positions, closes_raw, peaks)
     exits = [x for x in exits if x["code"] not in open_lines]
     res = plan(entries, exits, positions, closes_raw, Decimal(b["cash"]), b)
     res.update({"book": book, "mode": "trend", "run_date": d, "ticket_date": d, "held": {p["code"]: p for p in positions}, "prices": closes_raw,
-                "strategy": f"trend:{variant}", "size": K, "weights": {}, "held_back": [], "regime_filter": False, "entry_gate": False, "regime": None,
-                "signals": len(entries), "exits": len(exits), "universe": len(uni), "variant": variant})
+                "strategy": f"trend:{variant}", "size": K, "weights": {}, "held_back": held_back, "regime_filter": bool(b.get("regime_filter")),
+                "entry_gate": False, "regime": regime, "signals": len(entries), "exits": len(exits), "universe": len(uni), "variant": variant})
     return res
 
 
@@ -210,6 +225,7 @@ def run(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date |
     open), a live book's is left as a draft for the operator (two-key) and pushed to Telegram. -> summary."""
     res = build(conn, book, d)
     out = {"book": book, "date": str(res["run_date"]), "universe": res["universe"], "signals": res["signals"], "exits": res["exits"],
+           "held_back": len(res["held_back"]), "regime_on": (res["regime"]["on"] if res.get("regime") else None),
            "lines": len(res["lines"]), "ticket": None, "status": None, "cancelled": []}
     for old in _open_tickets(conn, book):                              # a breakout is for one open only: yesterday's unissued draft is stale
         if old.get("mode") == "trend" and old["status"] == "draft" and old["ticket_date"] < res["run_date"]:
@@ -220,7 +236,8 @@ def run(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date |
         out.update({"signals": res["signals"], "exits": res["exits"], "lines": len(res["lines"])})
     if not res["lines"]:
         return out
-    tid = ticket.store(conn, res, notes=f"trend {res['variant']}: {res['signals']} signals, {res['exits']} exits", actor=actor)
+    held = f", {len(res['held_back'])} held back (COMPOSITE under MA200)" if res["held_back"] else ""
+    tid = ticket.store(conn, res, notes=f"trend {res['variant']}: {res['signals']} signals, {res['exits']} exits{held}", actor=actor)
     out["ticket"] = tid
     t = ticket.load(conn, tid)
     checks = ticket.validate(conn, tid)
@@ -246,6 +263,11 @@ def run(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date |
 def render(res: dict[str, Any]) -> str:
     o = [f"# trend {res['variant']} - {res['book']} - {res['run_date']} | universe {res['universe']} | signals {res['signals']} | exits {res['exits']} | "
          f"NAV Rp {float(res['nav']):,.0f} | cash Rp {float(res['cash']):,.0f} -> after Rp {float(res['cash_after']):,.0f}"]
+    if res.get("regime"):
+        r = res["regime"]
+        state = "on" if r["on"] else f"OFF -> {len(res['held_back'])} signal(s) held back: {', '.join(res['held_back']) or '-'}"
+        o.append(f"  regime gate: {r['index']} {float(r['close']):,.0f} vs MA200 {float(r['sma']):,.0f} on {r['date']} -> {state}" if r.get("sma")
+                 else f"  regime gate: {r['index']} has no 200-day history yet -> on")
     for ln in res["lines"]:
         o.append(f"  {ln['side']:4s} {ln['code']:<6} {int(ln['lots']):>6} lot @ {float(ln['limit_price']):>9,.0f}  {ln['reason']}")
     if not res["lines"]:

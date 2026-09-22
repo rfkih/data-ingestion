@@ -135,3 +135,13 @@ def test_history_is_row_factory_agnostic(conn) -> None:
         dicty = trend_book.history(c2, codes, d)
     assert len(plain) > 0 and plain["code"].nunique() == len(codes)
     assert len(dicty) == len(plain) and set(dicty["code"]) == set(plain["code"]) and dicty["adj"].notna().all()
+
+
+def test_regime_gate_holds_back_new_entries_only() -> None:
+    from blackheart_ingest.idx import overlay
+    entries = [{"code": "AAAA", "vol_ratio": 2.0}, {"code": "BBBB", "vol_ratio": 1.6}]
+    assert trend_book.hold_back(entries, True) == (entries, [])
+    assert trend_book.hold_back(entries, False) == ([], ["AAAA", "BBBB"])                        # signals recorded, nothing bought
+    assert overlay.regime_from_closes([100] * 200 + [90])["on"] is False                        # COMPOSITE under its 200-day average
+    assert overlay.regime_from_closes([100] * 200 + [110])["on"] is True
+    assert overlay.regime_from_closes([100] * 50)["on"] is True                                  # no history yet -> not a reason to sit out
