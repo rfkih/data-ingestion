@@ -86,7 +86,8 @@ def default_fee(gross: Decimal, side: str, book: dict[str, Any]) -> Decimal:
 LIMIT_FIELDS = ("max_weight_pct", "max_sector_pct", "max_turnover_pct", "min_v60")
 SETTABLE_FIELDS = ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
                    "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule", "label", "rule", "trend_variant", *LIMIT_FIELDS)
-RULES = ("annual", "trend")                # annual = the value list rebalanced in May; trend = breakout + trailing stop, daily
+RULES = ("annual", "trend", "gapfade")      # annual = the value list rebalanced in May; trend = breakout + trailing stop, daily;
+                                           # gapfade = buy the opening gap-down, sell into the same close (intraday, paper only)
 KINDS = ("paper", "live")
 AGENT_SETTABLE_FIELDS = ("note",)          # everything else on a book is the operator's (strategy, size, cash, fees, overlays, limits)
 

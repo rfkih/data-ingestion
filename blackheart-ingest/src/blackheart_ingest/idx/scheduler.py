@@ -8,6 +8,9 @@ Schedule (WIB):
                      overlay tickets it calls for (cash / re-entry / entry) for books with an overlay on
                   -> paper ticket fill at today's open (paper book only; live fills are captured by hand)
                   -> book mark + check (live, paper): marks, NAV, holding alerts
+  09:00, 09:05    gapfade_entry       intraday gap-fade books: the opening auction printed at ~08:58 -> scan, sweep, entry ticket
+  15:50 Mon-Fri   gapfade_exit        intraday gap-fade books: sell everything into the closing auction
+  every 10 min    token_guard         the Stockbit session must outlive today's close; renews, else nags the phone every run
   18:00 Mon-Fri   alert if today's bar has still not landed (holiday, or IDX late)
   20:30 Mon-Fri   announce_recent     all-emiten disclosures for the last 3 days -> idx.announcement / idx.event
   21:00 Mon-Fri   fundamentals        discover current fiscal year -> download pending workbooks (universe) -> parse
@@ -24,7 +27,8 @@ Every run writes idx.ingest_run; problems become idx.alert rows for the app.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -111,6 +115,13 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
                     logger.info("idx paper fill %s ticket #%s at %s: %s lines", bk, rep["ticket"], rep["fill_date"], len(rep["fills"]))
             except Exception as e:                                      # the chain must go on to the marks
                 runlog.alert(conn, "warning", f"ticket:{bk}", f"paper fill failed: {type(e).__name__}: {e}")
+        from . import gapfade  # the intraday book settles at the official close
+        for bk in gapfade.gapfade_books(conn):
+            try:
+                rep = gapfade.settle(conn, bk)
+                logger.info("idx gapfade settle %s: %s", bk, rep)
+            except Exception as e:
+                runlog.alert(conn, "warning", f"gapfade:{bk}", f"settle failed: {type(e).__name__}: {e}")
         for bk in books:
             rm = book.mark(conn, bk)
             _fail_alert(conn, rm)
@@ -200,20 +211,21 @@ def run_dividends() -> None:
 def run_broker_snapshot() -> None:
     """Today's free broker-distribution snapshot for the liquid universe (card context; not a desk dependency).
 
-    Off unless STOCKBIT_TOKEN (or STOCKBIT_REFRESH_TOKEN) is set. Auto-refreshes the token when a refresh token
-    is present; a paywall/expired key stops the run cleanly and raises one warning, not a crash.
+    Off unless a Stockbit token is known (STOCKBIT_TOKEN / STOCKBIT_REFRESH_TOKEN in idx-local.env, or the relay row
+    in idx.feed_token). Auto-refreshes from the newest refresh token first; a paywall/expired key stops the run
+    cleanly and raises one warning, not a crash.
     """
     import os as _os
 
     from . import broker
-    if not (_os.environ.get(broker.TOKEN_ENV) or _os.environ.get(broker.REFRESH_ENV)):
-        return
     d = today_wib()
     if d.weekday() >= 5:
         return
     with get_connection() as conn:
+        if not (_os.environ.get(broker.TOKEN_ENV) or broker.newest_refresh_token(conn=conn)):
+            return
         try:
-            cfg = broker.config_fresh()
+            cfg = broker.config_fresh(conn=conn)
             codes = universe_codes(conn)
             res = broker.snapshot(conn, codes, cfg, expected_date=job_daily.latest_bar_date(conn), log=logger.info)
         except broker.BrokerFetchError as e:
@@ -223,6 +235,136 @@ def run_broker_snapshot() -> None:
         if res["stopped"]:
             runlog.alert(conn, "warning", "broker", f"broker snapshot stopped: {res['stopped']}")
         logger.info("idx broker snapshot %s ok=%s failed=%s rows=%s", res.get("date"), res["ok"], res["failed"], res["rows"])
+
+
+def run_feed_watch() -> None:
+    """During the session: one warning when the datafeed collector's heartbeat is stale or it is not live (token expired,
+    reconnecting for too long, task dead). Dedup is runlog's (same job+message stays one open alert)."""
+    from .feed import store as fs
+    from .feed.collector import in_session
+    if not in_session():
+        return
+    with get_connection() as conn:
+        st = fs.status(conn)
+        c = st["collector"]
+        state, stale = c.get("state"), c.get("stale_s")
+        if state == "off" or stale is None or stale > 180:
+            runlog.alert(conn, "warning", "feed", f"datafeed collector not running (state {state}, heartbeat {stale} s ago) - "
+                                                  "check the 'Blackheart IDX feed' task")
+        elif state == "token_expired":
+            runlog.alert(conn, "warning", "feed", "datafeed collector has no valid Stockbit token - log in and paste it at /idx/feed/relay")
+        elif state != "live" and stale is not None:
+            runlog.alert(conn, "warning", "feed", f"datafeed collector {state}: {c.get('detail') or ''}")
+
+
+def run_gapfade_entry() -> None:
+    """09:00 and 09:05 WIB on a weekday (the second run is a no-op once a ticket exists; it exists for a feed that was
+    late at 09:00): the gap-fade morning scan and entry ticket for every gap-fade book (research menu 29b, paper).
+    The opening auction has just matched and its prints are in the tick feed; a broken feed trades nothing (gapfade.scan)."""
+    from . import gapfade
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        for bk_ in gapfade.gapfade_books(conn):
+            try:
+                rep = gapfade.run_entry(conn, bk_)
+                logger.info("idx gapfade entry %s: %s", bk_, rep)
+            except Exception as e:                                          # one book must never stop the others
+                runlog.alert(conn, "warning", f"gapfade:{bk_}", f"entry failed: {type(e).__name__}: {e}")
+                logger.exception("gapfade entry failed for %s", bk_)
+
+
+def run_gapfade_exit() -> None:
+    """15:50 WIB: sell everything a gap-fade book holds into the closing auction. Nothing is held overnight by construction."""
+    from . import gapfade
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        for bk_ in gapfade.gapfade_books(conn):
+            try:
+                rep = gapfade.run_exit(conn, bk_)
+                logger.info("idx gapfade exit %s: %s", bk_, rep)
+            except Exception as e:
+                runlog.alert(conn, "warning", f"gapfade:{bk_}", f"exit failed: {type(e).__name__}: {e}")
+                logger.exception("gapfade exit failed for %s", bk_)
+
+
+SESSION_END = dtime(16, 15)              # post-closing ends 16:15 WIB - the session the token must cover
+NAG_FROM, NAG_TO = dtime(7, 0), dtime(16, 30)   # the window in which a dead session is nagged about, every run
+TOKEN_MARGIN_MIN = 30                    # the token must outlive the close by this much
+REFRESH_WARN_DAYS = 2.0                  # warn this many days before the refresh token itself runs out
+
+
+def session_end_wib(d: date) -> datetime:
+    return datetime.combine(d, SESSION_END, tzinfo=WIB)
+
+
+def run_token_guard() -> None:
+    """Every 10 minutes: the Stockbit session must stay valid until the market closes.
+
+    Off-session it keeps the 3-hour freshness rule (so the next morning starts with a live token). Between 07:00 and 16:30
+    on a weekday it demands enough validity to reach 16:15 + 30 min and renews from the refresh token when it does not have
+    it. If the session cannot be made to last that long - no refresh token, or Stockbit refused it (a browser re-login
+    invalidates the old one) - it pushes the operator a notification ON EVERY RUN, i.e. every 10 minutes, until it is fixed:
+    without a session the tick feed goes dark and the gap-fade jobs cannot see the opening auction. The refresh token's own
+    7-day horizon is watched too, so the paste is asked for days ahead instead of during a session.
+    """
+    from . import broker, notify
+    from .feed import store as fs
+    now = datetime.now(WIB)
+    d = now.date()
+    trading = d.weekday() < 5 and now.time() <= SESSION_END
+    need_until = session_end_wib(d) + timedelta(minutes=TOKEN_MARGIN_MIN) if trading else None
+    nagging = d.weekday() < 5 and NAG_FROM <= now.time() <= NAG_TO
+    with get_connection() as conn:
+        failed = None
+        try:
+            rep = broker.renew_if_needed(conn, need_until=need_until)
+            if rep["renewed"]:
+                logger.info("idx stockbit token renewed, %s min left (needed %s)", rep["minutes_left"], rep["needed"])
+            elif rep["reason"].startswith("no refresh token"):
+                failed = "no refresh token is stored"
+        except broker.BrokerFetchError as e:
+            failed = f"{type(e).__name__}: {e}"
+        st = fs.token_status(fs.load_token(conn), now.astimezone(UTC))   # one clock for the whole decision
+        left = st.get("minutes_left")
+        covers = bool(st["valid"] and (need_until is None or (left is not None and left >= (need_until - now).total_seconds() / 60)))
+        if not covers and nagging:                                         # the loud path: repeated, not deduped
+            when = st["expires_at"] or "never (no token)"
+            msg = (f"Stockbit session will NOT last today's close: expires {when}"
+                   + (f" ({left:.0f} min left)" if left is not None else "")
+                   + (f"; renewal failed: {failed}" if failed else "")
+                   + ". Log in to stockbit.com and paste the credentialStorage cookie at http://127.0.0.1:8001/idx/feed/relay - "
+                     "without it the tick feed stops and the gap-fade jobs are blind.")
+            if not runlog.alert_once(conn, "critical", "feed", msg):       # the first one raises the alert (and pushes);
+                notify.send(msg, title="IDX token", data={"route": "/m/more", "kind": "token"})   # after that, a push every 10 min
+            logger.warning("idx token guard: %s", msg)
+        elif failed and trading:
+            runlog.alert(conn, "warning", "feed", f"Stockbit token renewal failed ({failed}) - the stored session still covers today")
+        rs = broker.refresh_status(conn=conn)
+        if rs["present"] and rs["days_left"] is not None and rs["days_left"] < REFRESH_WARN_DAYS:
+            runlog.alert(conn, "warning", "feed", f"Stockbit REFRESH token expires {rs['expires_at']:%Y-%m-%d %H:%M} UTC "
+                                                  f"({rs['days_left']:.1f} days): paste a fresh cookie at /idx/feed/relay before then")
+
+
+def run_feed_audit() -> None:
+    """Coverage of today's prints against the official day summary (which the daily chain fetched earlier this evening);
+    a subscribed name under 95 % is a warning."""
+    from .feed import store as fs
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        rows = fs.audit_day(conn, d)
+        if not rows:
+            return
+        low = [r for r in rows if r["coverage"] is not None and r["coverage"] < 0.95]
+        logger.info("idx feed audit %s: %d names, %d under 95 %% coverage", d, len(rows), len(low))
+        if low:
+            worst = ", ".join(f"{r['code']} {float(r['coverage']) * 100:.0f}%" for r in sorted(low, key=lambda r: r["coverage"])[:8])
+            runlog.alert(conn, "warning", "feed", f"datafeed coverage under 95 % on {len(low)} names {d}: {worst}")
 
 
 def run_macro() -> None:
@@ -335,6 +477,7 @@ def run_crosscheck(sample: int = 60) -> None:
 def build() -> BlockingScheduler:  # noqa: F821
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
 
     s = BlockingScheduler(timezone=WIB, job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 3600})
     s.add_job(run_universe, CronTrigger(day_of_week="mon-fri", hour=16, minute=15, timezone=WIB), id="universe")
@@ -346,6 +489,11 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_announce_recent, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="announce_recent")
     s.add_job(run_broker_snapshot, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="broker_snapshot")
     s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=7, minute=30, timezone=WIB), id="macro")
+    s.add_job(run_feed_watch, IntervalTrigger(minutes=5), id="feed_watch")
+    s.add_job(run_token_guard, IntervalTrigger(minutes=10), id="token_guard")
+    s.add_job(run_gapfade_entry, CronTrigger(day_of_week="mon-fri", hour=9, minute="0,5", timezone=WIB), id="gapfade_entry")
+    s.add_job(run_gapfade_exit, CronTrigger(day_of_week="mon-fri", hour=15, minute=50, timezone=WIB), id="gapfade_exit")
+    s.add_job(run_feed_audit, CronTrigger(day_of_week="mon-fri", hour=20, minute=10, timezone=WIB), id="feed_audit")
     s.add_job(run_news, CronTrigger(hour="6,12,18,22", minute=10, timezone=WIB), id="news")
     s.add_job(run_consensus, CronTrigger(day_of_week="sat", hour=11, minute=0, timezone=WIB), id="consensus")
     s.add_job(run_fin_backlog, CronTrigger(day_of_week="tue-sat", hour=5, minute=30, timezone=WIB), id="fin_backlog")

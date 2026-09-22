@@ -79,7 +79,7 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   the daily chain -> `cash` ticket when it turns off, `rebalance` ticket when it turns on; an annual rebalance while off
   becomes a cash ticket) and `entry_gate` (listed names under their own SMA200 are held back at a rebalance, bought with an
   `entry` ticket at the monthly check they cross). Checks recorded in `idx.regime_check`; `idx overlay status | check
-  [--dry-run]`; `/idx/overlay`, `POST /idx/overlay/check`. Plus `take_profit_pct` (NULL = off): at the monthly check, held names at or above purchase x (1 + pct) go into an exits ticket (`research/IDX_SELL_RULES_2026-09-13.md`). Plus `trend_exit` (migration 0014): at the monthly check, a held name that crossed under its 200-day average since the previous check goes into an exits ticket, and the entry gate also buys a held-back name when its 14-day RSI is at or under 30 (the asymmetric rule, `research/IDX_ASYMMETRIC_2026-09-13.md`). Plus the cash buffer (migration 0016): `cash_floor_pct` of NAV kept in cash, `stress_cash_pct` while the stress detector (`stress_rule` ma | any2; four signals recorded in `idx.stress_check` at the monthly check) is on; the ticket builder uses it as the plan's cash reserve and the monthly check issues a rebalance ticket when the target moves 5+ points (`research/IDX_CASH_BUFFER_2026-09-14.md`). All OFF by default (paper book: the four trend overlays on since 2026-09-13). Signals are computed at the check close; tickets are meant to be worked at the next open (delay cost measured in `research/idx_execution_delay.py`). `ticket.min_trade_for(nav)` scales the minimum line with the book (NAV/20, floor Rp 1M, cap Rp 5M).
+  [--dry-run]`; `/idx/overlay`, `POST /idx/overlay/check`. Plus `take_profit_pct` (NULL = off): at the monthly check, held names at or above purchase x (1 + pct) go into an exits ticket (`research/IDX_SELL_RULES_2026-09-13.md`). Plus `trend_exit` (migration 0014): at the monthly check, a held name that crossed under its 200-day average since the previous check goes into an exits ticket, and the entry gate also buys a held-back name when its 14-day RSI is at or under 30 (the asymmetric rule, `research/IDX_ASYMMETRIC_2026-09-13.md`). Plus the cash buffer (migration 0016): `cash_floor_pct` of NAV kept in cash, `stress_cash_pct` while the stress detector (`stress_rule` ma | any2; four signals recorded in `idx.stress_check` at the monthly check) is on; the ticket builder uses it as the plan's cash reserve and the monthly check issues a rebalance ticket when the target moves 5+ points (`research/IDX_CASH_BUFFER_2026-09-14.md`). All OFF by default (paper book: the four trend overlays on since 2026-09-13). On a TREND book `regime_filter` is the regime gate: no NEW entry while the COMPOSITE closes under its 200-day average, held names untouched (`trend_book.hold_back`, `overlay.index_regime`; the ticket carries `regime` + `held_back`; validated in `research/IDX_REGIME_VALIDATE_2026-09-22.md` and `IDX_ROBUSTNESS_SCORECARD_2026-09-22.md`); on `paper_trend` and `trend_live` since 2026-09-22; CLI `idx book set --book X --regime-filter on|off`. Signals are computed at the check close; tickets are meant to be worked at the next open (delay cost measured in `research/idx_execution_delay.py`). `ticket.min_trade_for(nav)` scales the minimum line with the book (NAV/20, floor Rp 1M, cap Rp 5M).
 - **Strategy catalog (`idx/strategies.py`, migrations 0010 + 0011):** families `rule` (baseline) · `strict` (deployed since
   2026-09-12, the operator's call ahead of the pre-registered May 2027 date) · `strict_cash` (tested: passes its criterion on
   one name, ENRG; not the default) · `value` · `momentum` · `momentum_rank` · `growth`, each `{gate, order, weight[, keys]}`;
@@ -151,6 +151,64 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   `idx.bar.adj_factor` is rewritten for earlier rows, raw prices never change. (7) A code in the day-dump but not in Daftar Saham
   (e.g. GOTOM multiple-voting shares) is `listing.status='NOT_IN_DAFTAR'`, not delisted.
   (8) **Opens before 2025 exist only for LQ45** in IDX's own data (`open_missing` on ~80 % of 2020-24 rows is the source, not a bug).
+- **Datafeed collector (`idx/feed/`, migration 0029, 2026-09-21):** real-time prints + order books from the operator's OWN
+  Stockbit session (`wss://wss-jkt.trading.stockbit.com/ws`, subprotocol `web`, protobuf envelope with a plain
+  `#O|CODE|BID|price;orders;volume|…` body — `feed/proto.py` documents the message shapes; no protobuf dependency).
+  Personal data: **never into `/pub`, never into Blackridge.** History starts the day it first ran. Tables: `idx.feed_trade`
+  (every print; hypertable, compressed after 3 days) · `idx.feed_book` (top-10 each side, ≤ 1 sample/s/name, only on change)
+  · continuous aggregates `idx.feed_bar_1m`, `idx.feed_book_1m` (refresh every minute) · `feed_symbol` (subscription, re-read
+  every 5 min) · `feed_token` (24 h session JWT) · `feed_status` heartbeat · `feed_event` log · `feed_day` coverage audit
+  (Σqty vs the official daily volume). Process: `idx feed run` (ONE websocket; asyncio receive loop + writer thread with its
+  own connection and a bounded retry queue; idles outside Mon–Fri 08:40–16:20 WIB). Dead-connection detection: transport
+  errors, app-level ping after 15 s silence / pong grace 13 s, and a data watchdog in continuous phases (no data 90 s →
+  resubscribe, 180 s → reconnect); reconnect = backoff 1…30 s forever, fresh key + auth + re-read symbols; advisory-lock
+  singleton; token-expiry warning 45 min ahead. Raw frames archived by default to `logs/idx/feed/<date>.frames.gz` (sync-flushed
+  each second, 7 days) — `idx feed replay --file F` re-ingests a day after a DB outage or parser fix. Windows task **"Blackheart
+  IDX feed"** (`scripts/idx-feed-task.ps1`; `-Restart` is the only correct restart — Stop-ScheduledTask leaves the python child
+  alive holding the lock). **Token:** the operator
+  logs in to stockbit.com and pastes the `credentialStorage` cookie at `http://127.0.0.1:8001/idx/feed/relay` (or
+  `STOCKBIT_TOKEN=` in `idx-local.env` — re-read live, no restart) — needed once per week now: **headless renewal works**
+  (verified 2026-09-22: `POST exodus.stockbit.com/login/refresh`, refresh token as `Authorization: Bearer`, body `{}`;
+  access 24 h, refresh 7 d, both rotate). `broker.refresh_and_persist(conn=)` / `idx broker refresh` takes the newest refresh
+  token of `idx-local.env` vs the relay row (`idx.feed_token`, by JWT `iat`) and writes the new pair back to both. Three
+  places renew: scheduler job `token_renew` every 30 min (`broker.renew_if_needed`, when < 3 h remain), the collector
+  itself 45 min before expiry (worker thread, then `load_token`), and the 20:20 broker snapshot (`config_fresh(conn=)`).
+  ★ **`token_guard` every 10 min (2026-09-22) is the one that guarantees a session for the trading day**: off-session it keeps
+  the 3-hour freshness rule; on a weekday up to 16:30 it demands enough validity to reach the close **16:15 + 30 min**
+  (`broker.minutes_needed`, `renew_if_needed(need_until=)`) and renews from the refresh token. When the session cannot be made
+  to last that long (no refresh token, or Stockbit refused it) it raises ONE critical alert (`runlog.alert_once`) and then
+  **pushes the operator's phone on every run — every 10 minutes — until it is fixed**; without a session the tick feed goes
+  dark and the gap-fade jobs are blind. The refresh token's own 7-day horizon is watched too (warning under 2 days), so the
+  paste is asked for days ahead, never mid-session. The guard passes its own clock into `token_status` (mixing clocks was a
+  real bug in the first cut).
+  The relay page shows the token status and has a "Renew now" button (`POST /idx/feed/token/refresh`); pasting a bare
+  *refresh* JWT (7-day lifetime) is exchanged for a full pair on the spot, and any paste carrying a refresh token is
+  mirrored into `idx-local.env`. A re-login in the browser invalidates older refresh tokens — paste the cookie again if
+  renewal answers 401 (alert `feed`: "token renewal failed").
+  CLI `idx feed status|symbols [--liquid N|--set A,B|--disable A,B]|token [--paste FILE|-]|audit [--date]`;
+  routes `GET /idx/feed/status`, `GET|PUT /idx/feed/symbols`, `POST /idx/feed/token` (service/loopback only). Scheduler:
+  `feed_watch` every 5 min in-session (stale heartbeat / expired token → warning alert), `feed_audit` 20:10 (coverage < 95 %).
+
+- **Gap-fade book (`idx/gapfade.py`, research menu 29b, 2026-09-22)** — the desk's first intraday book, PAPER ONLY (`paper_gapfade`,
+  Rp 100 M, K=5, `rule='gapfade'`). Rule: a name whose **opening print** is <= -7 % against the previous close is bought at the open
+  + 1 tick (deepest gaps first, slot = NAV/K) and sold into the **same** closing auction (close - 1 tick); nothing is ever held
+  overnight. Jobs: `gapfade_entry` 09:00 + 09:05 retry (the opening auction prints reach the feed at ~08:58 and are the official
+  open for ~90 % of names), `gapfade_exit` 15:50 (sell ticket), and `gapfade.settle` inside the evening daily chain (fills the
+  exit at the official close). CLI `idx gapfade scan|entry|exit|settle|books|init`. Guards: feed coverage (>= 50 opening prints,
+  else no trading + alert), stale bars, **no offer = skip** (a name locked at auto-rejection down cannot be bought — the mirror of
+  the ARA trap), leftover positions swept at the next open with a warning, one entry + one exit ticket per day under the paper
+  filler's advisory lock, halt respected, live books drafted not filled (two-key). ★ **The daily summary's "open" is the first
+  trade of the day, not the opening auction** — on 2026-09-22 AALI's "open" printed at 10:45 — so the live book trades a stricter
+  subset than the backtest (first print inside 08:55-09:10 only); the paper record measures that difference. Tests `tests/idx/test_gapfade.py`.
+
+- **One-tap fill (`idx/fillmatch.py`, 2026-09-22)** — recording fills by hand is the desk's biggest daily chore. For each
+  still-open line of an **issued** ticket the tape says what the market actually traded inside that line's limit today
+  (`idx.feed_trade`, from 09:00): `propose()` returns lots + price (VWAP snapped the conservative way — a buy rounds up, a sell
+  down — and never worse than the limit) with a confidence (high = the flow was >= 10x the line, medium >= 3x, low under that),
+  the eligible volume, the print count and the window. It cannot know which prints were the operator's (the feed carries no
+  account), so it only ever proposes; the write still goes through `ticket.fill_line` (two-key, journal, book mark). A draft,
+  closed or cancelled ticket proposes nothing. Route `GET /idx/ticket/{id}/suggest`, CLI `idx suggest [--ticket N | --book B]`,
+  phone: the card under the line being worked on `/m/ticket`. Tests `tests/idx/test_fillmatch.py`.
 
 ## Gotchas
 - **`api/` is dead.** The served app is `workers.server:app`; the old `api/` app factory was unused. CI's `test_server_app.py` exists precisely because the old suite tested the dead app while the served app shipped broken ("CI green, served app broken").

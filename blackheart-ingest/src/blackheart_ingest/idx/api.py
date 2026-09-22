@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response
 
 from ..shared.db import get_connection
 from . import journal, runlog
@@ -754,5 +754,216 @@ def make_router(require_token) -> APIRouter:
             except (ValueError, KeyError) as e:
                 raise HTTPException(status_code=422, detail=f"{e}; kinds: {', '.join(rs.EVIDENCE_KINDS)}") from None
         return {"added": new}
+
+    @router.get("/ticket/{ticket_id}/suggest")
+    def ticket_suggest(ticket_id: int, c: Caller = _CALLER) -> dict[str, Any]:
+        """What the tape supports for each still-open line of a ticket: the lots and price the market actually traded inside
+        the line's limit today, with a confidence. Read-only - the operator confirms, and the fill is written by the usual
+        ``POST /idx/ticket/lines/{id}/fill`` (two-key, journaled, marks the book)."""
+        from . import fillmatch
+        with get_connection() as conn:
+            own_ticket(conn, ticket_id, c)
+            try:
+                return _plain(fillmatch.suggest(conn, ticket_id))
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e)) from None
+
+    # ---- gap-fade, live (menu 29b; the intraday screen in the app polls this) -------------------------------------
+    @router.get("/gapfade/live")
+    def gapfade_live(book: str = "paper_gapfade", c: Caller = _CALLER) -> dict[str, Any]:
+        """Everything the live screen shows, in one poll: the session, the feed's health, this morning's gap scan (with
+        the ones that were bought marked), the book's open positions priced off the last tick, and today's realised P&L.
+        Read-only; prices come from the tick feed, so it is as live as the collector is."""
+        from datetime import datetime as _dt
+        from decimal import Decimal
+
+        from . import book as bk
+        from . import gapfade as gf
+        from .card import _rows as _crows
+        from .feed import store as fs
+        with get_connection() as conn:
+            own_book(conn, book, c)
+            now = _dt.now(gf.WIB)
+            d = now.date()
+            b = bk.get_book(conn, book)
+            scan = gf.scan(conn, d)
+            snap = bk.snapshot(conn, book)
+            held = {p["code"]: p for p in snap["positions"] if Decimal(p["lots"]) > 0}
+            last = gf.last_feed_prices(conn, d, sorted({*held, *[x["code"] for x in scan["candidates"]]}))
+            fills = _crows(conn, """SELECT code, side, lots, price, fee, created_at FROM idx.fill
+                                      WHERE book = %s AND trade_date = %s ORDER BY id""", (book, d),
+                           ["code", "side", "lots", "price", "fee", "created_at"])
+            entry = gf._tickets_today(conn, book, d, gf.MODE_IN)
+            exit_ = gf._tickets_today(conn, book, d, gf.MODE_OUT)
+            feed = fs.status(conn)
+            bought = {f["code"] for f in fills if f["side"] == "buy"}
+            positions = []
+            for code, p in sorted(held.items()):
+                px = last.get(code)
+                cost = Decimal(p["avg_price"])
+                positions.append({"code": code, "name": p.get("name"), "lots": str(p["lots"]), "avgPrice": str(cost),
+                                  "last": str(px) if px is not None else None,
+                                  "value": str(Decimal(p["lots"]) * 100 * px) if px is not None else None,
+                                  "pnl": str((px - cost) * Decimal(p["lots"]) * 100) if px is not None else None,
+                                  "pnlPct": str(px / cost - 1) if px is not None and cost else None})
+            realised = sum((Decimal(p["realized_pnl"] or 0) for p in snap["positions"]), Decimal(0))                 + sum((Decimal(p.get("realized_pnl") or 0) for p in snap.get("closed", [])), Decimal(0))
+            cands = [{"code": x["code"], "gap": str(x["gap"]), "open": str(x["open"]), "prevClose": str(x["prev_close"]),
+                      "v60": str(x["v60"]), "offer": str(x["offer"]), "at": x["at"].isoformat() if x.get("at") else None,
+                      "last": str(last[x["code"]]) if x["code"] in last else None, "bought": x["code"] in bought}
+                     for x in scan["candidates"]]
+            return _plain({
+                "book": {"book": book, "label": b.get("label"), "kind": "live" if not gf._auto_fills(book) else "paper",
+                         "status": b.get("status"), "halted": bool(b.get("halted_at")), "maxNames": b.get("max_names"),
+                         "nav": snap["nav_now"], "cash": b["cash"], "realisedToday": realised},
+                "session": {"date": d.isoformat(), "now": now.isoformat(), "phase": gf.session_phase(now),
+                            "scanAt": "09:00", "exitAt": "15:50", "closeAt": "16:15"},
+                "scan": {"ok": scan["ok"], "why": scan["why"], "seen": scan["seen"], "prevDate": str(scan["prev_date"]) if scan["prev_date"] else None,
+                         "threshold": str(gf.GAP_MAX), "skipped": scan["skipped"], "candidates": cands},
+                "positions": positions,
+                "fills": [{"code": f["code"], "side": f["side"], "lots": str(f["lots"]), "price": str(f["price"]),
+                           "fee": str(f["fee"]), "at": f["created_at"].isoformat()} for f in fills],
+                "tickets": {"entry": [{"id": t["id"], "status": t["status"], "lines": len(t["lines"])} for t in entry],
+                            "exit": [{"id": t["id"], "status": t["status"], "lines": len(t["lines"])} for t in exit_]},
+                "feed": {"state": (feed["collector"] or {}).get("state"), "staleSeconds": feed.get("stale_s"),
+                         "lastFrameAt": (feed["collector"] or {}).get("last_frame_at"), "symbols": feed.get("symbols_enabled"),
+                         "tradesToday": (feed.get("today") or {}).get("trades"), "namesToday": (feed.get("today") or {}).get("codes"),
+                         "token": feed.get("token")},
+            })
+
+    # ---- Stockbit datafeed collector (migration 0029; personal data, never public) --------------------------------
+    @router.post("/feed/token", dependencies=[Depends(require_token)])
+    async def feed_token(request: Request, response: Response, c: Caller = _CALLER) -> dict[str, Any]:
+        """The browser relay drops the operator's Stockbit session token here after each login: the raw credentialStorage
+        cookie value, a JSON {access_token, refresh_token?, expires_at?}, or a bare JWT. A bare *refresh* token (7-day
+        lifetime) is exchanged for a fresh access + refresh pair on the spot. Loopback/service callers only (an app
+        account may not set the desk's feed token). Answers CORS so a stockbit.com page can post it."""
+        service_only(c, "relaying the feed token")
+        from . import broker
+        from .feed import store as fs
+        body = await request.body()
+        source = "relay"
+        try:
+            text = body.decode("utf-8", "replace").strip()
+            if fs.looks_like_refresh_jwt(text):
+                try:
+                    _access, _rotated, resp = broker.refresh_access_token(text)
+                except broker.BrokerFetchError as e:
+                    raise HTTPException(status_code=422, detail=f"refresh token rejected by Stockbit: {e}") from None
+                fields, source = fs.parse_relay(resp), "relay-refresh"
+            else:
+                fields = fs.parse_relay(body)
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=422, detail=f"no usable token: {e}") from None
+        with get_connection() as conn:
+            row = fs.save_token(conn, fields, source=source)
+        if fields.get("refresh_token"):                                          # the broker feed reads the env file too
+            path = broker._default_env_file()
+            if path:
+                broker.write_env_token(path, broker.TOKEN_ENV, fields["access_token"])
+                broker.write_env_token(path, broker.REFRESH_ENV, fields["refresh_token"])
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return {"ok": True, "user_id": row["user_id"], "source": source, "refresh_token": bool(fields.get("refresh_token")),
+                "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None}
+
+    @router.post("/feed/token/refresh", dependencies=[Depends(require_token)])
+    def feed_token_refresh(c: Caller = _CALLER) -> dict[str, Any]:
+        """Renew the Stockbit session now from the newest refresh token (the relay paste or idx-local.env); the new
+        access + refresh pair is written to idx.feed_token and idx-local.env. Loopback/service callers only."""
+        service_only(c, "refreshing the feed token")
+        from . import broker
+        from .feed import store as fs
+        with get_connection() as conn:
+            try:
+                rep = broker.renew_if_needed(conn, force=True)
+            except broker.BrokerFetchError as e:
+                raise HTTPException(status_code=502, detail=f"refresh failed: {e}") from None
+            tok = fs.token_status(fs.load_token(conn))
+        return {**rep, "token": _plain(tok)}
+
+    @router.get("/feed/relay", include_in_schema=False)
+    def feed_relay_page() -> Response:
+        """The local paste box: copy the ``credentialStorage`` cookie value (DevTools > Application > Cookies >
+        stockbit.com) and paste it here; the page posts it to /feed/token on this machine. The cookie carries the refresh
+        token too, so after one paste the desk renews the session itself (collector, scheduler every 30 min, broker
+        snapshot) until the refresh token expires (7 days) or a browser re-login invalidates it."""
+        html = """<!doctype html><meta charset="utf-8"><title>IDX feed token</title>
+<body style="font:15px system-ui;max-width:640px;margin:40px auto;padding:0 16px">
+<h2>IDX feed &mdash; Stockbit session token</h2>
+<p id="s" style="padding:10px 12px;border:1px solid #ccc;border-radius:6px">checking&hellip;</p>
+<p>Log in to stockbit.com, then in DevTools (F12) &rarr; Application &rarr; Cookies &rarr; https://stockbit.com copy the value of
+<code>credentialStorage</code> and paste it below. It carries the access token (24 h) <b>and the refresh token (7 days)</b>:
+after one paste the desk renews the session by itself &mdash; the tick feed 45 min before expiry, the scheduler every 30 min,
+the broker snapshot at 20:20 &mdash; so a paste is needed again only when the refresh token expires or you log in again in
+the browser (which invalidates the old one). The token stays on this machine (idx.feed_token + idx-local.env).</p>
+<textarea id="t" rows="8" style="width:100%" placeholder="paste the whole cookie value (a bare access JWT works for 24 h only)"></textarea>
+<p><button id="b" style="padding:8px 16px">Save token</button> <button id="r" style="padding:8px 16px">Renew now</button> <span id="m"></span></p>
+<script>
+const s = document.getElementById('s'), m = document.getElementById('m');
+async function status() {
+  try {
+    const j = await (await fetch('/idx/feed/status')).json(); const t = j.token || {};
+    s.textContent = t.valid ? ('token valid - expires ' + t.expires_at + ' (' + t.minutes_left + ' min, source ' + t.source + ')')
+                            : ('no valid token' + (t.expires_at ? ' - expired ' + t.expires_at : '') + ' - paste the cookie below');
+    s.style.background = t.valid ? '#e8f7e8' : '#fdecea';
+  } catch (e) { s.textContent = 'status unavailable: ' + e; }
+}
+document.getElementById('b').onclick = async () => {
+  m.textContent = 'saving...';
+  const r = await fetch('/idx/feed/token', {method: 'POST', headers: {'Content-Type': 'text/plain'}, body: document.getElementById('t').value});
+  const j = await r.json().catch(() => ({}));
+  m.textContent = r.ok ? ('saved - expires ' + j.expires_at) : ('refused: ' + (j.detail || r.status));
+  if (r.ok) document.getElementById('t').value = '';
+  status();
+};
+document.getElementById('r').onclick = async () => {
+  m.textContent = 'renewing...';
+  const r = await fetch('/idx/feed/token/refresh', {method: 'POST'});
+  const j = await r.json().catch(() => ({}));
+  m.textContent = r.ok ? ('renewed - ' + j.minutes_left + ' min left') : ('failed: ' + (j.detail || r.status));
+  status();
+};
+status();
+</script>"""
+        return Response(content=html, media_type="text/html")
+
+    @router.options("/feed/token")
+    def feed_token_options(response: Response) -> dict[str, Any]:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return {}
+
+    @router.get("/feed/status")
+    def feed_status() -> dict[str, Any]:
+        """Collector heartbeat, token validity, today's counts and the last events."""
+        from .feed import store as fs
+        with get_connection() as conn:
+            st = fs.status(conn)
+        return _plain(st)
+
+    @router.get("/feed/symbols")
+    def feed_symbols() -> list[dict[str, Any]]:
+        from .feed import store as fs
+        with get_connection() as conn:
+            return _plain(fs.list_symbols(conn))
+
+    @router.put("/feed/symbols", dependencies=[Depends(require_token)])
+    def feed_symbols_put(body: dict[str, Any] = _BODY, c: Caller = _CALLER) -> dict[str, Any]:
+        """{codes: [...], reason?, channels?, replace?} adds/enables names; {disable: [...]} disables; {liquid: N} seeds the
+        N most traded names plus every held and watched name."""
+        service_only(c, "changing the feed subscription")
+        from .feed import store as fs
+        out: dict[str, Any] = {}
+        with get_connection() as conn:
+            if body.get("liquid"):
+                codes = fs.liquid_codes(conn, int(body["liquid"]))
+                out["seeded"] = fs.set_symbols(conn, codes, reason="liquid", replace=True)
+            if body.get("codes"):
+                out["set"] = fs.set_symbols(conn, list(body["codes"]), reason=str(body.get("reason") or "manual"),
+                                            channels=body.get("channels"), replace=bool(body.get("replace")))
+            if body.get("disable"):
+                out["disabled"] = fs.disable_symbols(conn, list(body["disable"]))
+            out["enabled"] = sum(1 for r in fs.list_symbols(conn) if r["enabled"])
+        return out
 
     return router

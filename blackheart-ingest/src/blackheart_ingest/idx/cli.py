@@ -643,7 +643,7 @@ def cmd_book(a: argparse.Namespace) -> int:
             fields = {k: v for k, v in (("fee_buy_pct", a.fee_buy), ("fee_sell_pct", a.fee_sell), ("div_tax_pct", a.div_tax), ("broker", a.broker),
                                         ("cash_floor_pct", a.cash_floor), ("stress_cash_pct", a.stress_cash), ("stress_rule", a.stress_rule),
                                         ("max_weight_pct", a.max_weight), ("max_sector_pct", a.max_sector), ("max_turnover_pct", a.max_turnover),
-                                        ("min_v60", a.min_v60)) if v is not None}
+                                        ("min_v60", a.min_v60), ("regime_filter", a.regime_filter)) if v is not None}
             book.ensure_book(conn, a.book, **fields)
             print(f"{a.book}: {book.get_book(conn, a.book)}")
         elif a.sub == "import":
@@ -803,16 +803,16 @@ def cmd_broker(a: argparse.Namespace) -> int:
     import json
 
     from . import broker
-    if a.sub == "refresh":
-        try:
-            tok = broker.refresh_and_persist()
-        except broker.BrokerFetchError as e:
-            print(f"refresh failed: {e}")
-            return 1
-        exp = _jwt_exp(tok)
-        print(f"token refreshed and written to idx-local.env (…{tok[-8:]}){f'; expires {exp}' if exp else ''}")
-        return 0
     with get_connection() as conn:
+        if a.sub == "refresh":
+            try:
+                tok = broker.refresh_and_persist(conn=conn)                 # newest of env / relay row; written back to both
+            except broker.BrokerFetchError as e:
+                print(f"refresh failed: {e}")
+                return 1
+            exp = _jwt_exp(tok)
+            print(f"token refreshed and written to idx-local.env + idx.feed_token (…{tok[-8:]}){f'; expires {exp}' if exp else ''}")
+            return 0
         if a.sub == "universe":
             codes = broker.universe_codes(conn)
             print(f"{len(codes)} names: {' '.join(codes)}")
@@ -820,7 +820,7 @@ def cmd_broker(a: argparse.Namespace) -> int:
         if a.sub == "day":
             codes = [c.strip().upper() for c in a.codes.split(",")] if a.codes else broker.universe_codes(conn)
             try:
-                cfg = broker.config_fresh()                                  # auto-refresh when a refresh token is set
+                cfg = broker.config_fresh(conn=conn)                         # auto-refresh from the newest refresh token
             except broker.BrokerFetchError as e:
                 print(f"config: {e}")
                 return 1
@@ -888,6 +888,54 @@ def cmd_trend(a: argparse.Namespace) -> int:
             return 0
         rep = trend_book.run(conn, a.book, actor="operator", d=d)
         print(rep)
+        return 0
+
+
+def cmd_suggest(a: argparse.Namespace) -> int:
+    """What the tape supports for the open lines of a ticket (the one-tap fill's proposal, on the terminal)."""
+    from . import fillmatch, ticket
+    with get_connection() as conn:
+        tid = a.ticket
+        if tid is None:
+            t = ticket.load(conn, book=a.book)
+            if t is None:
+                print(f"no ticket for {a.book}")
+                return 1
+            tid = t["id"]
+        print(fillmatch.render(fillmatch.suggest(conn, tid, _d(a.as_of) if a.as_of else None)))
+        return 0
+
+
+def cmd_gapfade(a: argparse.Namespace) -> int:
+    """The intraday gap-fade book (research menu 29b): morning scan/entry, afternoon exit, evening settle."""
+    import json as _json
+
+    from . import gapfade
+    with get_connection() as conn:
+        d = _d(a.as_of) if a.as_of else None
+        if a.sub == "books":
+            for b in gapfade.gapfade_books(conn):
+                print(b)
+            return 0
+        if a.sub == "scan":
+            print(gapfade.render_scan(gapfade.scan(conn, d)))
+            return 0
+        if a.sub == "init":
+            bk_ = a.book
+            from . import book as bkmod
+            with conn.cursor() as cur:                                  # the book belongs to a person: alerts and the app's
+                cur.execute("""UPDATE idx.book SET owner_id = (SELECT id FROM idx.app_user WHERE email = %s)
+                                WHERE book = %s AND owner_id IS NULL""",   # live screen are scoped to its owner
+                            (a.owner or os.environ.get("IDX_AGENT_USER") or os.environ.get("IDX_OPS_NOTIFY_EMAIL"), bk_))
+                conn.commit()
+            bkmod.ensure_book(conn, bk_, rule="gapfade", max_names=a.slots, cash=a.cash, broker=a.broker, label=a.label,
+                              fee_buy_pct=a.fee_buy, fee_sell_pct=a.fee_sell, min_v60=str(int(gapfade.LIQ_MIN)),
+                              max_weight_pct=str(round(100 / max(1, a.slots) + 5, 2)), max_sector_pct="100",
+                              note="gapfade: buy the opening gap-down, sell into the same close (menu 29b, paper track)")
+            print(f"{bk_}: {bkmod.get_book(conn, bk_)}")
+            return 0
+        fn = {"entry": gapfade.run_entry, "exit": gapfade.run_exit, "settle": gapfade.settle}[a.sub]
+        print(_json.dumps(fn(conn, a.book, actor="operator", d=d), indent=1, default=str))
         return 0
 
 
@@ -959,6 +1007,62 @@ def cmd_crosscheck(a: argparse.Namespace) -> int:
     for w in r.warnings:
         print(f"    {w}")
     return 0 if r.status == "ok" else 1
+
+
+def cmd_feed(a: argparse.Namespace) -> int:
+    """Stockbit datafeed collector: run | status | symbols [--set A,B] [--liquid N] [--disable A,B] | token [--paste FILE] | audit [--date D]"""
+    from .feed import store as fs
+    if a.action == "run":
+        from .feed.collector import main as feed_main
+        return feed_main(["--no-raw"] if a.no_raw else [])
+    if a.action == "replay":
+        from .feed.collector import main as feed_main
+        if not a.file:
+            print("feed replay --file logs/idx/feed/<date>.frames.gz")
+            return 2
+        return feed_main(["--replay", a.file])
+    with get_connection() as conn:
+        if a.action == "status":
+            st = fs.status(conn)
+            c, t = st["collector"], st["token"]
+            print(f"collector: {c.get('state')}  {c.get('detail') or ''}  (pid {c.get('pid')}, heartbeat {c.get('stale_s', '?')} s ago)")
+            print(f"  frames {c.get('n_frames', 0):,}  trades {c.get('n_trades', 0):,}  books {c.get('n_books', 0):,}  symbols {c.get('n_symbols', 0)}  reconnects {c.get('reconnects', 0)}  last frame {c.get('last_frame_at') or '-'}")
+            print(f"token: {'valid' if t['valid'] else 'MISSING/EXPIRED'}  expires {t.get('expires_at') or '-'}  ({t.get('minutes_left')} min left, source {t.get('source')}, user {t.get('user_id')})")
+            td = st["today"]
+            print(f"today: {td['trades'] or 0:,} prints on {td['codes'] or 0} names  {td['first_at'] or ''} -> {td['last_at'] or ''}   subscribed {st['symbols_enabled']}")
+            for e in st["events"]:
+                print(f"  {e['at']:%Y-%m-%d %H:%M:%S} {e['kind']:<10} {e['detail'] or ''}")
+            return 0
+        if a.action == "symbols":
+            if a.liquid:
+                n = fs.set_symbols(conn, fs.liquid_codes(conn, a.liquid), reason="liquid", replace=True)
+                print(f"seeded {n} liquid/held/watched names")
+            if a.set:
+                print(f"set {fs.set_symbols(conn, a.set.split(','), reason='manual')}")
+            if a.disable:
+                print(f"disabled {fs.disable_symbols(conn, a.disable.split(','))}")
+            rows = fs.list_symbols(conn)
+            on = [r for r in rows if r["enabled"]]
+            print(f"{len(on)} enabled of {len(rows)}: " + " ".join(r["code"] for r in on))
+            return 0
+        if a.action == "token":
+            if a.paste:
+                raw = open(a.paste, encoding="utf-8").read() if a.paste != "-" else sys.stdin.read()
+                row = fs.save_token(conn, fs.parse_relay(raw), source="paste")
+                print(f"stored: user {row['user_id']} expires {row['expires_at']}")
+            t = fs.token_status(fs.load_token(conn))
+            print(f"token {'valid' if t['valid'] else 'MISSING/EXPIRED'}: expires {t.get('expires_at') or '-'} ({t.get('minutes_left')} min left), source {t.get('source')}, user {t.get('user_id')}, received {t.get('received_at') or '-'}")
+            return 0 if t["valid"] else 1
+        if a.action == "audit":
+            d = date.fromisoformat(a.date) if a.date else date.today()
+            rows = fs.audit_day(conn, d)
+            print(f"{d}: {len(rows)} names")
+            for r in sorted(rows, key=lambda r: (r["coverage"] is None, r["coverage"] or 0)):
+                cov = f"{float(r['coverage']) * 100:6.1f} %" if r["coverage"] is not None else "   n/a  "
+                print(f"  {r['code']:<6} prints {r['n_trades']:>7,}  vol {r['volume']:>14,}  official {r['official_vol'] or 0:>14,}  cov {cov}  gap {r['max_gap_s'] or 0:>5} s  books {r['n_books']:>6}")
+            return 0
+    print("feed: run | status | symbols | token | audit | replay")
+    return 2
 
 
 def cmd_run_scheduler(_: argparse.Namespace) -> int:
@@ -1134,6 +1238,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-sector", help="set: one sector after a ticket, %% of NAV")
     p.add_argument("--max-turnover", help="set: agent rebalance outside May 1-10, traded / NAV %%")
     p.add_argument("--min-v60", help="set: liquidity floor for a buy, Rp/day")
+    p.add_argument("--regime-filter", choices=["on", "off"], help="set: trend book = no new entry while COMPOSITE < MA200 (regime gate); annual book = all to cash under MA200")
     p.add_argument("--date")
     p.add_argument("--code")
     p.add_argument("--side", choices=["buy", "sell"])
@@ -1205,6 +1310,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--book", default="paper_trend")
     p.add_argument("--as-of")
     p.set_defaults(fn=cmd_trend)
+    p = sub.add_parser("suggest", help="what the tape supports for a ticket's open lines: suggest [--ticket N | --book B] [--as-of D]")
+    p.add_argument("--ticket", type=int, default=None)
+    p.add_argument("--book", default="trend_live")
+    p.add_argument("--as-of")
+    p.set_defaults(fn=cmd_suggest)
+    p = sub.add_parser("gapfade", help="intraday gap-fade book (menu 29b): scan | entry (08:58) | exit (15:50) | settle (evening) | books | init [--book B --cash N --slots K]")
+    p.add_argument("sub", choices=["scan", "entry", "exit", "settle", "books", "init"])
+    p.add_argument("--book", default="paper_gapfade")
+    p.add_argument("--as-of")
+    p.add_argument("--cash", default="100000000")
+    p.add_argument("--slots", type=int, default=5)
+    p.add_argument("--broker", default="stockbit")
+    p.add_argument("--label", default="Gap fade")
+    p.add_argument("--fee-buy", dest="fee_buy", default="0.10")
+    p.add_argument("--fee-sell", dest="fee_sell", default="0.20")
+    p.add_argument("--owner", default=None, help="account e-mail the book belongs to (default IDX_AGENT_USER)")
+    p.set_defaults(fn=cmd_gapfade)
     p = sub.add_parser("scores", help="public factor scores (spec §04): build [--as-of D] | show [--code X] [--as-of D] | stats [--refresh] [--criteria C]")
     p.add_argument("sub", choices=["build", "show", "stats"])
     p.add_argument("--as-of")
@@ -1227,6 +1349,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample", type=int, default=60)
     p.add_argument("--codes")
     p.set_defaults(fn=cmd_crosscheck)
+    p = sub.add_parser("feed", help="Stockbit datafeed collector: run [--no-raw] | status | symbols [--liquid N] [--set A,B] [--disable A,B] | token [--paste FILE|-] | audit [--date D] | replay --file F")
+    p.add_argument("action", choices=["run", "status", "symbols", "token", "audit", "replay"])
+    p.add_argument("--no-raw", action="store_true")
+    p.add_argument("--file")
+    p.add_argument("--liquid", type=int)
+    p.add_argument("--set")
+    p.add_argument("--disable")
+    p.add_argument("--paste")
+    p.add_argument("--date")
+    p.set_defaults(fn=cmd_feed)
     sub.add_parser("run-scheduler", help="run the Asia/Jakarta job scheduler in the foreground").set_defaults(fn=cmd_run_scheduler)
     return ap
 
