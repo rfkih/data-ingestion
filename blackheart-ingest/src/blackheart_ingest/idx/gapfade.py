@@ -22,6 +22,12 @@ Robustness (why each guard is here, all failures are loud and safe):
   stale bars      the previous close must come from the last trading day within 5 calendar days; otherwise no trading.
   no offer        a name locked at auto-rejection down has no offer to buy (the mirror of the ARA trap, menu 16): the latest
                   book snapshot must show an offer, else the name is skipped.
+  not a price     A CORPORATE ACTION IS NOT A GAP. On a split, bonus or rights ex-date the open is quoted on the new basis
+                  against yesterday's old-basis close, which reads as a crash that never happened (DSSA 2026-04-09: a 1:25
+                  split showed as -96 %; CUAN 2025-07-15, a 1:10 split, as -90 %; 8 of 539 events since 2025). Three
+                  filters: the gap may not breach the day's auto-rejection band (a real price move cannot), a name with a
+                  corporate action or a dividend ex-date today is skipped, and a breach raises an alert because it means a
+                  corporate action the desk has not recorded yet.
   leftovers       a position that survived the previous session (exit job missed, no bar) is sold at today's open BEFORE any
                   new entry, and raises a warning - the book is intraday by construction.
   once a day      one entry ticket and one exit ticket per book per day, under the same advisory lock the paper filler uses,
@@ -168,6 +174,16 @@ def offers(conn: psycopg.Connection, d: date) -> dict[str, Decimal]:
     return {r["code"]: Decimal(str(r["off"])) for r in rows if r["off"] and Decimal(str(r["off"])) > 0 and (r["ov"] or 0) > 0}
 
 
+def corporate_actions(conn: psycopg.Connection, d: date) -> set[str]:
+    """Names whose basis changed today (split, bonus, rights): their open is not comparable with yesterday's close."""
+    return {r["code"] for r in _rows(conn, "SELECT code FROM idx.corporate_action WHERE ex_date = %s", (d,), ["code"])}
+
+
+def ex_dividends(conn: psycopg.Connection, d: date) -> set[str]:
+    """Names trading ex-dividend today: the open drops by the dividend, which is not an overreaction to fade."""
+    return {r["code"] for r in _rows(conn, "SELECT code FROM idx.dividend WHERE ex_date = %s", (d,), ["code"])}
+
+
 def prev_session(conn: psycopg.Connection, d: date) -> date | None:
     r = _rows(conn, "SELECT max(trade_date) AS d FROM idx.bar WHERE source = 'idx' AND trade_date < %s", (d,), ["d"])
     return r[0]["d"] if r and r[0]["d"] else None
@@ -193,7 +209,11 @@ def scan(conn: psycopg.Connection, d: date | None = None, gap_max: Decimal = GAP
           FROM idx.bar b JOIN idx.listing l USING (code) LEFT JOIN idx.feature_daily f ON f.code = b.code AND f.trade_date = b.trade_date
          WHERE b.trade_date = %s AND b.source = 'idx'""", (pd_,), ["code", "prev_close", "v60", "board", "status", "sector"])}
     off = offers(conn, d)
-    skipped = {"no_base": 0, "board": 0, "illiquid": 0, "price": 0, "no_offer": 0, "not_deep": 0}
+    actions = corporate_actions(conn, d)
+    divs = ex_dividends(conn, d)
+    skipped = {"no_base": 0, "board": 0, "illiquid": 0, "price": 0, "no_offer": 0, "not_deep": 0,
+               "corporate_action": 0, "ex_dividend": 0, "impossible": 0}
+    impossible: list[str] = []
     cands = []
     for code, o in px.items():
         b = base.get(code)
@@ -213,12 +233,25 @@ def scan(conn: psycopg.Connection, d: date | None = None, gap_max: Decimal = GAP
         if g > gap_max:
             skipped["not_deep"] += 1
             continue
+        if code in actions:                                               # split / bonus / rights: the open is a new basis
+            skipped["corporate_action"] += 1
+            continue
+        if code in divs:                                                  # ex-dividend: the drop is the dividend, not a fall
+            skipped["ex_dividend"] += 1
+            continue
+        if o["open"] < ticket.reject_band(Decimal(b["prev_close"]))[0]:   # deeper than the market allows in a day
+            skipped["impossible"] += 1
+            impossible.append(code)
+            continue
         if code not in off:
             skipped["no_offer"] += 1                                      # locked at ARB: there is nothing to buy
             continue
         cands.append({"code": code, "open": o["open"], "at": o["at"], "prev_close": Decimal(b["prev_close"]), "gap": g,
                       "v60": Decimal(b["v60"]), "sector": b["sector"], "offer": off[code]})
-    res.update({"ok": True, "candidates": sorted(cands, key=lambda c: c["gap"]), "skipped": skipped})
+    res.update({"ok": True, "candidates": sorted(cands, key=lambda c: c["gap"]), "skipped": skipped, "impossible": impossible})
+    if impossible:                                                        # a corporate action the desk does not know about yet
+        runlog.alert_once(conn, "warning", "gapfade", f"{d}: {', '.join(impossible)} opened beyond the auto-rejection band - "
+                                                      "an unrecorded split, bonus or rights, not a price move; skipped")
     return res
 
 

@@ -157,6 +157,35 @@ def test_round_trip(conn) -> None:
         _clean_filler(conn)
 
 
+def test_a_corporate_action_is_not_a_gap(conn) -> None:
+    """A split, a bonus/rights basis change or an ex-dividend drop must never be bought as an overreaction, and a gap
+    deeper than the day's auto-rejection band is impossible as a price move - it is an unrecorded corporate action."""
+    _clean(conn)
+    # TSTA "falls" 96 % overnight (a 1:25 split, as DSSA did on 2026-04-09); TSTB gaps a real -10 %
+    _seed(conn, prev={"TSTA": 67000, "TSTB": 1000}, opens={"TSTA": 2600, "TSTB": 900}, closes={"TSTA": 3120, "TSTB": 960})
+    try:
+        s = gapfade.scan(conn, D)
+        assert [c["code"] for c in s["candidates"]] == ["TSTB"]           # the split is not a candidate
+        assert s["skipped"]["impossible"] == 1 and s["impossible"] == ["TSTA"]
+        with conn.cursor() as cur:                                         # the same day, now recorded as a split
+            cur.execute("""INSERT INTO idx.corporate_action (code, ex_date, kind, factor, source)
+                           VALUES ('TSTA', %s, 'split', 0.04, 'test') ON CONFLICT DO NOTHING""", (D,))
+            cur.execute("""INSERT INTO idx.dividend (code, ex_date, kind, amount_per_share, source)
+                           VALUES ('TSTB', %s, 'cash', 100, 'test') ON CONFLICT DO NOTHING""", (D,))
+        conn.commit()
+        s = gapfade.scan(conn, D)
+        assert s["candidates"] == []                                       # both are now explained, neither is faded
+        assert s["skipped"]["corporate_action"] == 1 and s["skipped"]["ex_dividend"] == 1 and s["skipped"]["impossible"] == 0
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM idx.corporate_action WHERE source = 'test'")
+            cur.execute("DELETE FROM idx.dividend WHERE source = 'test'")
+            cur.execute("DELETE FROM idx.alert WHERE job = 'gapfade'")
+        conn.commit()
+        _clean(conn)
+        _clean_filler(conn)
+
+
 def test_guards(conn) -> None:
     _clean(conn)
     try:
