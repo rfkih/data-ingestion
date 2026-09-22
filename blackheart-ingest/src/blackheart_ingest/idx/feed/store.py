@@ -307,8 +307,10 @@ def status(conn: psycopg.Connection) -> dict[str, Any]:
         cur.execute("SELECT at, kind, detail FROM idx.feed_event ORDER BY at DESC LIMIT 8")
         events = [dict(r) for r in cur.fetchall()]
     tok = token_status(load_token(conn))
-    out = {"collector": dict(st) if st else {"state": "off", "detail": "never started"}, "token": tok, "symbols_enabled": n_sym,
-           "today": dict(today), "events": events}
+    from ..broker import refresh_status  # local: broker imports card, card must not import us
+    out = {"collector": dict(st) if st else {"state": "off", "detail": "never started"}, "token": tok,
+           "refresh": refresh_status(conn=conn),                           # the 7-day horizon: when a cookie paste is due again
+           "symbols_enabled": n_sym, "today": dict(today), "events": events}
     if st and st.get("updated_at"):
         out["collector"]["stale_s"] = round((datetime.now(UTC) - st["updated_at"]).total_seconds())
     return out
