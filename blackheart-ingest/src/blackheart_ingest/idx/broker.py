@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -37,7 +37,7 @@ TOKEN_ENV, URL_ENV = "STOCKBIT_TOKEN", "STOCKBIT_BS_URL"
 REFRESH_ENV, ENV_FILE_ENV = "STOCKBIT_REFRESH_TOKEN", "STOCKBIT_ENV_FILE"
 BASE = "https://exodus.stockbit.com/marketdetectors/"                       # legacy per-window feed; Pro-only since 2026-09-18
 DIST_BASE = "https://exodus.stockbit.com/order-trade/broker/distribution"   # the free daily buyer->seller feed the desk uses now
-REFRESH_URL = "https://exodus.stockbit.com/auth/refresh"                    # POST {refresh_token} -> a fresh access token
+REFRESH_URL = "https://exodus.stockbit.com/login/refresh"                   # POST {} with Authorization: Bearer <refresh token>
 DEFAULT_PARAMS = {"investor_type": "INVESTOR_TYPE_ALL", "market_board": "MARKET_BOARD_REGULER", "transaction_type": "TRANSACTION_TYPE_NET"}
 LIMIT = "100"
 LOT = 100
@@ -589,14 +589,23 @@ def snapshot(conn: psycopg.Connection, codes: list[str], cfg: dict[str, Any] | N
 
 
 # ==================================================================================================== token refresh (#2)
-# The pasted STOCKBIT_TOKEN is a 24 h session JWT. With STOCKBIT_REFRESH_TOKEN set, the feed refreshes the access token
-# itself (POST /auth/refresh {refresh_token}) before a run and writes the fresh token(s) back to the env file, so the
-# nightly snapshot needs no daily paste. Refresh tokens usually rotate, so the new one is persisted too.
+# The pasted STOCKBIT_TOKEN is a 24 h session JWT; the refresh token lasts 7 days. Verified 2026-09-22 against the live
+# API: ``POST /login/refresh`` with ``Authorization: Bearer <refresh token>`` and an empty JSON body answers
+# ``{"data": {"access": {"token", "expired_at"}, "refresh": {"token", "expired_at"}}}`` - the refresh token rotates every
+# time. Before a run the feed refreshes from the newest refresh token it can see (idx-local.env or the relay row in
+# ``idx.feed_token``), then writes the pair back to both places, so neither the nightly snapshot nor the tick feed
+# needs a daily paste.
 
-def _json_post(url: str, body: dict[str, Any], timeout: float = 30.0) -> tuple[int, bytes]:
+Poster = Callable[[str, dict[str, Any], str | None], tuple[int, bytes]]
+
+
+def _json_post(url: str, body: dict[str, Any], bearer: str | None = None, timeout: float = 30.0) -> tuple[int, bytes]:
     data = json.dumps(body).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json", "X-Platform": "web",
+               "Origin": "https://stockbit.com", "Referer": "https://stockbit.com/",
                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) blackheart-idx research feed"}
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -623,16 +632,52 @@ def _find_token(obj: Any, wanted: tuple[str, ...]) -> str | None:
     return None
 
 
+def _find_subtree(obj: Any, wanted: tuple[str, ...]) -> Any:
+    """Depth-first search for the first dict under a key whose normalised name matches ``wanted``."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, dict) and _norm(k) in wanted:
+                return v
+        for v in obj.values():
+            got = _find_subtree(v, wanted)
+            if got is not None:
+                return got
+    elif isinstance(obj, list):
+        for v in obj:
+            got = _find_subtree(v, wanted)
+            if got is not None:
+                return got
+    return None
+
+
 def extract_tokens(resp: Any) -> tuple[str | None, str | None]:
-    """(access_token, refresh_token | None) from a tolerant search of the /auth/refresh response."""
-    access = _find_token(resp, ("accesstoken", "access", "access_token", "token", "idtoken", "id_token", "jwt"))
-    refresh = _find_token(resp, ("refreshtoken", "refresh", "refresh_token"))
+    """(access_token, refresh_token | None) from the /login/refresh response - the nested shape
+    ``{"access": {"token": ..}, "refresh": {"token": ..}}`` first, then a tolerant flat search."""
+    access_sub = _find_subtree(resp, ("access", "accesstoken", "access_token"))
+    refresh_sub = _find_subtree(resp, ("refresh", "refreshtoken", "refresh_token"))
+    access = _find_token(access_sub, ("token",)) if access_sub else None
+    refresh = _find_token(refresh_sub, ("token",)) if refresh_sub else None
+    if not access:
+        access = _find_token(resp, ("accesstoken", "access", "access_token", "token", "idtoken", "id_token", "jwt"))
+    if not refresh:
+        refresh = _find_token(resp, ("refreshtoken", "refresh", "refresh_token"))
     return access, refresh
 
 
-def refresh_access_token(refresh_token: str, poster: Callable[[str, dict[str, Any]], tuple[int, bytes]] | None = None) -> tuple[str, str | None, Any]:
-    """POST the refresh token -> (new access token, rotated refresh token | None, raw response). Raises on failure."""
-    status, body = (poster or _json_post)(REFRESH_URL, {"refresh_token": refresh_token})
+def _jwt_claim(tok: str, key: str) -> int:
+    """An integer claim (``iat``/``exp``) of a JWT, 0 when the token is not a JWT or lacks the claim."""
+    try:
+        import base64
+        p = tok.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        return int(json.loads(base64.urlsafe_b64decode(p)).get(key) or 0)
+    except (IndexError, ValueError, TypeError):
+        return 0
+
+
+def refresh_access_token(refresh_token: str, poster: Poster | None = None) -> tuple[str, str | None, Any]:
+    """Refresh token as Bearer, empty body -> (new access token, rotated refresh token | None, raw response). Raises on failure."""
+    status, body = (poster or _json_post)(REFRESH_URL, {}, refresh_token)
     try:
         resp = json.loads(body.decode("utf-8")) if body else None
     except (ValueError, UnicodeDecodeError) as e:
@@ -674,15 +719,35 @@ def write_env_token(path: str, key: str, value: str) -> None:
         f.write("\n".join(lines) + "\n")
 
 
-def refresh_and_persist(env: dict[str, str] | None = None, env_file: str | None = None,
-                        poster: Callable[[str, dict[str, Any]], tuple[int, bytes]] | None = None,
-                        persist: bool = True) -> str:
-    """Refresh the access token from STOCKBIT_REFRESH_TOKEN, update os.environ and the env file, and return it."""
+def _relay_refresh_token(conn: psycopg.Connection | None) -> str | None:
+    """The refresh token the browser relay (or a previous refresh) left in ``idx.feed_token``."""
+    if conn is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute("SELECT refresh_token FROM idx.feed_token WHERE id = 1")
+        r = cur.fetchone()
+    v = (r["refresh_token"] if isinstance(r, dict) else r[0]) if r else None
+    return str(v).strip() if v else None
+
+
+def newest_refresh_token(env: dict[str, str] | None = None, conn: psycopg.Connection | None = None) -> str | None:
+    """Between idx-local.env and the relay row, the refresh token issued last (a re-login or a rotation invalidates
+    the older one, so the newest ``iat`` is the only one worth trying)."""
     env = os.environ if env is None else env
-    rt = (env.get(REFRESH_ENV) or "").strip()
+    cands = [t for t in ((env.get(REFRESH_ENV) or "").strip(), _relay_refresh_token(conn)) if t]
+    return max(cands, key=lambda t: _jwt_claim(t, "iat")) if cands else None
+
+
+def refresh_and_persist(env: dict[str, str] | None = None, env_file: str | None = None,
+                        poster: Poster | None = None, persist: bool = True,
+                        conn: psycopg.Connection | None = None) -> str:
+    """Refresh the access token from the newest refresh token (env or relay row), update os.environ, the env file and
+    ``idx.feed_token`` (so the tick feed shares the session), and return the access token."""
+    env = os.environ if env is None else env
+    rt = newest_refresh_token(env, conn)
     if not rt:
         raise BrokerAuthError(f"{REFRESH_ENV} is not set (paste the Stockbit refresh token into idx-local.env to auto-refresh)")
-    access, rotated, _ = refresh_access_token(rt, poster)
+    access, rotated, resp = refresh_access_token(rt, poster)
     os.environ[TOKEN_ENV] = access
     if rotated:
         os.environ[REFRESH_ENV] = rotated
@@ -691,16 +756,67 @@ def refresh_and_persist(env: dict[str, str] | None = None, env_file: str | None 
         write_env_token(path, TOKEN_ENV, access)
         if rotated:
             write_env_token(path, REFRESH_ENV, rotated)
+    if persist and conn is not None:
+        from .feed import store as feed_store
+        try:
+            feed_store.save_token(conn, feed_store.parse_relay(resp if isinstance(resp, dict) else {"access_token": access,
+                                                                                                    "refresh_token": rotated}),
+                                  source="refresh")
+        except (ValueError, psycopg.Error) as e:                             # the env file already has the pair
+            logger.warning("idx broker: refreshed token not written to idx.feed_token - %s", e)
     return access
 
 
-def config_fresh(env: dict[str, str] | None = None, env_file: str | None = None) -> dict[str, Any]:
-    """``config()`` but, when a refresh token is set, refresh the access token first. Falls back to the stored
-    access token if the refresh fails (a still-valid token keeps the run alive)."""
+def minutes_needed(now: datetime, need_until: datetime | None, min_left_min: int) -> int:
+    """Pure. How many minutes of validity the session must still have: the floor, or long enough to reach ``need_until``
+    (the market close) - whichever is longer."""
+    if need_until is None:
+        return min_left_min
+    return max(min_left_min, int((need_until - now).total_seconds() // 60))
+
+
+def refresh_status(env: dict[str, str] | None = None, conn: psycopg.Connection | None = None,
+                   now: datetime | None = None) -> dict[str, Any]:
+    """The REFRESH token's own horizon (7 days, rotating). When it runs out nothing can be renewed headlessly and the
+    operator has to paste the cookie again, so the guard watches it days ahead."""
+    now = now or datetime.now(UTC)
+    rt = newest_refresh_token(env, conn)
+    if not rt:
+        return {"present": False, "expires_at": None, "days_left": None}
+    exp = _jwt_claim(rt, "exp")
+    if not exp:
+        return {"present": True, "expires_at": None, "days_left": None}
+    when = datetime.fromtimestamp(exp, tz=UTC)
+    return {"present": True, "expires_at": when, "days_left": (when - now).total_seconds() / 86400}
+
+
+def renew_if_needed(conn: psycopg.Connection, env: dict[str, str] | None = None, *, min_left_min: int = 180,
+                    need_until: datetime | None = None, force: bool = False, now: datetime | None = None) -> dict[str, Any]:
+    """Keep the Stockbit session alive for the tick feed, the gap-fade jobs and the broker snapshot: refresh when the
+    newest access token (relay row or env) would run out before ``need_until`` (the market close) or has under
+    ``min_left_min`` minutes left, and a refresh token is known. ``{renewed, minutes_left, needed, reason}``;
+    raises BrokerFetchError when the refresh call itself fails."""
+    from .feed import store as feed_store
+    now = now or datetime.now(UTC)
+    need = minutes_needed(now, need_until, min_left_min)
+    st = feed_store.token_status(feed_store.load_token(conn), now)
+    left = st.get("minutes_left")
+    if not force and st["valid"] and left is not None and left > need:
+        return {"renewed": False, "minutes_left": left, "needed": need, "reason": "fresh"}
+    if not newest_refresh_token(env, conn):
+        return {"renewed": False, "minutes_left": left, "needed": need, "reason": "no refresh token - paste the cookie at /idx/feed/relay"}
+    access = refresh_and_persist(env, conn=conn)
+    return {"renewed": True, "minutes_left": round((_jwt_claim(access, "exp") - time.time()) / 60), "needed": need, "reason": "renewed"}
+
+
+def config_fresh(env: dict[str, str] | None = None, env_file: str | None = None,
+                 conn: psycopg.Connection | None = None) -> dict[str, Any]:
+    """``config()`` but, when a refresh token is known (env or relay row), refresh the access token first. Falls back
+    to the stored access token if the refresh fails (a still-valid token keeps the run alive)."""
     env = os.environ if env is None else env
-    if (env.get(REFRESH_ENV) or "").strip():
+    if newest_refresh_token(env, conn):
         try:
-            refresh_and_persist(env, env_file)
+            refresh_and_persist(env, env_file, conn=conn)
         except BrokerFetchError as e:
             logger.warning("idx broker: token refresh failed, using the stored access token - %s", e)
     return config(env)

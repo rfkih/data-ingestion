@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import psycopg
@@ -209,33 +209,123 @@ def test_fetch_day_maps_statuses_and_date() -> None:
         broker.fetch_day("BBCA", cfg, lambda u, h: (401, b"{}"))
 
 
+def _jwt(**claims) -> str:
+    """An unsigned JWT-shaped token carrying ``claims`` (enough for the iat/exp readers)."""
+    import base64
+    import json as _json
+    enc = lambda o: base64.urlsafe_b64encode(_json.dumps(o).encode()).decode().rstrip("=")  # noqa: E731
+    return f"{enc({'alg': 'none'})}.{enc(claims)}.sig"
+
+
+# the live /login/refresh answer (2026-09-22): tokens nested under access.token / refresh.token
+_REFRESH_RESP = b'{"message":"You have been successfully refresh token","data":{"access":{"token":"NEWACCESS","expired_at":"2026-09-23T06:20:05Z"},"refresh":{"token":"NEWREFRESH","expired_at":"2026-09-29T06:20:05Z"}}}'
+
+
 def test_extract_tokens_and_refresh() -> None:
-    assert broker.extract_tokens({"data": {"access": "AAA", "refresh_token": "RRR"}}) == ("AAA", "RRR")
+    assert broker.extract_tokens({"data": {"access": {"token": "AAA", "expired_at": "x"}, "refresh": {"token": "RRR"}}}) == ("AAA", "RRR")
+    assert broker.extract_tokens({"data": {"refresh": {"token": "RRR"}, "access": {"token": "AAA"}}}) == ("AAA", "RRR")  # order-proof
+    assert broker.extract_tokens({"data": {"access": "AAA", "refresh_token": "RRR"}}) == ("AAA", "RRR")                # flat variant
     assert broker.extract_tokens({"accessToken": "A2"}) == ("A2", None)
     assert broker.extract_tokens({"nothing": 1}) == (None, None)
     posts = []
 
-    def poster(url, body):
-        posts.append((url, body))
-        return 200, b'{"data": {"access": "NEWACCESS", "refresh": "NEWREFRESH"}}'
+    def poster(url, body, bearer):
+        posts.append((url, body, bearer))
+        return 200, _REFRESH_RESP
 
-    access, rotated, resp = broker.refresh_access_token("oldR", poster)
+    access, rotated, _resp = broker.refresh_access_token("oldR", poster)
     assert access == "NEWACCESS" and rotated == "NEWREFRESH"
-    assert posts[0][0] == broker.REFRESH_URL and posts[0][1] == {"refresh_token": "oldR"}
+    assert posts[0] == (broker.REFRESH_URL, {}, "oldR")                    # refresh token travels as the Bearer, body empty
     with pytest.raises(broker.BrokerAuthError):
-        broker.refresh_access_token("bad", lambda u, b: (401, b'{"message":"invalid"}'))
+        broker.refresh_access_token("bad", lambda u, b, t: (401, b'{"message":"UNAUTHORIZED"}'))
     with pytest.raises(broker.BrokerFetchError):
-        broker.refresh_access_token("x", lambda u, b: (200, b'{"data": {"nope": 1}}'))
+        broker.refresh_access_token("x", lambda u, b, t: (200, b'{"data": {"nope": 1}}'))
+
+
+def test_newest_refresh_token_prefers_latest_iat() -> None:
+    old, new = _jwt(iat=1_000, exp=2_000), _jwt(iat=5_000, exp=6_000)
+    assert broker.newest_refresh_token({"STOCKBIT_REFRESH_TOKEN": old}, None) == old
+    assert broker.newest_refresh_token({}, None) is None
+
+    class _Cur:
+        def __init__(self, tok): self.tok = tok
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, *a): pass
+        def fetchone(self): return (self.tok,)
+
+    class _Conn:
+        def __init__(self, tok): self.tok = tok
+        def cursor(self): return _Cur(self.tok)
+
+    assert broker.newest_refresh_token({"STOCKBIT_REFRESH_TOKEN": old}, _Conn(new)) == new   # relay re-login wins
+    assert broker.newest_refresh_token({"STOCKBIT_REFRESH_TOKEN": new}, _Conn(old)) == new   # env rotation wins
+    assert broker.newest_refresh_token({}, _Conn(new)) == new                                 # relay only
+
+
+def test_renew_if_needed(monkeypatch) -> None:
+    from blackheart_ingest.idx.feed import store as feed_store
+    now = datetime.now(UTC)
+    calls: list[str] = []
+    monkeypatch.setattr(broker, "refresh_and_persist", lambda env=None, conn=None, **k: (calls.append("refresh"), _jwt(exp=int(now.timestamp()) + 86400))[1])
+    fresh = {"access_token": "A", "refresh_token": _jwt(iat=1, exp=2), "expires_at": now + timedelta(hours=10), "source": "relay"}
+    monkeypatch.setattr(feed_store, "load_token", lambda conn: fresh)
+    rep = broker.renew_if_needed(object(), {})                                  # 10 h left -> nothing to do
+    assert rep == {"renewed": False, "minutes_left": 600, "needed": 180, "reason": "fresh"} and calls == []
+    monkeypatch.setattr(broker, "_relay_refresh_token", lambda conn: fresh["refresh_token"])
+    rep = broker.renew_if_needed(object(), {}, force=True)                      # forced -> refreshed
+    assert rep["renewed"] and rep["reason"] == "renewed" and 1430 <= rep["minutes_left"] <= 1440 and calls == ["refresh"]
+    stale = {**fresh, "expires_at": now + timedelta(minutes=90)}
+    monkeypatch.setattr(feed_store, "load_token", lambda conn: stale)
+    assert broker.renew_if_needed(object(), {})["renewed"] and calls == ["refresh", "refresh"]   # 90 min < 3 h -> refreshed
+    monkeypatch.setattr(broker, "_relay_refresh_token", lambda conn: None)
+    rep = broker.renew_if_needed(object(), {})                                   # nothing to refresh with
+    assert not rep["renewed"] and "no refresh token" in rep["reason"] and len(calls) == 2
+
+
+def test_minutes_needed_and_refresh_status() -> None:
+    now = datetime(2026, 9, 23, 2, 0, tzinfo=UTC)                          # 09:00 WIB
+    close = datetime(2026, 9, 23, 9, 45, tzinfo=UTC)                       # 16:45 WIB = the close plus the margin
+    assert broker.minutes_needed(now, None, 180) == 180
+    assert broker.minutes_needed(now, close, 180) == 465                   # must reach the close, not just the floor
+    assert broker.minutes_needed(datetime(2026, 9, 23, 9, 0, tzinfo=UTC), close, 180) == 180   # floor wins near the close
+    rt = _jwt(iat=int(now.timestamp()), exp=int(now.timestamp()) + 7 * 86400)
+    st = broker.refresh_status({"STOCKBIT_REFRESH_TOKEN": rt}, None, now)
+    assert st["present"] and 6.9 < st["days_left"] < 7.1
+    assert broker.refresh_status({}, None, now) == {"present": False, "expires_at": None, "days_left": None}
+
+
+def test_renew_if_needed_respects_the_session_end(monkeypatch) -> None:
+    from blackheart_ingest.idx.feed import store as feed_store
+    now = datetime(2026, 9, 23, 2, 0, tzinfo=UTC)                          # 09:00 WIB, market open
+    close = datetime(2026, 9, 23, 9, 45, tzinfo=UTC)
+    rt = _jwt(iat=int(now.timestamp()), exp=int(now.timestamp()) + 7 * 86400)
+    calls = []
+    monkeypatch.setattr(broker, "refresh_and_persist", lambda env=None, conn=None, **k: (calls.append(1), _jwt(exp=int(now.timestamp()) + 86400))[1])
+    monkeypatch.setattr(broker, "_relay_refresh_token", lambda conn: rt)
+    # 5 hours left: plenty by the 3-hour floor, NOT enough to reach the close -> renewed
+    monkeypatch.setattr(feed_store, "load_token", lambda conn: {"access_token": "A", "expires_at": now + timedelta(hours=5), "source": "relay"})
+    rep = broker.renew_if_needed(object(), {}, need_until=close, now=now)
+    assert rep["renewed"] and rep["needed"] == 465 and len(calls) == 1
+    assert not broker.renew_if_needed(object(), {}, now=now)["renewed"]     # same token, no session requirement -> fresh
+    # 9 hours left: covers the close -> nothing to do
+    monkeypatch.setattr(feed_store, "load_token", lambda conn: {"access_token": "A", "expires_at": now + timedelta(hours=9), "source": "relay"})
+    assert broker.renew_if_needed(object(), {}, need_until=close, now=now)["reason"] == "fresh"
+    # no refresh token anywhere -> a reason the guard can nag about, never an exception
+    monkeypatch.setattr(broker, "_relay_refresh_token", lambda conn: None)
+    monkeypatch.setattr(feed_store, "load_token", lambda conn: {"access_token": "A", "expires_at": now - timedelta(minutes=1), "source": "relay"})
+    rep = broker.renew_if_needed(object(), {}, need_until=close, now=now)
+    assert not rep["renewed"] and "no refresh token" in rep["reason"]
 
 
 def test_refresh_and_persist_writes_env(tmp_path) -> None:
     env_file = tmp_path / "idx-local.env"
     env_file.write_text("# comment\n#STOCKBIT_TOKEN=old\nSTOCKBIT_REFRESH_TOKEN=oldR\nOTHER=keep\n", encoding="utf-8")
     env = {"STOCKBIT_REFRESH_TOKEN": "oldR"}
-    got = broker.refresh_and_persist(env, str(env_file), poster=lambda u, b: (200, b'{"access":"NEWA","refresh":"NEWR"}'))
-    assert got == "NEWA"
+    got = broker.refresh_and_persist(env, str(env_file), poster=lambda u, b, t: (200, _REFRESH_RESP))
+    assert got == "NEWACCESS"
     txt = env_file.read_text(encoding="utf-8")
-    assert "STOCKBIT_TOKEN=NEWA" in txt and "STOCKBIT_REFRESH_TOKEN=NEWR" in txt and "OTHER=keep" in txt
+    assert "STOCKBIT_TOKEN=NEWACCESS" in txt and "STOCKBIT_REFRESH_TOKEN=NEWREFRESH" in txt and "OTHER=keep" in txt
     assert "#STOCKBIT_TOKEN=old" not in txt and "REFRESH_TOKEN=oldR" not in txt
     with pytest.raises(broker.BrokerAuthError, match="STOCKBIT_REFRESH_TOKEN"):
         broker.refresh_and_persist({}, str(env_file))

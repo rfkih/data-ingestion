@@ -69,6 +69,17 @@ def alert(conn: psycopg.Connection, severity: str, job: str | None, message: str
         logger.exception("idx alert: notify failed")
 
 
+def alert_once(conn: psycopg.Connection, severity: str, job: str | None, message: str) -> bool:
+    """``alert`` unless the same job+message is already open (unacknowledged). Returns whether it raised one - a caller
+    that nags on a repeating schedule uses the False to send its own reminder without filling the alert table."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM idx.alert WHERE job = %s AND message = %s AND acknowledged_at IS NULL", (job, message))
+        if cur.fetchone():
+            return False
+    alert(conn, severity, job, message)
+    return True
+
+
 def open_alerts(conn: psycopg.Connection, limit: int = 50) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
