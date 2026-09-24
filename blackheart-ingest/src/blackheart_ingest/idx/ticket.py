@@ -16,7 +16,7 @@ import json
 import logging
 import math
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -590,6 +590,73 @@ def skip_line(conn: psycopg.Connection, line_id: int, reason: str) -> None:
     with conn.cursor() as cur:
         cur.execute("UPDATE idx.ticket_line SET status = 'skipped', skip_reason = %s, updated_at = now() WHERE id = %s", (reason, line_id))
     conn.commit()
+
+
+SAME_DAY_MODES = frozenset({"gapfade", "gapfade_exit"})   # drafted in the morning for THAT session; everything else is drafted
+                                                          # from a close and worked the NEXT session (trend, rebalance, exits)
+
+
+def stale_state(ticket_id: int, book: str, mode: str, ticket_date: date, lines: list[dict[str, Any]], today: date,
+                sessions_passed: int) -> dict[str, Any] | None:
+    """Pure. Why an ``issued`` ticket still needs the operator, or None if it does not.
+
+    ``sessions_passed`` = trading days strictly between ``ticket_date`` and ``today`` - the sessions that have fully
+    closed since the ticket was dated. The session in progress is never one of them, so a ticket is only "stale" once
+    the session it was meant for is over:
+
+      trend / rebalance / exits   dated at a close, worked the NEXT session -> stale when sessions_passed >= 1.
+                                  The morning after the draft is sessions_passed == 0: the normal case, not stale.
+                                  (Measured in calendar days this flagged EVERY overnight ticket - the bug this fixes.)
+      gapfade / gapfade_exit      dated the morning it is for -> stale as soon as today > ticket_date.
+
+    Two ways a ticket drifts, needing opposite actions:
+      waiting   lines still ``open``; ``stale`` says whether the prices it was built on are already a session old.
+      finish    every line filled or skipped but the ticket never closed, which blocks the next draft
+                (ticket #103 sat like this from 2026-09-17).
+    ``key`` is stable per ticket - no ages, no counts - so ``runlog.alert_once`` can dedupe on it day after day.
+    """
+    if not lines:
+        return None
+    open_n = sum(1 for ln in lines if ln.get("status") == "open")
+    filled_n = sum(1 for ln in lines if ln.get("status") == "filled")
+    if open_n == 0:
+        return {"id": ticket_id, "book": book, "mode": mode, "kind": "finish", "stale": False, "open": 0,
+                "filled": filled_n, "sessions_passed": sessions_passed,
+                "key": f"#{ticket_id} ({book}) finish",
+                "why": f"#{ticket_id} ({book}): {filled_n} lines filled, none open - close the ticket"}
+    stale = today > ticket_date if mode in SAME_DAY_MODES else sessions_passed >= 1
+    if not stale:
+        why = f"#{ticket_id} ({book}): {open_n} line(s) not worked yet - for this session"
+    elif mode in SAME_DAY_MODES:
+        why = f"#{ticket_id} ({book}): {open_n} line(s) never worked - it was for {ticket_date}, prices are stale"
+    else:
+        why = (f"#{ticket_id} ({book}): {open_n} line(s) not worked - the session it was drafted for closed "
+               f"{sessions_passed} session(s) ago, prices are stale")
+    return {"id": ticket_id, "book": book, "mode": mode, "kind": "waiting", "stale": stale, "open": open_n,
+            "filled": filled_n, "sessions_passed": sessions_passed,
+            "key": f"#{ticket_id} ({book}) waiting", "why": why}
+
+
+def sessions_between(conn: psycopg.Connection, start: date, end: date) -> int:
+    """Trading days strictly between two dates, from the bars the desk has (``idx.bar``)."""
+    if end <= start:
+        return 0
+    return len(bk._trading_days(conn, start + timedelta(days=1), end - timedelta(days=1)))
+
+
+def stale_tickets(conn: psycopg.Connection, today: date | None = None) -> list[dict[str, Any]]:
+    """Shell: every issued ticket that still needs the operator, newest first."""
+    today = today or date.today()
+    ts = _rows(conn, "SELECT id, book, mode, ticket_date FROM idx.ticket WHERE status = 'issued' ORDER BY id DESC",
+               (), ["id", "book", "mode", "ticket_date"])
+    out = []
+    for t in ts:
+        lines = _rows(conn, "SELECT status FROM idx.ticket_line WHERE ticket_id = %s", (t["id"],), ["status"])
+        s = stale_state(t["id"], t["book"], t["mode"] or "", t["ticket_date"], lines, today,
+                        sessions_between(conn, t["ticket_date"], today))
+        if s:
+            out.append(s)
+    return out
 
 
 def render(t: dict[str, Any]) -> str:

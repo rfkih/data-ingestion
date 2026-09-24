@@ -55,6 +55,15 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   `C:/Project/scripts/idx.sh` / `idx.ps1` (loads `idx-local.env`, gitignored).
 - **Annual reports (`idx/annual.py`, migration 0018 `idx.annual_excerpt`, 2026-09-14):** IDX lists laporan tahunan under the same endpoint with `reportType=ar` (client `financial_report(..., report_type='ar')`; rows in `idx.financial_report` with report_type 'ar'). `idx annual discover --years | download --list|--codes|--universe | extract | status | show CODE`: the main PDF (most pages) goes to `data/idx/annual/<code>/<code>_<year>.pdf`, the plan pages (prospek, proyeksi/target, strategi, rencana/capex, risiko, dividen; uppercase headings after the first fifth of the report) are stored as excerpts and appended to the thesis card (web, phone, pack). Scheduler job `annual` on the 6th, 10:00 WIB, for today's lists and holdings, at most 8 reports per run at 0.2 rps (the rest wait for the next run). Needs `pypdf[crypto]` (some issuers, e.g. SRTG, publish AES-encrypted PDFs). Known IDX-side corrupt uploads (2026-09-16): DEWA FY2025 (truncated), GPRA FY2025 (all-zero file) — issuer sites only.
 - **Yahoo fallback for the day's closes (2026-09-14):** `jobs/daily.fallback_yahoo` writes `idx.bar` rows with source 'yahoo' and quality_flags {fallback} (never over an 'idx' row; the IDX upsert replaces them later); scheduler `daily_fallback` 19:40 WIB weekdays when the IDX bar is missing, then marks the books. Desk readers (book, candidates, card, overlay, pack, publish, ticket) accept source IN ('idx','yahoo'); `daily.latest_bar_date` and crosscheck stay IDX-only so the chain keeps trying IDX and the no-bar alert still fires. Client: a 403 is retried once (a transient challenge), a second 403 stops the call (`cf-mitigated: challenge` is Cloudflare, not an IP block; retrying feeds it). `INGEST_IDX_PROXY` routes calls through an HTTP CONNECT proxy for recovery only.
+- **Cloudflare (2026-09-24, the third tightening):** the challenge is on the **connection fingerprint**, not the IP and not
+  the headers - the whole site answered 403 to both curls on this host while Chrome loaded it. Neither curl had HTTP/2
+  compiled in, which no browser can be; `curl_cffi` (libcurl-impersonate) speaks Chrome's TLS **and** HTTP/2 and returned
+  all 963 rows over HTTP/3 for the very day plain curl could not fetch. It is now the default transport
+  (`INGEST_IDX_TRANSPORT=impersonate|curl|urllib|auto`, `INGEST_IDX_IMPERSONATE` = profile, default `chrome`). **The
+  profile ages**: `chrome` and `safari` passed, the pinned `chrome124` and `edge101` were still challenged - so if
+  challenges return, try a newer profile before assuming an IP block. Escalation order when a day cannot be fetched:
+  newer impersonation profile -> `INGEST_IDX_PROXY` (different egress) -> wait, because `bar_backfill` retries twice a
+  day on its own and heals the hole without anyone watching.
 - **Many users, each with their own desk (`idx/who.py`, migration 0026, 2026-09-17):** `idx.book.owner_id/label/rule/trend_variant/archived_at`, `idx.decision.user_id`, `idx.watchlist (user_id, code)`, `idx.push_device.user_id`, `idx.app_user.plan/accepted_terms_at`. Every personal `/idx/*` route takes a `Caller` (`who.caller_of`): a signed-in account (the app's proxy forwards the session JWT as `Authorization: Bearer`; verified with `IDX_JWT_SECRET`) is scoped to its own books/tickets/journal/watchlist/phones (`own_book` -> 404 for anyone else's); a service holding the ingest token (CLI, scheduler, agent) is unscoped, or scoped to one account with `X-Idx-User: <email>` (the nightly agent sends `IDX_AGENT_USER`); with no ingest token configured (this box, tests) a credential-less loopback caller counts as an unscoped service. Research reads stay open; research writes (pack build/answer, evidence, macro pull, overlay check) are `service_only` (403 for an account). New: `POST /idx/books {label, kind paper|live, rule annual|trend, cash, broker, fees, strategy, max_names, trend_variant}` -> id `<kind>-<6hex>` (`ticket.is_paper` = id starts with `paper`), `DELETE /idx/book/{book}` archives (open tickets cancelled, out of every list and job), `GET /idx/books` lists the caller's. `book.create_book/list_books/owner_of/archive`. Notifications go to a person: `notify.send(user_id= | book=)` -> the book's owner's phones, alerts `book:X`/`ticket:X` -> X's owner, desk alerts -> `IDX_OPS_NOTIFY_EMAIL`'s phones (unset = dropped); `journal.record(user_id=)` defaults to the book's owner. Existing books (`live`, `paper`, `trend_live`, `paper_trend`) were assigned to the first account (the operator). Test books stay ownerless. Tests: `tests/idx/test_multiuser.py`.
 - **Phone push (`idx/push.py`, migration 0025 `idx.push_device`, 2026-09-17):** the operator's notification channel is the Blackridge Android app (`blackheart-idx-web`; renamed from Papan on 2026-09-17 - older notes below say Papan), not Telegram. `notify.send(text, title=, data=)` fans out to every configured channel: the app (`push.broadcast` -> Firebase Cloud Messaging HTTP v1, bearer from a service-account JWT signed with `cryptography`, cached; `IDX_FCM_SERVICE_ACCOUNT` = path of the Firebase service-account JSON placed by the operator, never through chat or git) and Telegram (only if `IDX_TELEGRAM_*` are set). A text's first line is the push title; `data.route` is the app screen a tap opens (`notify.ticket_data(t)` -> `/m/ticket?book=`; alerts -> `/m/more`). Device tokens come from the app (`POST /idx/push/register {token, platform, label}` + `X-Idx-User` from the app's proxy; `DELETE /idx/push/{token}`; `GET /idx/push/devices`; `POST /idx/push/test`); a token FCM reports gone (404 / UNREGISTERED) is disabled until the app registers again. Nothing here raises into the job that notified. CLI `idx push devices | test [--text]`, `idx notify --status` lists the channels. `GET /idx/books` lists every book (kind live|paper, rule annual|trend, nav, open ticket) for the phone's selectors.
 - **Price levels (`idx/levels.py`, migration 0024 `idx.price_level`, 2026-09-17):** per book+code+kind (stop | take_profit | warn) a level and a note saying what to do. `levels.check` runs after every mark in the daily chain and the Yahoo-fallback path: stop/warn fire at close <= level, take_profit at close >= level; alert critical (stop, take_profit) / warning (warn) through `runlog.alert` (Telegram when `IDX_TELEGRAM_TOKEN`/`_CHAT` are set, see notify.py), stamped `triggered_at` so it fires once until `idx levels reset CODE`. Index codes (COMPOSITE) read `idx.index_daily`. CLI `idx levels set CODE [--stop L] [--tp L] [--warn L] [--note] | list | clear CODE [--kind] | reset CODE | check`. Live book 2026-09-17: satellite SSIA stop 1,030 / tp 3,440 / warn 1,250, LPKR 35 / 118 / 45; core names warn -25 % and stop -40 % vs avg; COMPOSITE warn 5,800 / stop 5,150.
@@ -130,14 +139,41 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   earnings yield could belong to a company wins): `report_rescaled` re-parses the whole workbook, `eps_rescaled` fixes EPS only,
   `scale_mismatch` / `eps_mismatch` are stored in `fundamental.flags` (`scale_mismatch` surfaces as a candidate warning).
   All unit-tested; `fin parse --reparse` re-derives everything from the archived files (safe to run in parallel by code chunks).
+- **One name on one screen (`idx/chart.py`, routes `GET /idx/chart/{code}`, `/chart/{code}/depth`, `/chart/codes`,
+  2026-09-24):** adjusted daily candles from `idx.bar`, one-minute candles from `idx.feed_bar_1m` (subscribed names only,
+  history starts when the collector first ran), the ten levels each side from `idx.feed_book`, and `trend_state` - the
+  deployed trend rule's READING of the name. Every threshold is imported from `trend_book` (HI_N, MA_N, VOL_N, VOL_X,
+  TRAIL) rather than restated, so the screen cannot drift away from the book; a test asserts that. Nothing here forecasts
+  a price and nothing should be added that does: the queue imbalance is returned next to `spread_bps` because study #74
+  measured its lead at about half a tick against a ~79 bps round trip, which makes it a fill-timing readout and not a
+  signal. A name outside the tick feed returns empty intraday and depth with a `why`, never an error.
+  `GET /idx/chart/index` is the same for the market itself (COMPOSITE daily + the feed's `IHSG` minute bars + the
+  200-day average and `regime_on`). An index has **no open** in the IDX payload - `open` is NULL on all 1,618 COMPOSITE
+  rows - so it is passed through as null and the screen draws a line; filling it with the close would put a candle on
+  the page claiming the market opened where it closed.
 - **Schema:** own migrations `idx/migrations/NNNN_*.sql` + `idx.schema_history` (sha256-checked, never edit an applied file).
   Not Flyway. JVM/equity roles get SELECT only.
 - **Jobs (WIB):** `universe` 16:15 · `daily` every 15 min 16:30–20:00 until today's bar lands → `index` → `publish --since`
   → `features --since -45d` → `candidates` · 18:00 alert if no bar · `announce_recent` 20:30 (all-emiten feed, last 3 days,
   one request per day) · `fundamentals` 21:00 Mon–Fri (discover current FY → download pending workbooks for
   `metrics.universe_codes` → parse) and Sat 09:00 with the previous FY too · `dividends` 1st of month 09:30 (Yahoo) ·
-  Sunday `crosscheck`. Alerts are rows in `idx.alert`, shown by the app (`/equities/ops` via `GET /idx/ops` on this server);
-  warning/critical ones also go out through `notify` (below).
+  Sunday `crosscheck` · `bar_backfill` 07:30 + 21:30 · `alert_sweep` 06:00.
+- **Gap healing (`scheduler.bar_gaps` / `run_bar_backfill`, 2026-09-24):** the chain only ever chases TODAY, so a day IDX
+  refuses leaves a permanent hole - a Cloudflare challenge on 2026-09-23 cost 758 of 963 names (the Yahoo fallback covers
+  only `universe_codes`) and nothing but a human running `idx backfill` would have filled it. Twice a day the backfill
+  re-fetches recent weekdays that have **no `source='idx'` bar and whose last `daily` run failed or never ran**; a public
+  holiday answers empty with status 'ok', so it is never re-asked. Features are left to the next chain (45-day lookback).
+- **A partial day must never blank the desk:** `candidates.build` and `pack.build` anchor on `max(idx.daily_summary.trade_date)`,
+  the last COMPLETE day - not on `max(idx.bar)`. The Yahoo fallback writes `idx.bar` only, so anchoring on the bar picked a
+  day whose inner join to `daily_summary` matched nothing: on 2026-09-23 candidates, scores, the screener and `/pub` all
+  returned zero rows until IDX answered again.
+- **Alert lifecycle:** alerts are rows in `idx.alert`, shown by the app (`/equities/ops` via `GET /idx/ops` on this server);
+  warning/critical ones also go out through `notify` (below). Three rules, learned from a desk that woke up with 38 open
+  alerts covering two incidents: (1) a check that runs on a schedule raises `runlog.alert_once`, never `runlog.alert` -
+  `alert` is for one-off events; (2) the message must be **stable for the whole incident** (a timestamp, not "53367s ago",
+  or dedup can never match); (3) whatever raises an alert resolves it when the condition clears - `runlog.resolve(conn, job,
+  like=...)` - because an alert only a human can close is one nobody reads. `runlog.sweep_info` acknowledges 'info' rows
+  older than 3 days (the ARA watch writes two a night); warnings and criticals are never swept.
 - **Gotchas:** (1) idx.co.id is Cloudflare-fronted and **fingerprints TLS — `httpx`/`requests` get 403; `urllib` passed until
   2026-09-14 and is challenged since; `curl` (Schannel on Windows) passes**. `idx/client.py` therefore runs through a `curl`
   subprocess when one is installed (`INGEST_IDX_TRANSPORT=auto|curl|urllib`; the first call gets one 403 and the retry with the
@@ -165,7 +201,14 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   singleton; token-expiry warning 45 min ahead. Raw frames archived by default to `logs/idx/feed/<date>.frames.gz` (sync-flushed
   each second, 7 days) — `idx feed replay --file F` re-ingests a day after a DB outage or parser fix. Windows task **"Blackheart
   IDX feed"** (`scripts/idx-feed-task.ps1`; `-Restart` is the only correct restart — Stop-ScheduledTask leaves the python child
-  alive holding the lock). **Token:** the operator
+  alive holding the lock). It carries **two triggers: at logon and a 10-minute watchdog** (daily 00:00 + `PT10M` repetition —
+  Task Scheduler cannot express "repeat forever" through `New-ScheduledTaskTrigger`). The watchdog is not optional: this box is
+  never logged out, so before it existed a collector killed after the close (2026-09-23 18:50, a stray kill of the python
+  processes) stayed dead and the desk woke up blind — no opening prints, so the gap-fade scan refused and ARA watch saw
+  nothing. A start while it is already running is ignored (`MultipleInstances=IgnoreNew`) and a second collector that finds
+  the advisory lock held **exits 0** (a no-op, not a failure — a non-zero exit would arm restart-on-failure every 2 minutes).
+  The same watchdog is on **"Blackheart IDX scheduler"** (`scripts/idx-scheduler-task.ps1`), which had the same logon-only
+  defect. **Token:** the operator
   logs in to stockbit.com and pastes the `credentialStorage` cookie at `http://127.0.0.1:8001/idx/feed/relay` (or
   `STOCKBIT_TOKEN=` in `idx-local.env` — re-read live, no restart) — needed once per week now: **headless renewal works**
   (verified 2026-09-22: `POST exodus.stockbit.com/login/refresh`, refresh token as `Authorization: Bearer`, body `{}`;
@@ -189,6 +232,7 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   routes `GET /idx/feed/status`, `GET|PUT /idx/feed/symbols`, `POST /idx/feed/token` (service/loopback only). Scheduler:
   `feed_watch` every 5 min in-session (stale heartbeat / expired token → warning alert), `feed_audit` 20:10 (coverage < 95 %).
 
+- **ARA watch (`idx/ara.py`, migration 0032 `idx.ara_watch` / `idx.ara_touch`, 2026-09-23; research menus 16, ML-3, 34 = studies #56, #57, #101):** tomorrow's ARA touches are predictable from today's bars (walk-forward AUC 0.86-0.92, top-5/day precision 7-18 %) but not buyable (the names that keep going open locked) - so this is information, never a ticket. Scheduler `ara_watch` 20:05 WIB: LightGBM P(touch next session) on bar-only features (ret1/5/20, lock streak, days since the last touch, volume ratio, value, band, range position, age), top-10 + every held name with its ARA price (35/25/20 % over the close, rounded down to the tick) -> `idx.ara_watch`, one info alert + push. Scheduler `ara_touch` every 2 min 08:58-16:01: held/watched names in the feed whose day high reached the limit -> state `locked` (no offer) / `at_ara` (sellers queued) / `faded` (trading under it) -> `idx.ara_touch`, one warning alert per state change (a held name's alert is `book:<book>`, so it reaches the owner's phone) carrying the study-#101 numbers: a locked close is followed by +431 bps next day vs the ARA price (liquid, n 440), a faded touch closes -661 bps under it (n 231). CLI `idx ara watch|show|touch|today`; API `GET /idx/ara/watch`, `GET /idx/ara/touch`. Tests `tests/idx/test_ara.py`.
 - **Gap-fade book (`idx/gapfade.py`, research menu 29b, 2026-09-22)** — the desk's first intraday book, PAPER ONLY (`paper_gapfade`,
   Rp 100 M, K=5, `rule='gapfade'`). Rule: a name whose **opening print** is <= -7 % against the previous close is bought at the open
   + 1 tick (deepest gaps first, slot = NAV/K) and sold into the **same** closing auction (close - 1 tick); nothing is ever held

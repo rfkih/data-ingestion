@@ -41,6 +41,34 @@ def test_plan_entries_sizes_slots_and_respects_cash() -> None:
                                 fee_buy=Decimal("0.001"), min_trade=Decimal(5_000_000)) == []   # slot under the floor
 
 
+def test_a_slot_never_exceeds_one_percent_of_the_name_s_daily_value() -> None:
+    """The cap is the only thing between the rule and a book too big for the prices it was measured at (menu 29e)."""
+    thin = [{"code": "AAA", "open": Decimal(1000), "prev_close": Decimal(1100), "gap": Decimal("-0.09"), "v60": Decimal(500_000_000)}]
+    lines = gapfade.plan_entries(thin, nav=Decimal(100_000_000), cash=Decimal(100_000_000), k=5,
+                                 fee_buy=Decimal("0.001"), min_trade=Decimal(1_000_000))
+    assert lines[0]["notional"] <= Decimal(5_000_000)                                 # 1 % of Rp 500 M, not the Rp 20 M slot
+    assert any(f.startswith("capped:") for f in lines[0]["flags"]) and "trimmed to" in lines[0]["reason"]
+    fat = [{**thin[0], "v60": Decimal(50_000_000_000)}]                               # 1 % = Rp 500 M: the slot binds, not the cap
+    wide = gapfade.plan_entries(fat, nav=Decimal(100_000_000), cash=Decimal(100_000_000), k=5,
+                                fee_buy=Decimal("0.001"), min_trade=Decimal(1_000_000))
+    assert wide[0]["lots"] == Decimal(198) and not any(f.startswith("capped:") for f in wide[0]["flags"])
+    assert gapfade.plan_entries([{**thin[0], "v60": Decimal(10_000_000)}], nav=Decimal(100_000_000), cash=Decimal(100_000_000),
+                                k=5, fee_buy=Decimal("0.001"), min_trade=Decimal(1_000_000)) == []   # too thin to trade at all
+
+
+def test_exec_context_records_what_was_available_without_changing_it() -> None:
+    lines = [{"code": "AAA", "lots": Decimal(10), "limit_price": Decimal(1005), "notional": Decimal(1_005_000)},
+             {"code": "BBB", "lots": Decimal(5), "limit_price": Decimal(500), "notional": Decimal(250_000)}]
+    cands = {"AAA": {"code": "AAA", "open": Decimal(1000), "offer": Decimal(1005), "v60": Decimal(10_000_000_000)},
+             "BBB": {"code": "BBB", "open": Decimal(500), "offer": Decimal(505), "v60": Decimal(6_000_000_000)}}
+    ctx = gapfade.exec_context(lines, cands, {"AAA": {"vwap": Decimal("1030.5"), "value": Decimal(2_000_000_000), "prints": 412}})
+    a, b = ctx
+    assert a["slip_bps"] == 253.7 and a["share_of_window"] == 0.0005     # we would have paid 254 bps above the assumption
+    assert a["offer"] == "1005" and a["prints5"] == 412
+    assert b["vwap5"] is None and "slip_bps" not in b                    # no prints in the window: a null, never a guess
+    assert lines[0]["limit_price"] == Decimal(1005)                      # recording changes nothing
+
+
 def test_plan_exits_sells_everything_priced() -> None:
     pos = [{"code": "AAA", "lots": Decimal(19)}, {"code": "BBB", "lots": Decimal(5)}, {"code": "ZZZ", "lots": Decimal(3)}]
     lines = gapfade.plan_exits(pos, {"AAA": Decimal(1100), "BBB": Decimal(480)})

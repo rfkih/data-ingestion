@@ -5,7 +5,7 @@ import importlib.util
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-SCAN = ["notify.py", "push.py", "card.py", "trend_book.py", "api.py", "report.py", "overlay.py", "pack.py", "candidates.py", "quote.py"]
+SCAN = ["notify.py", "push.py", "card.py", "trend_book.py", "api.py", "report.py", "overlay.py", "pack.py", "candidates.py", "quote.py", "ara.py"]
 
 
 def test_user_facing_modules_have_no_directive_words() -> None:

@@ -71,6 +71,24 @@ Binance REST/WS
 - **Apply every prod change to `dev` too** (keep `dev` from drifting).
 - Commit/push only when the operator asks.
 
+## Checking what is running (do this first)
+
+```
+python scripts/status.py                 # one screen: health, chain, books, strategies, tickets, feed
+python scripts/status.py books strategies # just those blocks
+python scripts/status.py --json           # the same facts, machine-readable
+```
+
+**Any question of the form "what is running", "which strategies are active", "is the desk healthy",
+"what does the book hold" is answered by this script, in one call.** It reads the ingest worker's
+`/idx/*` endpoints and prints a digest. Do not curl the worker endpoint by endpoint or open psql to
+answer them - that is slow, costs a lot of context, and guesses at response shapes that this script
+already knows. Reads only; it never writes and never trades. Also available as `/status`.
+
+Local ports it knows about: ingest 8001, web 3010, prefix proxy 3012, **Postgres 5433** (the
+`blackheart-postgres-local` container publishes 5432 on 5433 - probing 5432 gives a false DOWN),
+trading JVM 8080.
+
 ## Where to start
 
 1. **Persistent memory** is the source of truth for project state, decisions, and gotchas:

@@ -200,6 +200,19 @@ def archive(conn: psycopg.Connection, book: str) -> dict[str, Any]:
     return {**b, "archived_at": datetime.now(UTC)}
 
 
+def unarchive(conn: psycopg.Connection, book: str) -> dict[str, Any]:
+    """Reopen an archived book: it rejoins every list and every nightly job (marks, checks, price levels). Tickets that
+    ``archive`` cancelled stay cancelled - a reopened book drafts fresh ones. Added 2026-09-23 after the IPOT book was
+    archived by a mis-tap on 09-18 and its stop/take-profit levels went unwatched for five sessions."""
+    b = get_book(conn, book)
+    if b.get("archived_at") is None:
+        return b
+    with conn.cursor() as cur:
+        cur.execute("UPDATE idx.book SET archived_at = NULL, updated_at = now() WHERE book = %s AND archived_at IS NOT NULL", (book,))
+    conn.commit()
+    return {**b, "archived_at": None}
+
+
 def is_halted(b: dict[str, Any]) -> bool:
     return (b.get("status") or "active") == "halted"
 

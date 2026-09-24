@@ -939,6 +939,26 @@ def cmd_gapfade(a: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_ara(a: argparse.Namespace) -> int:
+    """ARA watch (research menus 16 / ML-3 / 34): the evening list of likely touches, and today's touches off the feed."""
+    import json as _json
+
+    from . import ara
+    with get_connection() as conn:
+        if a.sub == "watch":
+            rep = ara.watch(conn, top=a.top, notify=not a.no_notify)
+            print(rep["text"])
+            return 0
+        if a.sub == "show":
+            print(_json.dumps(ara.latest_watch(conn), indent=1, default=str))
+            return 0
+        if a.sub == "touch":
+            print(_json.dumps(ara.touch_check(conn, force=a.force), indent=1, default=str))
+            return 0
+        print(ara.render_touches(ara.touches_today(conn, _d(a.as_of) if a.as_of else None)))
+        return 0
+
+
 def cmd_scores(a: argparse.Namespace) -> int:
     from . import scores
     with get_connection() as conn:
@@ -983,6 +1003,30 @@ def cmd_report(a: argparse.Namespace) -> int:
     if a.notify:
         from . import notify
         print("sent" if notify.send(text) else "not sent")
+    return 0
+
+
+def cmd_track(a: argparse.Namespace) -> int:
+    from . import book as bk
+    from . import track as tk
+    with get_connection() as conn:
+        if a.book:
+            books = [a.book]
+        else:
+            books = [b for b in bk.list_books(conn)
+                     if (bk.get_book(conn, b).get("rule") or "").lower() in tk.PROFILES] if a.all else ["paper"]
+        blocks = []
+        for b in books:
+            sc = tk.scorecard(conn, b)
+            blocks.append(tk.render(sc))
+            if a.trades:
+                for t in sc["trades"]:
+                    blocks.append(f"    {t['closed']} {t['code']:<6} {t['net_pct'] * 100:+6.1f}%  {t['hold_d']}d")
+    text = "\n\n".join(blocks)
+    print(text)
+    if a.notify:
+        from . import notify
+        print("sent" if notify.send(text, title="Track record") else "not sent")
     return 0
 
 
@@ -1327,6 +1371,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fee-sell", dest="fee_sell", default="0.20")
     p.add_argument("--owner", default=None, help="account e-mail the book belongs to (default IDX_AGENT_USER)")
     p.set_defaults(fn=cmd_gapfade)
+    p = sub.add_parser("ara", help="ARA watch: watch (evening list from today's bars) | show (latest list) | touch (check the feed now) | today (today's touches)")
+    p.add_argument("sub", choices=["watch", "show", "touch", "today"])
+    p.add_argument("--top", type=int, default=10)
+    p.add_argument("--no-notify", dest="no_notify", action="store_true")
+    p.add_argument("--force", action="store_true", help="touch: run even outside the session")
+    p.add_argument("--as-of")
+    p.set_defaults(fn=cmd_ara)
     p = sub.add_parser("scores", help="public factor scores (spec §04): build [--as-of D] | show [--code X] [--as-of D] | stats [--refresh] [--criteria C]")
     p.add_argument("sub", choices=["build", "show", "stats"])
     p.add_argument("--as-of")
@@ -1342,6 +1393,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top", type=int, default=5)
     p.add_argument("--notify", action="store_true", help="also send the summary to Telegram")
     p.set_defaults(fn=cmd_report)
+    p = sub.add_parser("track", help="is it proven yet? closed round trips vs the profile the research promised: --book B | --all")
+    p.add_argument("--book")
+    p.add_argument("--all", action="store_true", help="every open book that has a research profile (trend, gapfade)")
+    p.add_argument("--trades", action="store_true", help="also list the closed round trips")
+    p.add_argument("--notify", action="store_true", help="also push the scorecard to the phone / Telegram")
+    p.set_defaults(fn=cmd_track)
     p = sub.add_parser("quote", help="latest close, change, liquidity, tick and band for CODE[,CODE]")
     p.add_argument("codes")
     p.set_defaults(fn=cmd_quote)

@@ -80,6 +80,39 @@ def alert_once(conn: psycopg.Connection, severity: str, job: str | None, message
     return True
 
 
+def resolve(conn: psycopg.Connection, job: str, like: str | None = None) -> int:
+    """Acknowledge the open alerts of ``job`` (optionally only those whose message matches the SQL ``like``) because
+    the condition that raised them has cleared. Without this an alert lives until a human clicks it, so the desk drifts
+    into a screen nobody reads - on 2026-09-24 it held 38 open alerts of which 29 were two incidents, repeated once per
+    retry. Every nagging check should resolve what it raised. Returns how many rows were closed."""
+    sql = "UPDATE idx.alert SET acknowledged_at = now() WHERE acknowledged_at IS NULL AND job = %s"
+    params: list[Any] = [job]
+    if like is not None:
+        sql += " AND message LIKE %s"
+        params.append(like)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        n = cur.rowcount
+    conn.commit()
+    if n:
+        logger.info("idx alert: resolved %d open %s alert(s)", n, job)
+    return n
+
+
+def sweep_info(conn: psycopg.Connection, days: int = 3) -> int:
+    """Acknowledge informational alerts older than ``days``. An 'info' row is a diary entry, not a fault - the ARA watch
+    writes two every evening - and left open they bury the warnings that actually need somebody. Warnings and criticals
+    are never swept: those close when their condition clears, or a person closes them."""
+    with conn.cursor() as cur:
+        cur.execute("UPDATE idx.alert SET acknowledged_at = now() WHERE acknowledged_at IS NULL AND severity = 'info' "
+                    "AND ts < now() - make_interval(days => %s)", (days,))
+        n = cur.rowcount
+    conn.commit()
+    if n:
+        logger.info("idx alert: swept %d info alert(s) older than %d days", n, days)
+    return n
+
+
 def open_alerts(conn: psycopg.Connection, limit: int = 50) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(

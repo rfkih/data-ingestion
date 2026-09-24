@@ -156,6 +156,42 @@ def make_router(require_token) -> APIRouter:
             rows = q.latest(conn, codes.split(","))
         return [{k: (v.isoformat() if isinstance(v, date | datetime) else v) for k, v in r.items()} for r in rows]
 
+    @router.get("/chart/index")
+    def chart_index(bars: int = 260, minutes: int = 240) -> dict[str, Any]:
+        """The market itself for the home screen: COMPOSITE daily candles, the intraday panel the tick feed carries as
+        IHSG, the 200-day average and whether the regime gate that average drives is open. A trend book with
+        regime_filter on takes no new entry while the index closes under that line."""
+        from . import chart as ch
+        with get_connection() as conn:
+            return ch.index_view(conn, bars=bars, minutes=minutes)
+
+    @router.get("/chart/codes")
+    def chart_codes() -> dict[str, Any]:
+        """The names that have an intraday panel and an order book: the tick collector's subscription list. Every other
+        listed name still has the daily chart and the trend reading, just no minute bars and no depth."""
+        from . import chart as ch
+        with get_connection() as conn:
+            return {"codes": ch.feed_codes(conn)}
+
+    @router.get("/chart/{code}")
+    def chart_view(code: str, bars: int = 260, minutes: int = 240) -> dict[str, Any]:
+        """One name for one screen: {code, name, daily[], intraday[], depth{}, trend{}}. `daily` is adjusted candles from
+        idx.bar, `intraday` one-minute candles from the tick feed (empty for a name it does not carry), `depth` the ten
+        levels each side, `trend` the deployed trend rule's READING of the name - its three entry tests with the numbers
+        behind them, the trailing stop, and the regime gate. Nothing here forecasts a price."""
+        from . import chart as ch
+        with get_connection() as conn:
+            return ch.view(conn, code, bars=bars, minutes=minutes)
+
+    @router.get("/chart/{code}/depth")
+    def chart_depth(code: str) -> dict[str, Any]:
+        """Just the order book, for a screen that polls it: ten levels each side, totals, spread and queue imbalance.
+        The imbalance is an execution-timing readout (study #74: IC 0.23 over 1-5 min, worth about half a tick against a
+        79 bps round trip) - it says which side is queued deeper, not where the price is going."""
+        from . import chart as ch
+        with get_connection() as conn:
+            return ch.depth(conn, code)
+
     @router.post("/notify", dependencies=[Depends(require_token)])
     def notify_send(body: dict[str, Any] = _BODY, c: Caller = _CALLER) -> dict[str, Any]:
         """Send {text, title?, route?, book?} to a phone (the Blackridge app; Telegram too when configured): the caller's own
@@ -768,6 +804,44 @@ def make_router(require_token) -> APIRouter:
             except ValueError as e:
                 raise HTTPException(status_code=404, detail=str(e)) from None
 
+    @router.get("/ticket/{ticket_id}/exec")
+    def ticket_exec(ticket_id: int, c: Caller = _CALLER) -> dict[str, Any]:
+        """Live execution timing for a ticket's open lines (menu 28b / study #99): the book's lean per name right now, as
+        'where to place' - rest at the bid or take the offer - for a trade already decided. Read-only; times the placement,
+        never the decision."""
+        from . import execwatch
+        with get_connection() as conn:
+            own_ticket(conn, ticket_id, c)
+            try:
+                return execwatch.read(conn, ticket_id)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e)) from None
+
+    # ---- ARA watch (menus 16 / ML-3 / 34): the evening list and today's touches ---------------------------------------
+    @router.get("/ara/watch")
+    def ara_watch(c: Caller = _CALLER) -> dict[str, Any]:
+        """The latest evening list: top-N names by model P(touch ARA next session) plus every held name, each with its ARA
+        price. Information, not a ticket (menu 16: the names that keep going cannot be bought)."""
+        from . import ara
+        with get_connection() as conn:
+            return ara.latest_watch(conn)
+
+    @router.get("/ara/touch")
+    def ara_touch(as_of: str | None = None, c: Caller = _CALLER) -> dict[str, Any]:
+        """Today's touches of the ARA limit among held/watched names, with the state the feed last saw (locked / sellers
+        queued / faded) and the study-#101 facts for each state."""
+        from datetime import date as _date
+
+        from . import ara
+        d = _date.fromisoformat(as_of) if as_of else None
+        with get_connection() as conn:
+            rows = ara.touches_today(conn, d)
+            held = ara.held_names(conn)
+        for r in rows:
+            r["held"] = held.get(r["code"], [])
+        return {"date": str(d) if d else (str(rows[0]["trade_date"]) if rows else None), "rows": rows,
+                "facts": {"locked": ara.FACT_LOCKED, "at_ara": ara.FACT_AT_ARA, "faded": ara.FACT_FADED}}
+
     # ---- gap-fade, live (menu 29b; the intraday screen in the app polls this) -------------------------------------
     @router.get("/gapfade/live")
     def gapfade_live(book: str = "paper_gapfade", c: Caller = _CALLER) -> dict[str, Any]:
@@ -833,16 +907,32 @@ def make_router(require_token) -> APIRouter:
 
     # ---- Stockbit datafeed collector (migration 0029; personal data, never public) --------------------------------
     @router.post("/feed/token", dependencies=[Depends(require_token)])
-    async def feed_token(request: Request, response: Response, c: Caller = _CALLER) -> dict[str, Any]:
+    async def feed_token(request: Request, response: Response, provider: str = "stockbit", c: Caller = _CALLER) -> dict[str, Any]:
         """The browser relay drops the operator's Stockbit session token here after each login: the raw credentialStorage
         cookie value, a JSON {access_token, refresh_token?, expires_at?}, or a bare JWT. A bare *refresh* token (7-day
         lifetime) is exchanged for a fresh access + refresh pair on the spot. Loopback/service callers only (an app
-        account may not set the desk's feed token). Answers CORS so a stockbit.com page can post it."""
+        account may not set the desk's feed token). Answers CORS so a stockbit.com page can post it.
+
+        ``?provider=ajaib`` stores the paste on THAT provider's row through its adapter (providers/ajaib.py) - separate
+        credentials per broker, never a shared row (review #2)."""
         service_only(c, "relaying the feed token")
         from . import broker
         from .feed import store as fs
         body = await request.body()
         source = "relay"
+        if provider != "stockbit":
+            from .providers import registry
+            from .providers.base import NotSupported, ProviderError
+            with get_connection() as conn:
+                try:
+                    st = registry.tokens_of(provider).accept_paste(conn, body.decode("utf-8", "replace"))
+                except NotSupported as e:
+                    raise HTTPException(status_code=422, detail=str(e)) from None
+                except ProviderError as e:
+                    raise HTTPException(status_code=502, detail=str(e)) from None
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            return {"ok": True, "provider": provider, "source": "paste", "refresh_token": False,
+                    "expires_at": st.expires_at.isoformat() if st.expires_at else None, "user_id": st.user_id}
         try:
             text = body.decode("utf-8", "replace").strip()
             if fs.looks_like_refresh_jwt(text):
@@ -856,7 +946,7 @@ def make_router(require_token) -> APIRouter:
         except (ValueError, TypeError) as e:
             raise HTTPException(status_code=422, detail=f"no usable token: {e}") from None
         with get_connection() as conn:
-            row = fs.save_token(conn, fields, source=source)
+            row = fs.save_token(conn, fields, source=source, provider="stockbit")
         if fields.get("refresh_token"):                                          # the broker feed reads the env file too
             path = broker._default_env_file()
             if path:
@@ -867,19 +957,60 @@ def make_router(require_token) -> APIRouter:
                 "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None}
 
     @router.post("/feed/token/refresh", dependencies=[Depends(require_token)])
-    def feed_token_refresh(c: Caller = _CALLER) -> dict[str, Any]:
-        """Renew the Stockbit session now from the newest refresh token (the relay paste or idx-local.env); the new
-        access + refresh pair is written to idx.feed_token and idx-local.env. Loopback/service callers only."""
+    def feed_token_refresh(provider: str = "stockbit", c: Caller = _CALLER) -> dict[str, Any]:
+        """Renew a provider's session now from its stored refresh token (Stockbit: the relay paste or idx-local.env; the
+        new access + refresh pair is written to idx.feed_token and idx-local.env). Loopback/service callers only.
+        A provider with no refresh flow (Ajaib today) answers 422, never a stale state dressed as fresh."""
         service_only(c, "refreshing the feed token")
-        from . import broker
-        from .feed import store as fs
+        from dataclasses import asdict
+
+        from .providers import registry
+        from .providers.base import NotSupported, ProviderError
         with get_connection() as conn:
             try:
-                rep = broker.renew_if_needed(conn, force=True)
-            except broker.BrokerFetchError as e:
-                raise HTTPException(status_code=502, detail=f"refresh failed: {e}") from None
-            tok = fs.token_status(fs.load_token(conn))
-        return {**rep, "token": _plain(tok)}
+                st = registry.tokens_of(provider).renew(conn, force=True)
+            except NotSupported as e:
+                raise HTTPException(status_code=422, detail=str(e)) from None
+            except ProviderError as e:
+                raise HTTPException(status_code=502, detail=str(e)) from None
+        return {"renewed": True, "provider": provider, "token": _plain(asdict(st))}
+
+    # ---- brokers behind the provider seam (migration 0031; providers/registry.py) --------------------------------
+    @router.get("/providers")
+    def providers_get() -> dict[str, Any]:
+        """The toggle screen's one read: which provider serves each role, every provider's health for the roles it
+        claims, every provider's session, and who is actually filling the feed tables right now."""
+        from dataclasses import asdict
+
+        from .providers import registry
+        with get_connection() as conn:
+            roles = registry.roles(conn)
+            health = [asdict(h) for h in registry.health(conn)]
+            tokens = {k: (asdict(v) if hasattr(v, "__dataclass_fields__") else v) for k, v in registry.token_states(conn).items()}
+            streaming = registry.streaming_provider(conn)
+        return _plain({"roles": roles, "health": health, "tokens": tokens, "streaming": streaming})
+
+    @router.post("/providers/{role}", dependencies=[Depends(require_token)])
+    def providers_set(role: str, body: dict[str, Any] = _BODY, c: Caller = _CALLER) -> dict[str, Any]:
+        """Move a role to another provider: {provider, note?}. Refused when that provider cannot serve the role, so
+        the desk cannot be toggled into a state where the next job raises. Journalled in idx.provider_event.
+        Loopback/service callers only - Blackridge reaches it through its ops-gated server route."""
+        service_only(c, "switching a broker")
+        from .providers import registry
+        from .providers.base import NotSupported, ProviderError
+        provider = str(body.get("provider") or "").strip().lower()
+        if not provider:
+            raise HTTPException(status_code=422, detail="body needs {provider}")
+        with get_connection() as conn:
+            try:
+                return registry.set_active(conn, role, provider, actor=str(body.get("actor") or c.actor),
+                                           note=body.get("note"))
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from None
+            except NotSupported as e:
+                raise HTTPException(status_code=409, detail=str(e)) from None
+            except ProviderError as e:
+                raise HTTPException(status_code=502, detail=str(e)) from None
 
     @router.get("/feed/relay", include_in_schema=False)
     def feed_relay_page() -> Response:
@@ -935,11 +1066,13 @@ status();
         return {}
 
     @router.get("/feed/status")
-    def feed_status() -> dict[str, Any]:
-        """Collector heartbeat, token validity, today's counts and the last events."""
+    def feed_status(provider: str | None = None) -> dict[str, Any]:
+        """Collector heartbeat, token validity, today's counts and the last events - for the provider asked for, else
+        the one the feed toggle names."""
         from .feed import store as fs
+        from .providers import registry
         with get_connection() as conn:
-            st = fs.status(conn)
+            st = fs.status(conn, provider=provider or registry.active(conn, "feed"))
         return _plain(st)
 
     @router.get("/feed/symbols")

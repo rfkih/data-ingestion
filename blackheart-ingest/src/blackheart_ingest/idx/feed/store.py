@@ -136,19 +136,21 @@ def parse_relay(payload: str | bytes | dict[str, Any]) -> dict[str, Any]:
             "user_id": _user_id_from(claims, doc if isinstance(doc, (dict, list)) else {}), "raw_keys": _shape(doc)}
 
 
-def save_token(conn: psycopg.Connection, fields: dict[str, Any], source: str = "relay") -> dict[str, Any]:
+def save_token(conn: psycopg.Connection, fields: dict[str, Any], source: str = "relay", provider: str = "stockbit") -> dict[str, Any]:
+    """One row per provider (migration 0031): a Stockbit paste can never overwrite an Ajaib session, or the reverse."""
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("""INSERT INTO idx.feed_token (id, access_token, refresh_token, user_id, expires_at, received_at, source, raw_keys)
-                       VALUES (1, %s, %s, %s, %s, now(), %s, %s)
-                       ON CONFLICT (id) DO UPDATE SET access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token,
+        cur.execute("""INSERT INTO idx.feed_token (provider, access_token, refresh_token, user_id, expires_at, received_at, source, raw_keys)
+                       VALUES (%s, %s, %s, %s, %s, now(), %s, %s)
+                       ON CONFLICT (provider) DO UPDATE SET access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token,
                            user_id = COALESCE(EXCLUDED.user_id, idx.feed_token.user_id), expires_at = EXCLUDED.expires_at,
                            received_at = now(), source = EXCLUDED.source, raw_keys = EXCLUDED.raw_keys
-                       RETURNING user_id, expires_at, received_at, source""",
-                    (fields["access_token"], fields.get("refresh_token"), fields.get("user_id"), fields.get("expires_at"), source,
+                       RETURNING provider, user_id, expires_at, received_at, source""",
+                    (provider, fields["access_token"], fields.get("refresh_token"), fields.get("user_id"), fields.get("expires_at"), source,
                      json.dumps(fields.get("raw_keys") or {})))
         row = cur.fetchone()
     conn.commit()
-    event(conn, "token", f"token received via {source}", {"user_id": row["user_id"], "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None})
+    event(conn, "token", f"{provider} token received via {source}",
+          {"provider": provider, "user_id": row["user_id"], "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None})
     return dict(row)
 
 
@@ -170,12 +172,15 @@ def env_file_token() -> str | None:
     return os.environ.get(TOKEN_ENV)
 
 
-def load_token(conn: psycopg.Connection) -> dict[str, Any] | None:
-    """The newest of: the token pasted/relayed into ``idx.feed_token`` and ``STOCKBIT_TOKEN`` in idx-local.env (the broker
-    feed's pasted token) - whichever expires later."""
+def load_token(conn: psycopg.Connection, provider: str = "stockbit") -> dict[str, Any] | None:
+    """The provider's stored session. For Stockbit the newer of that row and ``STOCKBIT_TOKEN`` in idx-local.env (the broker
+    feed's pasted token) - whichever expires later; the env file belongs to Stockbit only."""
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT access_token, refresh_token, user_id, expires_at, received_at, source FROM idx.feed_token WHERE id = 1")
+        cur.execute("SELECT access_token, refresh_token, user_id, expires_at, received_at, source FROM idx.feed_token WHERE provider = %s",
+                    (provider,))
         row = cur.fetchone()
+    if provider != "stockbit":
+        return dict(row) if row else None
     env = env_file_token()
     if env and _looks_jwt(env):
         claims = _jwt_claims(env)
@@ -286,18 +291,20 @@ def insert_books(conn: psycopg.Connection, rows: list[dict[str, Any]]) -> int:
 # ---- heartbeat + events -------------------------------------------------------------------------------------------
 
 
-def set_status(conn: psycopg.Connection, state: str, detail: str | None = None, **counts: Any) -> None:
+def set_status(conn: psycopg.Connection, state: str, detail: str | None = None, provider: str = "stockbit", **counts: Any) -> None:
+    """The collector's heartbeat, one row per provider. Only one provider streams at a time; its row is the one whose
+    ``updated_at`` keeps moving, which is how ``providers.registry.streaming_provider`` knows who filled the tables."""
     cols = {"state": state, "detail": detail, **counts}
     sets = ", ".join(f"{k} = EXCLUDED.{k}" for k in cols)
     with conn.cursor() as cur:
-        cur.execute(f"INSERT INTO idx.feed_status (id, {', '.join(cols)}, updated_at) VALUES (1, {', '.join('%s' for _ in cols)}, now()) "
-                    f"ON CONFLICT (id) DO UPDATE SET {sets}, updated_at = now()", tuple(cols.values()))
+        cur.execute(f"INSERT INTO idx.feed_status (provider, {', '.join(cols)}, updated_at) VALUES (%s, {', '.join('%s' for _ in cols)}, now()) "
+                    f"ON CONFLICT (provider) DO UPDATE SET {sets}, updated_at = now()", (provider, *cols.values()))
     conn.commit()
 
 
-def status(conn: psycopg.Connection) -> dict[str, Any]:
+def status(conn: psycopg.Connection, provider: str = "stockbit") -> dict[str, Any]:
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SELECT * FROM idx.feed_status WHERE id = 1")
+        cur.execute("SELECT * FROM idx.feed_status WHERE provider = %s", (provider,))
         st = cur.fetchone()
         cur.execute("SELECT count(*) AS n FROM idx.feed_symbol WHERE enabled")
         n_sym = cur.fetchone()["n"]
@@ -306,11 +313,14 @@ def status(conn: psycopg.Connection) -> dict[str, Any]:
         today = cur.fetchone()
         cur.execute("SELECT at, kind, detail FROM idx.feed_event ORDER BY at DESC LIMIT 8")
         events = [dict(r) for r in cur.fetchall()]
-    tok = token_status(load_token(conn))
-    from ..broker import refresh_status  # local: broker imports card, card must not import us
-    out = {"collector": dict(st) if st else {"state": "off", "detail": "never started"}, "token": tok,
-           "refresh": refresh_status(conn=conn),                           # the 7-day horizon: when a cookie paste is due again
-           "symbols_enabled": n_sym, "today": dict(today), "events": events}
+    tok = token_status(load_token(conn, provider))
+    if provider == "stockbit":
+        from ..broker import refresh_status  # local: broker imports card, card must not import us
+        refresh = refresh_status(conn=conn)                                # the 7-day horizon: when a cookie paste is due again
+    else:
+        refresh = {"present": False, "expires_at": None, "days_left": None}   # no refresh flow is known for this provider yet
+    out = {"provider": provider, "collector": dict(st) if st else {"state": "off", "detail": "never started"}, "token": tok,
+           "refresh": refresh, "symbols_enabled": n_sym, "today": dict(today), "events": events}
     if st and st.get("updated_at"):
         out["collector"]["stale_s"] = round((datetime.now(UTC) - st["updated_at"]).total_seconds())
     return out

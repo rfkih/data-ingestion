@@ -11,6 +11,8 @@ Schedule (WIB):
   09:00, 09:05    gapfade_entry       intraday gap-fade books: the opening auction printed at ~08:58 -> scan, sweep, entry ticket
   15:50 Mon-Fri   gapfade_exit        intraday gap-fade books: sell everything into the closing auction
   every 10 min    token_guard         the Stockbit session must outlive today's close; renews, else nags the phone every run
+  20:05 Mon-Fri   ara_watch           next session's likely ARA touches (model on today's bars, ML-3) + every held name's ARA price
+  every 2 min     ara_touch           in-session: held/watched names at the ARA limit - locked / sellers queued / faded (study #101)
   18:00 Mon-Fri   alert if today's bar has still not landed (holiday, or IDX late)
   20:30 Mon-Fri   announce_recent     all-emiten disclosures for the last 3 days -> idx.announcement / idx.event
   21:00 Mon-Fri   fundamentals        discover current fiscal year -> download pending workbooks (universe) -> parse
@@ -27,7 +29,7 @@ Every run writes idx.ingest_run; problems become idx.alert rows for the app.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -46,7 +48,7 @@ from . import (
     ticket,
     trend_book,
 )
-from .client import IdxClient, IdxFetchError
+from .client import BudgetExceeded, CircuitOpen, IdxClient, IdxFetchError
 from .jobs import announce as job_announce
 from .jobs import crosscheck as job_crosscheck
 from .jobs import daily as job_daily
@@ -65,14 +67,18 @@ def today_wib() -> date:
 
 
 def _fail_alert(conn, r: runlog.RunResult) -> None:
+    # alert_once, not alert: the daily chain retries every 15 minutes, and on a Cloudflare day 2026-09-23 that turned
+    # ONE unreachable endpoint into 17 identical critical rows. The retry cadence belongs in ingest_run, not the alerts.
     if r.status == "failed":
-        runlog.alert(conn, "critical", r.job, f"{r.job} {r.run_key}: {r.error}")
+        runlog.alert_once(conn, "critical", r.job, f"{r.job} {r.run_key}: {r.error}")
 
 
 def run_universe() -> None:
     with get_connection() as conn, IdxClient() as cl:
         r = job_universe.run(conn, cl, today_wib())
         _fail_alert(conn, r)
+        if r.status == "ok":
+            runlog.resolve(conn, "universe")          # the listing is a snapshot, so a fresh one settles every past failure
         logger.info("idx universe %s %s rows=%s", r.run_key, r.status, r.rows_out)
 
 
@@ -83,6 +89,7 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
         return
     with get_connection() as conn:
         if job_daily.latest_bar_date(conn) == d:
+            runlog.resolve(conn, "daily", like=f"%{d}%")                    # the bar landed: close today's no-bar/403 alerts
             return
         with IdxClient() as cl:
             r = job_daily.run(conn, cl, d)
@@ -127,13 +134,16 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
             _fail_alert(conn, rm)
             if rm.status == "ok":
                 _fail_alert(conn, book.check(conn, bk))
+                # stop / take-profit / index levels the operator set on this book (idx.price_level). Until 2026-09-23 this
+                # call sat inside the trend loop's `except`, so it only ran on a night a trend ticket FAILED - the levels on
+                # the IPOT book were unarmed on every normal night since 09-17. Every book, every night, after its mark.
+                _fail_alert(conn, levels.check(conn, bk))
         for bk in trend_book.trend_books(conn):                          # tonight's breakout/trailing-stop ticket per trend book
             try:
                 rep = trend_book.run(conn, bk)
                 logger.info("idx trend %s: %s", bk, rep)
             except Exception as e:
                 runlog.alert(conn, "warning", f"ticket:{bk}", f"trend ticket failed: {type(e).__name__}: {e}")
-                _fail_alert(conn, levels.check(conn, bk))                   # stop / take-profit / index levels
         try:                                                                # the public scores for the day (spec §04); fails soft
             rep = scores.build(conn)
             logger.info("idx scores: %s", rep)
@@ -151,6 +161,7 @@ def run_announce_recent(days: int = 3) -> None:
             _fail_alert(conn, r)
             if r.status == "failed":
                 return
+            runlog.resolve(conn, "announce", like=f"%{day}%")   # this run covers the last 3 days: it heals its own gaps
             logger.info("idx announce %s rows=%s events=%s", day, r.rows_out, r.detail.get("events"))
 
 
@@ -240,21 +251,25 @@ def run_broker_snapshot() -> None:
 def run_feed_watch() -> None:
     """During the session: one warning when the datafeed collector's heartbeat is stale or it is not live (token expired,
     reconnecting for too long, task dead). Dedup is runlog's (same job+message stays one open alert)."""
-    from .feed import store as fs
     from .feed.collector import in_session
+    from .providers import registry
+    from .providers.base import ProviderError
     if not in_session():
         return
     with get_connection() as conn:
-        st = fs.status(conn)
-        c = st["collector"]
-        state, stale = c.get("state"), c.get("stale_s")
-        if state == "off" or stale is None or stale > 180:
-            runlog.alert(conn, "warning", "feed", f"datafeed collector not running (state {state}, heartbeat {stale} s ago) - "
-                                                  "check the 'Blackheart IDX feed' task")
-        elif state == "token_expired":
-            runlog.alert(conn, "warning", "feed", "datafeed collector has no valid Stockbit token - log in and paste it at /idx/feed/relay")
-        elif state != "live" and stale is not None:
-            runlog.alert(conn, "warning", "feed", f"datafeed collector {state}: {c.get('detail') or ''}")
+        pinned = registry.pin(conn, "feed")                                 # the provider the toggle names, once
+        try:
+            h = registry.feed_of(pinned).health(conn)
+        except ProviderError as e:                                          # the toggle names a provider with no feed adapter
+            runlog.alert_once(conn, "critical", "feed", f"feed toggle is broken: {e} - fix it in Blackridge > More > Brokers")
+            return
+        if h.ok:
+            runlog.resolve(conn, "feed", like="%: DOWN -%")                 # back up: close the incident, do not wait for a human
+        else:
+            runlog.alert_once(conn, "warning", "feed", f"{h.summary} - check the 'Blackheart IDX feed' task or Blackridge > More > Brokers")
+        problem = registry.provenance_problem(registry.streaming_provider(conn), pinned)
+        if problem:                                                         # the tables are being filled by the OTHER provider
+            runlog.alert_once(conn, "critical", "feed", problem)             # every 5 min: once per incident, not per check
 
 
 def run_gapfade_entry() -> None:
@@ -311,42 +326,137 @@ def run_token_guard() -> None:
     without a session the tick feed goes dark and the gap-fade jobs cannot see the opening auction. The refresh token's own
     7-day horizon is watched too, so the paste is asked for days ahead instead of during a session.
     """
-    from . import broker, notify
-    from .feed import store as fs
+    from . import notify
+    from .providers import registry
+    from .providers.base import PROVIDERS, NotSupported, ProviderError
     now = datetime.now(WIB)
     d = now.date()
     trading = d.weekday() < 5 and now.time() <= SESSION_END
     need_until = session_end_wib(d) + timedelta(minutes=TOKEN_MARGIN_MIN) if trading else None
     nagging = d.weekday() < 5 and NAG_FROM <= now.time() <= NAG_TO
     with get_connection() as conn:
-        failed = None
+        active_feed = registry.active(conn, "feed")
+        for provider in PROVIDERS:                                          # every provider guards its OWN session (review #2)
+            tokens = registry.tokens_of(provider)
+            critical = provider == active_feed                              # only the streaming provider blinds the desk
+            before = tokens.token_state(conn)
+            if not before.present and not critical:
+                continue                                                    # a standby with nothing stored is not a fault
+            failed = None
+            try:
+                tokens.renew(conn, need_until=need_until)
+            except NotSupported as e:                                       # no refresh flow (Ajaib today): only a fault if it matters
+                failed = str(e)
+            except ProviderError as e:
+                failed = str(e)
+            st = tokens.token_state(conn)
+            left = st.minutes_left
+            covers = bool(st.valid and (need_until is None or (left is not None and left >= (need_until - now).total_seconds() / 60)))
+            hint = ("Log in to stockbit.com and paste the credentialStorage cookie in Blackridge > More (or /idx/feed/relay)"
+                    if provider == "stockbit" else "paste a fresh session in Blackridge > More > Brokers")
+            if not covers and nagging and critical:                         # the loud path: repeated, not deduped
+                when = st.expires_at or "never (no token)"
+                msg = (f"{provider} session will NOT last today's close: expires {when}"
+                       + (f" ({left:.0f} min left)" if left is not None else "")
+                       + (f"; renewal failed: {failed}" if failed else "")
+                       + f". {hint} - without it the tick feed stops and the gap-fade jobs are blind.")
+                if not runlog.alert_once(conn, "critical", "feed", msg):   # the first one raises the alert (and pushes);
+                    notify.send(msg, title="IDX token", data={"route": "/m/more", "kind": "token"})   # after that, a push every 10 min
+                logger.warning("idx token guard: %s", msg)
+            elif not covers and nagging:                                    # a standby's dead session: one warning, no nagging
+                runlog.alert_once(conn, "warning", "feed", f"{provider} (standby) session is not valid - {hint}")
+            elif failed and trading and critical and "no refresh flow" not in failed:   # a real renewal failure, session still covers today
+                runlog.alert_once(conn, "warning", "feed", f"{provider} token renewal failed ({failed}) - the stored session still covers today")
+            if st.refresh_present and st.refresh_days_left is not None and st.refresh_days_left < REFRESH_WARN_DAYS:
+                runlog.alert_once(conn, "warning", "feed", f"{provider} REFRESH token expires {st.refresh_expires_at:%Y-%m-%d %H:%M} UTC "
+                                                      f"({st.refresh_days_left:.1f} days): {hint} before then")
+
+
+def run_ara_watch() -> None:
+    """20:05 WIB: the ARA watch list for the next session - model P(touch) on today's bars (research ML-3), the top-10 plus
+    every name a book holds, each with its ARA price. Information for a holder or a watcher; never a ticket (menu 16)."""
+    from . import ara
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
         try:
-            rep = broker.renew_if_needed(conn, need_until=need_until)
-            if rep["renewed"]:
-                logger.info("idx stockbit token renewed, %s min left (needed %s)", rep["minutes_left"], rep["needed"])
-            elif rep["reason"].startswith("no refresh token"):
-                failed = "no refresh token is stored"
-        except broker.BrokerFetchError as e:
-            failed = f"{type(e).__name__}: {e}"
-        st = fs.token_status(fs.load_token(conn), now.astimezone(UTC))   # one clock for the whole decision
-        left = st.get("minutes_left")
-        covers = bool(st["valid"] and (need_until is None or (left is not None and left >= (need_until - now).total_seconds() / 60)))
-        if not covers and nagging:                                         # the loud path: repeated, not deduped
-            when = st["expires_at"] or "never (no token)"
-            msg = (f"Stockbit session will NOT last today's close: expires {when}"
-                   + (f" ({left:.0f} min left)" if left is not None else "")
-                   + (f"; renewal failed: {failed}" if failed else "")
-                   + ". Log in to stockbit.com and paste the credentialStorage cookie at http://127.0.0.1:8001/idx/feed/relay - "
-                     "without it the tick feed stops and the gap-fade jobs are blind.")
-            if not runlog.alert_once(conn, "critical", "feed", msg):       # the first one raises the alert (and pushes);
-                notify.send(msg, title="IDX token", data={"route": "/m/more", "kind": "token"})   # after that, a push every 10 min
-            logger.warning("idx token guard: %s", msg)
-        elif failed and trading:
-            runlog.alert(conn, "warning", "feed", f"Stockbit token renewal failed ({failed}) - the stored session still covers today")
-        rs = broker.refresh_status(conn=conn)
-        if rs["present"] and rs["days_left"] is not None and rs["days_left"] < REFRESH_WARN_DAYS:
-            runlog.alert(conn, "warning", "feed", f"Stockbit REFRESH token expires {rs['expires_at']:%Y-%m-%d %H:%M} UTC "
-                                                  f"({rs['days_left']:.1f} days): paste a fresh cookie at /idx/feed/relay before then")
+            rep = ara.watch(conn)
+            logger.info("idx ara watch: bar %s, %d rows", rep["bar_date"], len(rep["rows"]))
+        except Exception as e:
+            runlog.alert(conn, "warning", "ara", f"ARA watch failed: {type(e).__name__}: {e}")
+            logger.exception("ara watch failed")
+
+
+def run_ara_touch() -> None:
+    """Every 2 min in the session: held and watched names at the ARA limit, and whether the touch is locked, queued or
+    fading (menu 34: locked -> +431 bps the next day vs the ARA price; faded -> -661 bps). One alert per state change."""
+    from . import ara
+    now = datetime.now(WIB)
+    if not ara.in_session(now):
+        return
+    with get_connection() as conn:
+        try:
+            rep = ara.touch_check(conn, now)
+            if rep.get("touches"):
+                logger.info("idx ara touch: %s", rep["new"] or "no new state")
+        except Exception as e:
+            runlog.alert_once(conn, "warning", "ara", f"ARA touch check failed: {type(e).__name__}: {e}")
+            logger.exception("ara touch failed")
+
+
+def run_ticket_nudge() -> None:
+    """Chase an issued ticket that still needs the operator: lines not worked yet, or every line done but the ticket left
+    open (which blocks the next draft). Runs mid-session and before the close so a morning ticket can still be worked.
+
+    Dedupe (2026-09-23 review): one open alert per ticket, keyed on ``stale_state``'s stable ``key`` through
+    ``runlog.alert_once``, auto-acknowledged once the ticket is worked or closed. The phone is pushed at once when a
+    ticket FIRST turns up, and afterwards only on the morning run - a lingering ticket is a once-a-day reminder, never
+    the twice-a-day-forever it was before."""
+    from . import notify, runlog, ticket
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        stale = ticket.stale_tickets(conn, d)
+        keys = [s["key"] for s in stale]
+        with conn.cursor() as cur:                      # tickets that have since been worked or closed: clear their alert
+            cur.execute("UPDATE idx.alert SET acknowledged_at = now() WHERE job = 'ticket' AND acknowledged_at IS NULL "
+                        "AND NOT (message = ANY(%s))", (keys,))
+        conn.commit()
+        if not stale:
+            return
+        new = [s for s in stale if runlog.alert_once(conn, "warning", "ticket", s["key"])]
+        morning = datetime.now(WIB).hour < 12
+        logger.info("idx ticket nudge: %d open, %d new, %d stale", len(stale), len(new),
+                    sum(1 for s in stale if s["stale"]))
+        if not new and not morning:
+            return                                      # already reminded this morning; do not nag again this afternoon
+        text = "\n".join(["Tiket menunggu Anda:"] + [f"- {s['why']}" for s in stale])
+        notify.send(text, title="Tiket terbuka" if new else "Tiket masih terbuka", data={"screen": "ticket"})
+
+
+def run_track_report() -> None:
+    """The evening "is it proven yet?" scorecard for every book that has a research profile (trend, gapfade).
+
+    The operator's staging rule is to add capital only once a strategy reproduces its backtested profile; this pushes the
+    progress towards that bar once a day so the decision is made on a number, not on the memory of the last few trades.
+    Read-only, and silent when nothing has a profile yet."""
+    from . import book as bk
+    from . import notify
+    from . import track as tk
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        books = [b for b in bk.list_books(conn)
+                 if (bk.get_book(conn, b).get("rule") or "").lower() in tk.PROFILES]
+        if not books:
+            return
+        blocks = [tk.render(tk.scorecard(conn, b)) for b in books]
+    text = "\n\n".join(blocks)
+    logger.info("idx track: %d book(s)", len(blocks))
+    notify.send(text, title=f"Track record {d:%d %b}")
 
 
 def run_feed_audit() -> None:
@@ -406,11 +516,99 @@ def run_daily_fallback() -> None:
         _fail_alert(conn, r)
         logger.info("idx daily fallback %s %s rows=%s", d, r.status, r.rows_out)
         if r.status == "ok":
-            for bk in ("live", "paper"):
+            # Every book, exactly as the normal chain does above - not the ("live", "paper") pair this
+            # used to hardcode. On a Cloudflare day the IDX `daily` job 403s and this fallback is the
+            # only thing that marks, so the pair meant trend_live, paper_trend and paper_turnaround
+            # went unmarked all day: on 2026-09-23 that left an IRSX position bought the evening
+            # before with no price, and the desk read the book as -10 % when it was up 1.5 %.
+            for bk in [x["book"] for x in _all_books(conn)]:
                 rm = book.mark(conn, bk)
                 _fail_alert(conn, rm)
                 if rm.status == "ok":
                     _fail_alert(conn, levels.check(conn, bk))
+
+
+_GAPS_SQL = """
+WITH d AS (SELECT generate_series(%s::date, %s::date, '1 day')::date AS trade_date)
+SELECT d.trade_date
+  FROM d
+  LEFT JOIN LATERAL (SELECT count(*) AS n FROM idx.bar b
+                      WHERE b.trade_date = d.trade_date AND b.source = 'idx') bars ON true
+  LEFT JOIN LATERAL (SELECT status FROM idx.ingest_run r
+                      WHERE r.job = 'daily' AND r.run_key = d.trade_date::text
+                      ORDER BY r.started_at DESC LIMIT 1) last_run ON true
+ WHERE extract(isodow FROM d.trade_date) < 6
+   AND bars.n = 0
+   AND (last_run.status IS NULL OR last_run.status = 'failed')
+ ORDER BY d.trade_date
+"""
+
+
+def bar_gaps(conn, days: int = 10) -> list[date]:
+    """Recent weekdays with no IDX bar that the daily job never managed to fetch. A public holiday is NOT a gap: IDX
+    answers for it with an empty payload, so its run is 'ok' with zero rows and the status filter drops it - only a day
+    that failed (or was never attempted at all) comes back, which keeps this from re-asking about Idul Fitri forever."""
+    from psycopg.rows import tuple_row
+
+    # An explicit row factory: get_connection hands out dict rows, a bare psycopg.connect() (the tests) hands out tuples.
+    end = today_wib() - timedelta(days=1)
+    with conn.cursor(row_factory=tuple_row) as cur:
+        cur.execute(_GAPS_SQL, (end - timedelta(days=days), end))
+        return [r[0] for r in cur.fetchall()]
+
+
+def run_bar_backfill(days: int = 10) -> None:
+    """Re-fetch the IDX days the chain never got. The chain only ever chases TODAY (it returns the moment today's bar is
+    in), so a day IDX refuses leaves a hole nothing closes: on 2026-09-23 a Cloudflare challenge ran from 16:29 into the
+    next morning and left 09-23 with 205 Yahoo closes against the usual 963 - the ~760 names outside the universe simply
+    had no bar, and the only cure was a human noticing and running `idx backfill` by hand. Twice a day, so a challenge
+    that lifts overnight heals itself; one query and no network when there is nothing to heal. Features are not recomputed
+    here - the next daily chain rebuilds them with its 45-day lookback, which covers anything this fills."""
+    with get_connection() as conn:
+        gaps = bar_gaps(conn, days)
+        if not gaps:
+            return
+        logger.info("idx bar backfill: %d gap day(s) %s", len(gaps), [str(g) for g in gaps])
+        healed, still = [], []
+        with IdxClient() as cl:
+            for d in gaps:
+                try:
+                    r = job_daily.run(conn, cl, d)
+                except (CircuitOpen, BudgetExceeded) as e:                  # the client says stop asking; try again tonight
+                    logger.warning("idx bar backfill stopped at %s: %s", d, e)
+                    break
+                if r.status != "ok":
+                    still.append(d)
+                    continue
+                job_index.run(conn, cl, d)                                  # the index of a healed day, same as the chain
+                healed.append(d)
+                runlog.resolve(conn, "daily", like=f"%{d}%")
+        if healed:
+            # Finish the chain for the days we filled. Healing only the bars moves the newest summary date forward while
+            # features stay behind, and the screen anchors on the last FINISHED day - so a bars-only heal would leave the
+            # desk looking at an older day than the data it now holds (and, before the anchor was fixed, at nothing).
+            rp = publish.publish(conn, since=min(healed), yahoo_dir=None)
+            _fail_alert(conn, rp)
+            rf = features.run(conn, since=min(healed) - timedelta(days=45))
+            _fail_alert(conn, rf)
+            if rf.status == "ok":
+                rc, _ = candidates.run(conn)
+                _fail_alert(conn, rc)
+                for d in healed:
+                    try:                                                 # the public scores of the healed day, as the chain does
+                        scores.build(conn, d)
+                    except Exception as e:
+                        runlog.alert_once(conn, "warning", "scores", f"scores failed for {d}: {type(e).__name__}: {e}")
+            logger.info("idx bar backfill: chain rebuilt publish=%s features=%s", rp.rows_out, rf.rows_out)
+            runlog.alert(conn, "info", "daily",
+                         f"backfilled the IDX bars of {', '.join(str(d) for d in healed)} (they had failed at the time)")
+        logger.info("idx bar backfill: healed=%s still missing=%s", [str(d) for d in healed], [str(d) for d in still])
+
+
+def run_alert_sweep(days: int = 3) -> None:
+    """Keep the ops screen readable: old informational alerts are acknowledged for you (runlog.sweep_info)."""
+    with get_connection() as conn:
+        runlog.sweep_info(conn, days)
 
 
 def run_news() -> None:
@@ -486,6 +684,8 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_daily_chain, CronTrigger(day_of_week="mon-fri", hour=20, minute=0, timezone=WIB), id="daily_last")
     s.add_job(check_no_bar, CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=WIB), id="no_bar_alert")
     s.add_job(run_daily_fallback, CronTrigger(day_of_week="mon-fri", hour=19, minute=40, timezone=WIB), id="daily_fallback")
+    s.add_job(run_bar_backfill, CronTrigger(hour="7,21", minute=30, timezone=WIB), id="bar_backfill")
+    s.add_job(run_alert_sweep, CronTrigger(hour=6, minute=0, timezone=WIB), id="alert_sweep")
     s.add_job(run_announce_recent, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="announce_recent")
     s.add_job(run_broker_snapshot, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="broker_snapshot")
     s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=7, minute=30, timezone=WIB), id="macro")
@@ -493,7 +693,13 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_token_guard, IntervalTrigger(minutes=10), id="token_guard")
     s.add_job(run_gapfade_entry, CronTrigger(day_of_week="mon-fri", hour=9, minute="0,5", timezone=WIB), id="gapfade_entry")
     s.add_job(run_gapfade_exit, CronTrigger(day_of_week="mon-fri", hour=15, minute=50, timezone=WIB), id="gapfade_exit")
+    s.add_job(run_ara_watch, CronTrigger(day_of_week="mon-fri", hour=20, minute=5, timezone=WIB), id="ara_watch")
+    s.add_job(run_ara_touch, IntervalTrigger(minutes=2), id="ara_touch")
     s.add_job(run_feed_audit, CronTrigger(day_of_week="mon-fri", hour=20, minute=10, timezone=WIB), id="feed_audit")
+    # after the daily chain has marked the books, before the 20:45 nightly agent run
+    s.add_job(run_track_report, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="track_report")
+    # mid-session and before the close: a ticket drafted this morning can still be worked today
+    s.add_job(run_ticket_nudge, CronTrigger(day_of_week="mon-fri", hour="10,14", minute=30, timezone=WIB), id="ticket_nudge")
     s.add_job(run_news, CronTrigger(hour="6,12,18,22", minute=10, timezone=WIB), id="news")
     s.add_job(run_consensus, CronTrigger(day_of_week="sat", hour=11, minute=0, timezone=WIB), id="consensus")
     s.add_job(run_fin_backlog, CronTrigger(day_of_week="tue-sat", hour=5, minute=30, timezone=WIB), id="fin_backlog")

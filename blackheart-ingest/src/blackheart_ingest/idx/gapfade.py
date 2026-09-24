@@ -4,7 +4,7 @@
 The rule, exactly as backtested (nothing tuned here):
   universe  Utama/Pengembangan, ACTIVE, 60-day median value >= Rp 5 bn, previous close >= Rp 50
   entry     the opening price is <= -7 % against the previous close; deepest gaps first, K = 5 slots, one slot = NAV / K,
-            bought at the open + one tick
+            bought at the open + one tick, and never more than PARTICIPATION (1 %) of the name's 60-day median value
   exit      every position is sold into the SAME day's closing auction (close - one tick). Nothing is ever held overnight.
   timing    the opening auction prints reach the tick feed at ~08:58 WIB and are the official open for ~90 % of names
             (verified 2026-09-22), so the scan runs at 08:58, the exit ticket at 15:50, and the exit fill is recorded in
@@ -34,6 +34,13 @@ Robustness (why each guard is here, all failures are loud and safe):
                   so a second run (manual or scheduler) fills nothing twice.
   halt            a halted book scans, reports and trades nothing.
   live books      never auto-filled: the ticket is drafted and pushed to the phone, the operator holds the second key.
+  too big         a slot may never exceed 1 % of the name's 60-day median value. Menu 29e measured what this costs: at
+                  Rp 100 M it binds on nothing, at Rp 1 bn on 35 % of events, at Rp 5 bn on 65 %. It changes no return
+                  today; it is the guard that stops the book quietly outgrowing the prices it was measured at.
+  measured        every entry records what was actually available - the opening print, the resting offer, and the VWAP
+                  and traded value of the first EXEC_WINDOW_MIN minutes - in the journal under ``exec``. The one number
+                  the backtest cannot produce is the difference between the open we see and the price we can pay; this
+                  is where it accumulates. Nothing in the rule reads it.
 """
 from __future__ import annotations
 
@@ -48,6 +55,7 @@ import psycopg
 from . import book as bk
 from . import journal, runlog, ticket
 from .card import _rows
+from .providers import registry
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +65,8 @@ LIQ_MIN = Decimal(5_000_000_000)
 PRICE_MIN = Decimal(50)
 OPEN_FROM, OPEN_TO = time(8, 55), time(9, 10)
 MIN_FEED_NAMES = 50                         # fewer names than this in the opening window = a broken feed, not a quiet market
+PARTICIPATION = Decimal("0.01")             # a slot may never exceed 1 % of the name's 60-day median value (menu 29e)
+EXEC_WINDOW_MIN = 5                         # minutes after the open whose VWAP is recorded as the price we could have paid
 MAX_BAR_AGE_DAYS = 5
 MODE_IN, MODE_OUT = "gapfade", "gapfade_exit"
 WIB = ZoneInfo("Asia/Jakarta")
@@ -114,8 +124,11 @@ def pick(cands: list[dict[str, Any]], k: int, held: set[str] | None = None) -> l
 
 
 def plan_entries(picked: list[dict[str, Any]], nav: Decimal, cash: Decimal, k: int, fee_buy: Decimal,
-                 min_trade: Decimal) -> list[dict[str, Any]]:
-    """Pure. One slot = NAV / k, bought at the open + one tick, trimmed to whole lots the cash can pay for."""
+                 min_trade: Decimal, participation: Decimal = PARTICIPATION) -> list[dict[str, Any]]:
+    """Pure. One slot = NAV / k, bought at the open + one tick, trimmed to whole lots the cash can pay for - and never
+    to more than ``participation`` of the name's 60-day median value. The backtest bought the opening print in unlimited
+    size; at Rp 100 M the cap never binds, and it is the only thing standing between this rule and a book too large to
+    be filled at the price it was measured at. A name with no v60 is sized by the slot alone (the scan always has one)."""
     slot = (Decimal(nav) / k) if k else Decimal(0)
     left = Decimal(cash)
     lines = []
@@ -124,16 +137,45 @@ def plan_entries(picked: list[dict[str, Any]], nav: Decimal, cash: Decimal, k: i
         per_lot = lp * ticket.LOT * (1 + fee_buy)
         if per_lot <= 0:
             continue
-        lots = Decimal(int(min(slot, left) // per_lot))
+        v60 = Decimal(c["v60"]) if c.get("v60") else None
+        room = (v60 * participation) if v60 is not None else slot
+        budget = min(slot, left, room)
+        lots = Decimal(int(budget // per_lot))
         notional = lots * ticket.LOT * lp
         if lots <= 0 or notional < min_trade:
             continue
         left -= notional * (1 + fee_buy)
+        capped = room < min(slot, budget + per_lot)                        # the cap, not the cash or the slot, is what bit
+        flags = ["gapfade:entry", f"gap:{float(c['gap']) * 100:.1f}%"] + ([f"capped:{float(participation) * 100:.2f}%v60"] if capped else [])
         lines.append({"code": c["code"], "side": "buy", "lots": lots, "limit_price": lp, "ref_close": Decimal(c["open"]), "notional": notional,
                       "weight_now": Decimal(0), "weight_target": (notional / nav) if nav else None,
-                      "reason": f"gap {float(c['gap']) * 100:.1f} % at the open ({c['prev_close']} -> {c['open']})",
-                      "flags": ["gapfade:entry", f"gap:{float(c['gap']) * 100:.1f}%"]})
+                      "reason": f"gap {float(c['gap']) * 100:.1f} % at the open ({c['prev_close']} -> {c['open']})"
+                                + (f", trimmed to {float(participation) * 100:.2f} % of v60" if capped else ""),
+                      "flags": flags})
     return lines
+
+
+def exec_context(lines: list[dict[str, Any]], cands: dict[str, dict[str, Any]], vwap: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pure. One row per bought name recording what was actually available when we claimed to buy the open: the opening
+    print, the best offer resting at that moment, and the volume-weighted price of the first EXEC_WINDOW_MIN minutes
+    with the value that traded in them. The backtest assumes the open plus a tick is obtainable; this is the evidence
+    that will eventually say by how much it is wrong. Nothing here changes a price or a size - it only records."""
+    out = []
+    for ln in lines:
+        c, v = cands.get(ln["code"], {}), vwap.get(ln["code"], {})
+        row: dict[str, Any] = {"code": ln["code"], "lots": str(ln["lots"]), "assumed": str(ln["limit_price"]),
+                               "open": str(c.get("open")) if c.get("open") is not None else None,
+                               "offer": str(c.get("offer")) if c.get("offer") is not None else None,
+                               "v60": str(c.get("v60")) if c.get("v60") is not None else None,
+                               "vwap5": str(v["vwap"]) if v.get("vwap") is not None else None,
+                               "value5": str(v["value"]) if v.get("value") is not None else None,
+                               "prints5": v.get("prints")}
+        if v.get("vwap"):                                                  # + means the first minutes traded ABOVE our assumption
+            row["slip_bps"] = round(float((Decimal(v["vwap"]) / Decimal(ln["limit_price"]) - 1) * 10000), 1)
+        if v.get("value") and ln["notional"]:
+            row["share_of_window"] = round(float(Decimal(ln["notional"]) / Decimal(v["value"])), 4)
+        out.append(row)
+    return out
 
 
 def plan_exits(positions: list[dict[str, Any]], prices: dict[str, Decimal], reason: str = "gapfade: same-day exit") -> list[dict[str, Any]]:
@@ -194,6 +236,14 @@ def scan(conn: psycopg.Connection, d: date | None = None, gap_max: Decimal = GAP
     reads ``ok`` and ``why``."""
     d = d or datetime.now().date()
     res: dict[str, Any] = {"date": d, "ok": False, "why": None, "candidates": [], "seen": 0, "prev_date": None, "skipped": {}}
+    # one provider for the whole scan, resolved once (providers/registry.py): the prints, the offers and the sizing must
+    # all come from the same market, and the tables must have been filled by the provider the toggle names
+    pinned = registry.pin(conn, "feed")
+    res["provider"] = pinned.provider
+    problem = registry.provenance_problem(registry.streaming_provider(conn), pinned)
+    if problem:
+        res["why"] = problem
+        return res
     px = opening_prices(conn, d)
     res["seen"] = len(px)
     if len(px) < MIN_FEED_NAMES:
@@ -273,6 +323,27 @@ def last_feed_prices(conn: psycopg.Connection, d: date, codes: list[str]) -> dic
     return {r["code"]: Decimal(str(r["price"])) for r in rows if r["price"]}
 
 
+def open_vwaps(conn: psycopg.Connection, d: date, codes: list[str], minutes: int = EXEC_WINDOW_MIN) -> dict[str, dict[str, Any]]:
+    """The volume-weighted price of each name's first ``minutes`` of prints, with the value that traded in them - the
+    price a real order would have paid if it could not have the auction itself. ``qty`` is in shares, as ``feed_bar_1m``
+    reads it; the collector sees roughly a third of the day's value (BBCA 2026-09-22: Rp 216 bn of 580 bn), so the value
+    here is a floor and any participation share computed from it is an over-estimate - which is the safe direction."""
+    if not codes:
+        return {}
+    rows = _rows(conn, """
+        WITH t AS (SELECT code, price, qty, ts, MIN(ts) OVER (PARTITION BY code) AS first_ts FROM idx.feed_trade
+                    WHERE (ts AT TIME ZONE 'Asia/Jakarta')::date = %s AND code = ANY(%s))
+        SELECT code, SUM(price::numeric * qty) AS value, SUM(qty) AS vol, COUNT(*) AS prints
+          FROM t WHERE ts < first_ts + make_interval(mins => %s) GROUP BY code""",
+                 (d, codes, minutes), ["code", "value", "vol", "prints"])
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        vol = Decimal(str(r["vol"] or 0))
+        val = Decimal(str(r["value"] or 0))
+        out[r["code"]] = {"vwap": (val / vol) if vol > 0 else None, "value": val, "prints": int(r["prints"] or 0)}
+    return out
+
+
 def _tickets_today(conn: psycopg.Connection, book: str, d: date, mode: str) -> list[dict[str, Any]]:
     ids = [r["id"] for r in _rows(conn, "SELECT id FROM idx.ticket WHERE book = %s AND ticket_date = %s AND mode = %s ORDER BY id", (book, d, mode), ["id"])]
     return [ticket.load(conn, i) for i in ids]
@@ -320,7 +391,7 @@ def run_entry(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: 
         out.update({"candidates": len(s["candidates"]), "seen": s["seen"], "skipped": s["skipped"]})
         if not s["ok"]:
             out["why"] = s["why"]
-            runlog.alert(conn, "warning", f"gapfade:{book}", f"no gap-fade scan for {d}: {s['why']}")
+            runlog.alert_once(conn, "warning", f"gapfade:{book}", f"no gap-fade scan for {d}: {s['why']}")
             return out
         px_open = {c["code"]: c["open"] for c in s["candidates"]}
         left = _open_positions(conn, book)                                 # intraday book: nothing may survive a session
@@ -359,6 +430,9 @@ def run_entry(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: 
             return out
         if ticket.is_live(book):
             out["status"] = "draft"
+            out["exec"] = _exec_context(conn, d, lines, s["candidates"])   # what was on offer when we drafted, for the fill to be judged against
+            journal.record(conn, book, actor, "note", ticket_id=tid, rationale=f"gapfade {d}: entry ticket drafted, awaiting the second key",
+                           refs={"exec": out["exec"]})
             _notify(conn, book, f"[gapfade] {b.get('label') or book}: ticket #{tid} - buy at the open, sell into the close\n"
                                 + "\n".join(f"  {ln['code']} {int(ln['lots'])} lot @ {float(ln['limit_price']):,.0f} ({ln['reason']})" for ln in lines), t)
             return out
@@ -366,10 +440,37 @@ def run_entry(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: 
         out["filled"] = _fill(conn, ticket.load(conn, tid), px_open, d, actor, "gapfade paper fill at the open")
         ticket.set_status(conn, tid, "closed", actor=actor, rationale="gapfade: filled at the open")
         out["status"] = "filled"
+        ctx = _exec_context(conn, d, lines, s["candidates"])
+        out["exec"] = ctx
         journal.record(conn, book, actor, "note", ticket_id=tid,
                        rationale=f"gapfade {d}: bought {len(out['filled'])} name(s) at the open, to be sold into today's close",
-                       refs={"fills": [{"code": f["code"], "lots": str(f["lots"]), "price": str(f["price"])} for f in out["filled"]]})
+                       refs={"fills": [{"code": f["code"], "lots": str(f["lots"]), "price": str(f["price"])} for f in out["filled"]],
+                             "exec": ctx})
+        if out["filled"]:                                                  # the morning push: only ever sent when money moved
+            _notify(conn, book, _morning_text(b, book, tid, lines, ctx), t)
     return out
+
+
+def _exec_context(conn: psycopg.Connection, d: date, lines: list[dict[str, Any]], cands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shell: the execution evidence for today's entry. Never fails the trading job - a missing VWAP is a null, not a raise."""
+    try:
+        with conn.transaction():                                          # a savepoint: a bad read may not poison the ticket's transaction
+            return exec_context(lines, {c["code"]: c for c in cands}, open_vwaps(conn, d, [ln["code"] for ln in lines]))
+    except Exception:
+        logger.exception("gapfade exec context failed")
+        return []
+
+
+def _morning_text(b: dict[str, Any], book: str, tid: int, lines: list[dict[str, Any]], ctx: list[dict[str, Any]]) -> str:
+    """Pure-ish: what the phone says at 09:00. The slip column is the whole point - it is the number that decides whether
+    this book ever goes live."""
+    slip = {r["code"]: r.get("slip_bps") for r in ctx}
+    o = [f"[gapfade] {b.get('label') or book}: bought {len(lines)} name(s) at the open, sold into today's close (#{tid})"]
+    for ln in lines:
+        s = slip.get(ln["code"])
+        o.append(f"  {ln['code']} {int(ln['lots'])} lot @ {float(ln['limit_price']):,.0f} - {ln['reason']}"
+                 + (f" [first 5 min {s:+.0f} bps]" if s is not None else ""))
+    return "\n".join(o)
 
 
 def run_exit(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date | None = None) -> dict[str, Any]:
