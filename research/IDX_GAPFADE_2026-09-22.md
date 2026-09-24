@@ -98,3 +98,54 @@ be possible nor worth building. The gap-fade design stands as built: scan at 09:
 Caveat: one session, and it contained no liquid name that gapped 5 % or more - the names that do gap are the volatile ones and
 may drift faster. The paper book measures exactly this from here on.
 
+## Flaw analysis (2026-09-23, operator: "analisis flaw dari strategy gap down")
+
+Everything below is measured, not imagined. The rule stays a paper book; this is the list the paper record has to answer.
+
+### Measured
+
+1. **Survivorship inflates the long history by about half.** Same rule, same years (2023-2026), two universes: the Yahoo
+   cache of 450 names that still exist gives **+453 bps** a trade at a 67 % hit rate; the full IDX universe of 962 listed
+   names gives **+298 bps** at 54 %. The cache overstates by **+155 bps (+52 %)**. Every number in menu 29d — including
+   the 45.7 % CAGR and the twelve-year support — carries that inflation. The IDX-open numbers (29b, 29c) do not.
+2. **The profit is in a handful of trades.** Of 266 events, the best 5 % (13 trades) carry **58 %** of all profit and the
+   best 10 % carry **91 %**. Drop the best 5 % and the mean falls from +298 to +133 bps. A year without a big reversal is
+   a flat year, and the sample contains only three of them.
+3. **The typical trade is a small loss.** Median +58 bps at -7 % on IDX opens, and *negative* at every threshold before
+   2023. The hit rate of 54 % is barely above a coin.
+4. **Capacity is a hard ceiling, and it is close.** A slot is NAV/5 against the name's own daily turnover: at Rp 100 M NAV
+   it is 0.05 % of a median name's day (invisible), at Rp 1 bn 0.45 % (fine), at Rp 5 bn **2.3 % median and 20 % worst
+   case** (moving the price), at Rp 20 bn **9 % median, 80 % worst case** (impossible). The rule dies somewhere between
+   Rp 2 bn and Rp 5 bn of capital.
+5. **6 % of events close locked at ARB** and no stop protects them — of the nine events a -10 % stop fires on, five were
+   ARB-locked with no bid. Position size is the only defence (menu 29c).
+6. **The frequency, not the edge, depends on the band regime.** Under the 7 % ARB the rule had 20 events a year and
+   deployed 1.4 % of capital for 4 %/yr; under the wide bands, 136 events and 9.3 % for far more. The per-trade edge
+   survived the regime change (menu 29d) but the *return* is entirely a function of how often IDX lets a name gap.
+   If the bands are narrowed again the strategy does not get worse — it nearly stops existing.
+7. **Decay is suspected but not proven.** 2026 looks weaker by hit rate (53 % against 82 % in 2024) yet on IDX opens the
+   2026 mean is +318 bps against +266 for 2023-2025 (t -0.39, p 0.70): **not distinguishable from noise**. The earlier
+   claim that the rule is visibly decaying was read off the survivor cache and does not hold on clean data.
+
+### Not yet measured — what the paper book is for
+
+8. **The fill is assumed.** Entry at the open plus one tick, exit at the close minus one tick, both taken on faith. The
+   one real measurement (2026-09-22, all liquid names, a quiet day) says the offer at 09:00 sits a median 0 bps above the
+   auction price — but that is not the same as a name that just fell 12 % on news.
+9. **The live population is stricter than the backtest.** The book only trades names whose first print lands in
+   08:55-09:10; roughly one name in ten opens later (AALI's "open" printed at 10:45 on 2026-09-22). The backtest counts
+   those, the book cannot.
+10. **Which five, on a day when eighty gap.** 2025-04-08 had 81 qualifying names; the rule takes the five deepest. That
+    selection has never been tested against alternatives (most liquid, least deep, random).
+11. **Crowding.** The rule is simple and public. Nothing in the data yet, but a widening spread or a shrinking fade in
+    the paper record would be the first sign.
+12. **Statistical debt.** This family has now consumed ~40 arms inside a desk total of 558 trials. 29b already failed its
+    own pre-registered bar (daily t 2.97 against 3.0); none of what followed changes that.
+
+### Operational
+
+13. It needs a person or a job at 09:00 and 15:50 on roughly 60 days a year, and a missed exit leaves an overnight
+    position the rule never intended (the sweep handles it, at whatever the next open gives).
+14. The corporate-action guard depends on the desk's own tables being current at 09:00; a split announced but not yet
+    recorded is caught only by the auto-rejection band check.
+
