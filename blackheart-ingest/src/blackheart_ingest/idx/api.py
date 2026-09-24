@@ -12,13 +12,15 @@ the loopback port; research writes (pack, evidence, macro, overlay) are the desk
 """
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import contextlib
+from datetime import UTC, date, datetime, time
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
 from ..shared.db import get_connection
-from . import journal, runlog
+from . import journal, runlog, stream
 from .jobs import daily as job_daily
 from .who import Caller, caller_of, need_user, own_book, own_line, own_ticket, service_only
 
@@ -106,15 +108,86 @@ def make_router(require_token) -> APIRouter:
         return {"acknowledged": alert_id}
 
     @router.get("/alerts")
-    def alerts(limit: int = 50, c: Caller = _CALLER) -> list[dict[str, Any]]:
-        """Open (unacknowledged) alerts, newest first — the desk's own plus the caller's books' (every book for a service)."""
+    def alerts(limit: int = 50, kind: str | None = None, strategy: str | None = None, code: str | None = None,
+               since: int | None = None, c: Caller = _CALLER) -> list[dict[str, Any]]:
+        """Open (unacknowledged) alerts, newest first — the desk's own plus the caller's books' (every book for a service).
+        `since` is an alert id: what a page asks for after a stream gap. Expired rows (an execution read whose
+        `valid_until` has passed) are left out."""
         from . import book as bk
         with get_connection() as conn:
-            rows = runlog.open_alerts(conn, min(max(limit, 1), 500))
+            rows = runlog.open_alerts(conn, min(max(limit, 1), 500), kind=kind, strategy=strategy, code=code, since=since)
             if c.scoped:
                 mine = set(bk.list_books(conn, c.user_id, include_archived=True))
-                rows = [a for a in rows if _alert_book(a) is None or _alert_book(a) in mine]
+                rows = [a for a in rows if stream.visible_to(a, books=mine, user_id=c.user_id, scoped=True)]
             return rows
+
+    @router.get("/alerts/prefs")
+    def alert_prefs_get(c: Caller = _CALLER) -> dict[str, Any]:
+        """This person's mutes and quiet hours. No rows = everything is delivered, which is the default."""
+        from . import prefs
+        user = need_user(c, "alert preferences")
+        with get_connection() as conn:
+            return {"user_id": user, "prefs": prefs.list_prefs(conn, user)}
+
+    @router.put("/alerts/prefs", dependencies=[Depends(require_token)])
+    def alert_prefs_put(body: dict[str, Any], c: Caller = _CALLER) -> dict[str, Any]:
+        """Mute or unmute one kind / strategy for this person: {kind?, strategy?, muted, quiet_from?, quiet_to?}.
+        Unmuting with no quiet hours removes the row — the absence of a preference is the default."""
+        from . import prefs
+        user = need_user(c, "alert preferences")
+        kind = str(body.get("kind") or "")
+        if kind and kind not in runlog.KINDS:
+            raise HTTPException(status_code=422, detail=f"unknown kind {kind!r}; one of {', '.join(runlog.KINDS)}")
+
+        def _time(v: Any):
+            if v in (None, ""):
+                return None
+            try:
+                return time.fromisoformat(str(v))
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"quiet hours want HH:MM, not {v!r}") from None
+        with get_connection() as conn:
+            return prefs.set_pref(conn, user, kind=kind, strategy=str(body.get("strategy") or ""),
+                                  muted=bool(body.get("muted", True)), quiet_from=_time(body.get("quiet_from")),
+                                  quiet_to=_time(body.get("quiet_to")))
+
+    @router.get("/stream")
+    async def alert_stream(request: Request, since: int | None = None, kinds: str | None = None,
+                           c: Caller = _CALLER) -> StreamingResponse:
+        """Server-sent events: every alert as it lands, scoped to what the caller may see.
+
+        `since` (or the browser's `Last-Event-ID`) replays what was missed first, so a dropped connection costs nothing.
+        `kinds` is a comma-separated filter. The stream ignores mutes and quiet hours by design — an open page is
+        somebody looking on purpose; preferences stop a phone buzzing, not a screen from showing."""
+        want = {k.strip() for k in (kinds or "").split(",") if k.strip()} or None
+        last = since
+        if last is None:
+            with contextlib.suppress(TypeError, ValueError):
+                last = int(request.headers.get("last-event-id") or 0) or None
+        from . import book as bk
+        with get_connection() as conn:
+            replay = list(reversed(runlog.open_alerts(conn, stream.REPLAY_MAX, since=last))) if last else []
+            books = set(bk.list_books(conn, c.user_id, include_archived=True)) if c.scoped else None
+        h = stream.hub()
+        queue = h.subscribe()
+        await h.wait_ready(timeout=2.0)
+
+        async def body():
+            try:
+                async for chunk in stream.events(queue, replay=replay, kinds=want, books=books,
+                                                 user_id=c.user_id, scoped=c.scoped):
+                    if await request.is_disconnected():
+                        break
+                    yield chunk
+            finally:
+                h.unsubscribe(queue)
+        return StreamingResponse(body(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
+    @router.get("/stream/status")
+    def alert_stream_status() -> dict[str, Any]:
+        """Is this worker's listener connected, and how many pages are on it."""
+        return stream.hub().status()
 
     @router.get("/report")
     def report_get(book: str = "paper", period: str = "since", as_of: str | None = None, c: Caller = _CALLER) -> dict[str, Any]:

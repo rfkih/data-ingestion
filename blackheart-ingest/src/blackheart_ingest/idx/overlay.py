@@ -246,6 +246,28 @@ def index_regime(conn: psycopg.Connection, D: date) -> dict[str, Any]:
     return r
 
 
+def regime_change_alert(conn: psycopg.Connection, D: date) -> dict[str, Any]:
+    """Put the index regime on the bus the day it turns, and only then. The gate is the desk's live risk rule - no new
+    trend entry while the COMPOSITE is under its 200-day average - so the flip is worth a person's attention; the days
+    in between are not. The previous state is read off the last regime row rather than kept in a table of its own: the
+    bus already remembers, and one source of truth beats two."""
+    from . import runlog
+    r = index_regime(conn, D)
+    state = "open" if r["on"] else "shut"
+    prev = _rows(conn, "SELECT payload FROM idx.alert WHERE kind = 'regime' ORDER BY id DESC LIMIT 1", (), ["payload"])
+    was = ((prev[0]["payload"] or {}).get("state") if prev else None)
+    out = {"date": str(r["check_date"]), "state": state, "was": was, "alert": None,
+           "close": str(r["close"]), "sma": (str(r["sma"]) if r.get("sma") is not None else None)}
+    if was == state:
+        return out
+    word = ("above" if r["on"] else "under")
+    msg = (f"The {r['index_code']} closed {word} its 200-day average on {r['check_date']} "
+           f"({float(r['close']):,.0f} vs {float(r['sma']):,.0f}): the trend books' gate is {state}.")
+    out["alert"] = runlog.alert(conn, "info" if r["on"] else "warning", "regime", msg, kind="regime",
+                                strategy="regime_gate", payload=out, dedupe_key=f"regime:{r['check_date']}")
+    return out
+
+
 def name_trend(conn: psycopg.Connection, D: date, codes: list[str]) -> dict[str, dict[str, Any]]:
     """Per code: {close, sma, on} on the adjusted close series, as of D."""
     if not codes:

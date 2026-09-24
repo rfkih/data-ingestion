@@ -211,7 +211,7 @@ def build(conn: psycopg.Connection, book: str, d: date | None = None) -> dict[st
     res = plan(entries, exits, positions, closes_raw, Decimal(b["cash"]), b)
     res.update({"book": book, "mode": "trend", "run_date": d, "ticket_date": d, "held": {p["code"]: p for p in positions}, "prices": closes_raw,
                 "strategy": f"trend:{variant}", "size": K, "weights": {}, "held_back": held_back, "regime_filter": bool(b.get("regime_filter")),
-                "entry_gate": False, "regime": regime, "signals": len(entries), "exits": len(exits), "universe": len(uni), "variant": variant})
+                "entry_gate": False, "regime": regime, "signals": len(entries), "exits": len(exits), "entry_rows": entries, "exit_rows": exits, "universe": len(uni), "variant": variant})
     return res
 
 
@@ -234,6 +234,7 @@ def run(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date |
     if out["cancelled"]:                                               # the freed names may signal again today: rebuild once
         res = build(conn, book, d)
         out.update({"signals": res["signals"], "exits": res["exits"], "lines": len(res["lines"])})
+    _record_signals(conn, book, res)
     if not res["lines"]:
         return out
     held = f", {len(res['held_back'])} held back (COMPOSITE under MA200)" if res["held_back"] else ""
@@ -244,7 +245,9 @@ def run(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date |
     out["checks_ok"] = checks["ok"]
     if not checks["ok"]:
         out["status"] = "draft"
-        runlog.alert(conn, "warning", f"ticket:{book}", f"trend ticket #{tid} not issued - " + ticket.breaches_text(checks))
+        runlog.alert(conn, "warning", f"ticket:{book}", f"trend ticket #{tid} not issued - " + ticket.breaches_text(checks),
+                     kind="ticket", strategy="trend_small", book=book,
+                     payload={"ticket": tid, "breaches": checks.get("breaches")}, dedupe_key=f"ticket:{tid}:not_issued")
         return out
     if ticket.is_live(book):
         out["status"] = "draft"
@@ -258,6 +261,30 @@ def run(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date |
         ticket.set_status(conn, tid, "issued", actor=actor, rationale="trend book: paper ticket auto-issued for the next open")
         out["status"] = "issued"
     return out
+
+
+def _record_signals(conn: psycopg.Connection, book: str, res: dict[str, Any]) -> None:
+    """Tonight's reading of the trend rule, ticket or no ticket: what it would buy, what it would sell, and what the
+    regime gate held back. Never fails the run - a missing record is a gap on a page, not a reason to lose the ticket."""
+    try:
+        from . import signals
+        held_back = set(res.get("held_back") or [])
+        px = res.get("prices") or {}
+        rows = [{"code": e["code"], "action": "buy", "ref_price": px.get(e["code"]),
+                 "reason": {"vol_ratio": e.get("vol_ratio"), "hi60": str(e["hi60"]) if e.get("hi60") is not None else None,
+                            "ma200": str(e["ma200"]) if e.get("ma200") is not None else None}}
+                for e in res.get("entry_rows") or [] if e["code"] not in held_back]
+        rows += [{"code": c, "action": "hold_back", "ref_price": px.get(c),
+                  "reason": {"why": "COMPOSITE under its 200-day average"}} for c in held_back]
+        rows += [{"code": x["code"], "action": "sell", "ref_price": x.get("close"),
+                  "reason": {"why": x.get("reason")}} for x in res.get("exit_rows") or []]
+        if not rows:
+            return
+        gate = "" if res.get("regime") is None else (" · gate open" if res["regime"]["on"] else " · gate shut")
+        signals.record(conn, "trend_small", res["run_date"], rows, book=book,
+                       summary=f"{len(rows)} name(s) on the trend rule{gate}")
+    except Exception:
+        logger.exception("trend_book: the signal record failed (the ticket is unaffected)")
 
 
 def render(res: dict[str, Any]) -> str:

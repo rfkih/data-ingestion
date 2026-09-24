@@ -391,7 +391,9 @@ def run_entry(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: 
         out.update({"candidates": len(s["candidates"]), "seen": s["seen"], "skipped": s["skipped"]})
         if not s["ok"]:
             out["why"] = s["why"]
-            runlog.alert_once(conn, "warning", f"gapfade:{book}", f"no gap-fade scan for {d}: {s['why']}")
+            runlog.alert_once(conn, "warning", f"gapfade:{book}", f"no gap-fade scan for {d}: {s['why']}",
+                              kind="signal", strategy="gapfade", book=book, payload={"date": str(d), "why": s["why"]},
+                              dedupe_key=f"signal:gapfade:{d}:{book}:none")
             return out
         px_open = {c["code"]: c["open"] for c in s["candidates"]}
         left = _open_positions(conn, book)                                 # intraday book: nothing may survive a session
@@ -426,7 +428,9 @@ def run_entry(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: 
         out["checks_ok"] = checks["ok"]
         if not checks["ok"]:
             out["status"] = "draft"
-            runlog.alert(conn, "warning", f"ticket:{book}", f"gapfade ticket #{tid} not issued - " + ticket.breaches_text(checks))
+            runlog.alert(conn, "warning", f"ticket:{book}", f"gapfade ticket #{tid} not issued - " + ticket.breaches_text(checks),
+                         kind="ticket", strategy="gapfade", book=book, payload={"ticket": tid},
+                         dedupe_key=f"ticket:{tid}:not_issued")
             return out
         if ticket.is_live(book):
             out["status"] = "draft"

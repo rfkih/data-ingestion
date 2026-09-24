@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
+import psycopg.types.json
 
 logger = logging.getLogger(__name__)
 
@@ -57,26 +58,60 @@ def finish(conn: psycopg.Connection, run_id: int, r: RunResult) -> None:
     conn.commit()
 
 
-def alert(conn: psycopg.Connection, severity: str, job: str | None, message: str) -> None:
+KINDS = ("signal", "ticket", "exec", "regime", "ara", "risk", "feed", "ops")
+
+
+def alert(conn: psycopg.Connection, severity: str, job: str | None, message: str, *, kind: str | None = None,
+          strategy: str | None = None, code: str | None = None, book: str | None = None, user_id: str | None = None,
+          payload: dict[str, Any] | None = None, dedupe_key: str | None = None,
+          valid_until: datetime | None = None, notify_channels: bool = True) -> int:
+    """Write one row on the bus and let the consumers have it. -> the alert id.
+
+    A producer never picks a channel: the phone push, Telegram and the browser stream all read idx.alert. The typed
+    fields are what lets them route and render without parsing the message - and every one of them is optional, so the
+    free-text callers that predate the bus keep working exactly as they did.
+
+    ``dedupe_key`` is the producer's name for "this same thing" (``exec:41:BBCA``): while an alert with that key is
+    still open it is UPDATED in place rather than duplicated, which is what makes a five-second execution read safe to
+    emit repeatedly. ``valid_until`` says when the row stops being true, so a screen can drop it without being told."""
+    cols = {"severity": severity, "job": job, "message": message, "kind": kind, "strategy": strategy, "code": code,
+            "book": book, "user_id": user_id, "valid_until": valid_until,
+            "payload": psycopg.types.json.Jsonb(payload) if payload is not None else None, "dedupe_key": dedupe_key}
+    names = list(cols)
     with conn.cursor() as cur:
-        cur.execute("INSERT INTO idx.alert (severity, job, message) VALUES (%s, %s, %s)", (severity, job, message))
+        if dedupe_key:
+            cur.execute("""INSERT INTO idx.alert (severity, job, message, kind, strategy, code, book, user_id, valid_until, payload, dedupe_key)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL AND acknowledged_at IS NULL
+                           DO UPDATE SET severity = EXCLUDED.severity, job = EXCLUDED.job, message = EXCLUDED.message,
+                               kind = EXCLUDED.kind, strategy = EXCLUDED.strategy, code = EXCLUDED.code,
+                               book = EXCLUDED.book, user_id = EXCLUDED.user_id, valid_until = EXCLUDED.valid_until,
+                               payload = EXCLUDED.payload, ts = now()
+                           RETURNING id""", tuple(cols[n] for n in names))
+        else:
+            cur.execute(f"""INSERT INTO idx.alert ({', '.join(names)}) VALUES ({', '.join(['%s'] * len(names))})
+                            RETURNING id""", tuple(cols[n] for n in names))
+        row = cur.fetchone()
+        alert_id = int(next(iter(row.values())) if isinstance(row, dict) else row[0])
     conn.commit()
     logger.log(logging.CRITICAL if severity == "critical" else logging.WARNING, "idx alert [%s] %s: %s", severity, job, message)
-    try:                                                                   # warning/critical also go out (Telegram), best effort
-        from . import notify
-        notify.on_alert(severity, job, message)
-    except Exception:                                                      # a notification must never fail the job
-        logger.exception("idx alert: notify failed")
+    if notify_channels:
+        try:                                                               # warning/critical also go out (Telegram), best effort
+            from . import notify
+            notify.on_alert(severity, job, message, kind=kind, strategy=strategy, book=book, user_id=user_id)
+        except Exception:                                                  # a notification must never fail the job
+            logger.exception("idx alert: notify failed")
+    return alert_id
 
 
-def alert_once(conn: psycopg.Connection, severity: str, job: str | None, message: str) -> bool:
+def alert_once(conn: psycopg.Connection, severity: str, job: str | None, message: str, **kw: Any) -> bool:
     """``alert`` unless the same job+message is already open (unacknowledged). Returns whether it raised one - a caller
     that nags on a repeating schedule uses the False to send its own reminder without filling the alert table."""
     with conn.cursor() as cur:
         cur.execute("SELECT 1 FROM idx.alert WHERE job = %s AND message = %s AND acknowledged_at IS NULL", (job, message))
         if cur.fetchone():
             return False
-    alert(conn, severity, job, message)
+    alert(conn, severity, job, message, **kw)
     return True
 
 
@@ -113,14 +148,31 @@ def sweep_info(conn: psycopg.Connection, days: int = 3) -> int:
     return n
 
 
-def open_alerts(conn: psycopg.Connection, limit: int = 50) -> list[dict[str, Any]]:
+ALERT_COLS = ["id", "ts", "severity", "job", "message", "kind", "strategy", "code", "book", "user_id", "payload",
+              "dedupe_key", "valid_until"]
+
+
+def open_alerts(conn: psycopg.Connection, limit: int = 50, *, kind: str | None = None, strategy: str | None = None,
+                code: str | None = None, since: int | None = None, include_expired: bool = False) -> list[dict[str, Any]]:
+    """Open (unacknowledged) alerts, newest first. An expired row (valid_until in the past) is left out unless asked
+    for: an execution read that was true fifteen seconds ago is not news, it is clutter."""
+    where = ["acknowledged_at IS NULL"]
+    params: list[Any] = []
+    for col, val in (("kind", kind), ("strategy", strategy), ("code", code)):
+        if val:
+            where.append(f"{col} = %s")
+            params.append(val)
+    if since is not None:
+        where.append("id > %s")
+        params.append(since)
+    if not include_expired:
+        where.append("(valid_until IS NULL OR valid_until > now())")
+    params.append(limit)
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, ts, severity, job, message FROM idx.alert WHERE acknowledged_at IS NULL "
-            "ORDER BY ts DESC LIMIT %s", (limit,))
+        cur.execute(f"SELECT {', '.join(ALERT_COLS)} FROM idx.alert WHERE {' AND '.join(where)} "
+                    f"ORDER BY ts DESC LIMIT %s", params)
         rows = cur.fetchall()
-    cols = ["id", "ts", "severity", "job", "message"]
-    return [r if isinstance(r, dict) else dict(zip(cols, r, strict=True)) for r in rows]
+    return [r if isinstance(r, dict) else dict(zip(ALERT_COLS, r, strict=True)) for r in rows]
 
 
 def acknowledge(conn: psycopg.Connection, alert_id: int) -> bool:

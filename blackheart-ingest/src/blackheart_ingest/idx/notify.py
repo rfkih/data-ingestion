@@ -105,17 +105,26 @@ def owner_of(book: str | None) -> str | None:
 def send(text: str, *, title: str | None = None, data: dict[str, Any] | None = None, sender: Sender | None = None,
          push_sender: push.Sender | None = None, user_id: str | None = None, book: str | None = None) -> bool:
     """Send one message on every configured channel. The phone channel needs a person: ``user_id``, else the owner of
-    ``book``, else the ops account; with none of these the push is dropped (Telegram, a single operator channel, still
-    goes). Returns whether it went out anywhere; never raises."""
+    ``book``, else the ops account. A *desk* message (neither given) that the ops account cannot receive falls back to
+    every phone on the desk - see ``_desk_fallback``. A message about one book stays with that book's owner: it is
+    somebody's position, not desk news, so an unreachable owner is logged and dropped, never fanned out.
+    Returns whether it went out anywhere; never raises."""
     if not configured():
         logger.info("idx notify: no channel configured (%s or telegram); dropped: %s", push.SA_ENV, text[:120])
         return False
     sent = False
     if push.configured():
+        desk = user_id is None and book is None
         target = user_id or owner_of(book) or ops_user_id()
+        t, b = split_title(text, title)
+        payload = data or {"route": "/m"}
         if target:
-            t, b = split_title(text, title)
-            r = push.broadcast(t, b, data or {"route": "/m"}, sender=push_sender, user_id=target)
+            r = push.broadcast(t, b, payload, sender=push_sender, user_id=target)
+            if desk and r.get("devices") == 0 and not r.get("error"):       # that account has no phone (not a db hiccup)
+                r = _desk_fallback(t, b, payload, push_sender, why=f"the ops account ({os.environ.get(OPS_ENV)}) has no phone registered")
+            sent = sent or r.get("sent", 0) > 0
+        elif desk:
+            r = _desk_fallback(t, b, payload, push_sender, why=f"{OPS_ENV} names no account on this desk")
             sent = sent or r.get("sent", 0) > 0
         else:
             logger.info("idx notify: no account to push to (book=%s, %s unset); dropped: %s", book, OPS_ENV, text[:80])
@@ -124,15 +133,51 @@ def send(text: str, *, title: str | None = None, data: dict[str, Any] | None = N
     return sent
 
 
-def on_alert(severity: str, job: str | None, message: str, *, sender: Sender | None = None, push_sender: push.Sender | None = None) -> bool:
-    """Called by ``runlog.alert``: push the alerts that need a human, drop the rest. A ``book:X`` / ``ticket:X`` alert goes
-    to X's owner (and opens that book); a desk alert goes to the ops account."""
+def _desk_fallback(title: str, body: str, data: dict[str, Any], push_sender: push.Sender | None, *, why: str) -> dict[str, Any]:
+    """Desk news (a dead feed, a failed job) with no reachable ops phone: send it to every phone on the desk instead.
+    On 2026-09-24 the feed was down from 08:58 to 09:39 and raised twelve alerts; every push was dropped in silence
+    because the one registered phone was signed in as a second account, so the desk found out by reading the table."""
+    logger.warning("idx notify: desk push to every phone - %s: %s", why, title)
+    return push.broadcast(title, body, data, sender=push_sender, user_id=None)
+
+
+def on_alert(severity: str, job: str | None, message: str, *, sender: Sender | None = None, push_sender: push.Sender | None = None,
+             kind: str | None = None, strategy: str | None = None, book: str | None = None, user_id: str | None = None) -> bool:
+    """Called by ``runlog.alert``: push the alerts that need a human, drop the rest. The typed fields win when the bus
+    supplies them (``book``, ``user_id``); otherwise the older ``book:X`` / ``ticket:X`` job convention is read as before.
+    An execution read is never pushed - it is true for fifteen seconds, which is useless as a notification and would
+    buzz a pocket every five seconds through the open - and the person's own mutes and quiet hours are honoured here,
+    at the channel, never by dropping the row from the bus."""
     if severity not in PUSH_SEVERITIES or not configured():
         return False
-    book = job.split(":", 1)[1] if job and job.split(":", 1)[0] in ("book", "ticket") and ":" in job else None
+    if kind == "exec":                                                     # by design: the stream carries these, not a phone
+        return False
+    if book is None and job and job.split(":", 1)[0] in ("book", "ticket") and ":" in job:
+        book = job.split(":", 1)[1]
     route = f"/m/book?book={book}" if book else "/m/more"
-    return send(f"[{severity.upper()}] {job or 'idx'}\n{message}", data={"route": route, "kind": "alert", "severity": severity, "job": job or ""},
-                sender=sender, push_sender=push_sender, book=book)
+    if kind and strategy:
+        route = f"/m/strategies/{strategy}"
+    target = user_id or owner_of(book)
+    if target and not _wanted(target, kind, strategy):
+        logger.info("idx notify: %s muted %s/%s; not pushed", target, kind, strategy)
+        return False
+    data = {"route": route, "kind": kind or "alert", "severity": severity}
+    if strategy:
+        data["strategy"] = strategy
+    return send(f"[{severity.upper()}] {job or 'idx'}\n{message}", data=data,
+                sender=sender, push_sender=push_sender, book=book, user_id=user_id)
+
+
+def _wanted(user_id: str, kind: str | None, strategy: str | None) -> bool:
+    """The person's own preferences, read at the channel. Any failure delivers - a mute must never become a black hole."""
+    try:
+        from ..shared.db import get_connection
+        from . import prefs
+        with get_connection() as conn:
+            return prefs.allows(conn, user_id, kind, strategy)
+    except Exception:
+        logger.exception("idx notify: preference check failed; delivering")
+        return True
 
 
 def ticket_data(t: dict[str, Any]) -> dict[str, Any]:

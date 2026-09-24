@@ -315,7 +315,10 @@ def touch_check(conn: psycopg.Connection, now: datetime | None = None, force: bo
             who = f" · dipegang {','.join(held[code])}" if code in held else ""
             msg = f"{code} {word} Rp {ara:,.0f} ({d}){who}: terakhir Rp {f.get('last') or 0:,.0f}. {fact}"
             job = f"book:{held[code][0]}" if code in held else "ara"          # a held name's alert goes to that book's owner
-            if runlog.alert_once(conn, "warning", job, msg):
+            if runlog.alert_once(conn, "warning", job, msg, kind="ara", strategy="ara_sell", code=code,
+                                 book=(held[code][0] if code in held else None),
+                                 payload={"state": state, "ara": str(ara), "last": str(f.get("last") or ""), "date": str(d)},
+                                 dedupe_key=f"ara:{code}:{d}"):
                 new.append(row)
     logger.info("idx ara touch %s: %d touched, %d new", d, len(touches), len(new))
     return {"date": str(d), "checked": len(codes), "touches": touches, "new": [r["code"] for r in new]}

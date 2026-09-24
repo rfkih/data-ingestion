@@ -489,7 +489,8 @@ def run_feed_audit() -> None:
         logger.info("idx feed audit %s: %d names, %d under 95 %% coverage", d, len(rows), len(low))
         if low:
             worst = ", ".join(f"{r['code']} {float(r['coverage']) * 100:.0f}%" for r in sorted(low, key=lambda r: r["coverage"])[:8])
-            runlog.alert(conn, "warning", "feed", f"datafeed coverage under 95 % on {len(low)} names {d}: {worst}")
+            runlog.alert(conn, "warning", "feed", f"datafeed coverage under 95 % on {len(low)} names {d}: {worst}",
+                         kind="feed", payload={"date": str(d), "names": len(low)}, dedupe_key=f"feed:coverage:{d}")
 
 
 def run_macro() -> None:
@@ -620,6 +621,17 @@ def run_bar_backfill(days: int = 10) -> None:
         logger.info("idx bar backfill: healed=%s still missing=%s", [str(d) for d in healed], [str(d) for d in still])
 
 
+def run_regime_watch() -> None:
+    """One alert on the day the index regime turns (overlay.regime_change_alert); silence in between."""
+    from . import overlay as ov
+    with get_connection() as conn:
+        d = job_daily.latest_bar_date(conn)
+        if d is None:
+            return
+        r = ov.regime_change_alert(conn, d)
+    logger.info("idx regime watch %s: gate %s (was %s)%s", r["date"], r["state"], r["was"], " - alerted" if r["alert"] else "")
+
+
 def run_registry_refresh() -> None:
     """Keep the strategies page's numbers in step with research: re-import every record from the newest ROI scorecard
     study into idx.strategy_state. Cheap and idempotent; a page shows `refreshed_at` so a stale import is visible."""
@@ -713,6 +725,7 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_announce_recent, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="announce_recent")
     s.add_job(run_broker_snapshot, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="broker_snapshot")
     s.add_job(run_registry_refresh, CronTrigger(hour=20, minute=5, timezone=WIB), id="registry_refresh")
+    s.add_job(run_regime_watch, CronTrigger(day_of_week="mon-fri", hour=17, minute=10, timezone=WIB), id="regime_watch")
     s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=7, minute=30, timezone=WIB), id="macro")
     s.add_job(run_feed_watch, IntervalTrigger(minutes=5), id="feed_watch")
     s.add_job(run_token_guard, IntervalTrigger(minutes=10), id="token_guard")
