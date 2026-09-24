@@ -573,6 +573,31 @@ def bar_gaps(conn, days: int = 10) -> list[date]:
         return [r[0] for r in cur.fetchall()]
 
 
+_INDEX_GAPS_SQL = """
+SELECT DISTINCT b.trade_date
+  FROM idx.bar b
+ WHERE b.source = 'idx' AND b.trade_date BETWEEN %s AND %s
+   AND NOT EXISTS (SELECT 1 FROM idx.index_daily i
+                    WHERE i.trade_date = b.trade_date AND i.index_code = %s)
+ ORDER BY b.trade_date
+"""
+
+
+def index_gaps(conn, days: int = 10, index_code: str = "COMPOSITE") -> list[date]:
+    """Days that have IDX bars but no index close.
+
+    The chain fetches the index exactly once, right after the day's bars land, and then never comes
+    back: its next run returns early because `latest_bar_date` already equals today. So when IDX
+    publishes the index summary later than the stock summary the day is left without one, permanently.
+    2026-09-24: `daily` wrote 963 rows at 17:14:59, `index` ran two seconds later and returned zero,
+    and the same request at 21:00 returned all 45 indices."""
+    from psycopg.rows import tuple_row
+    end = today_wib()
+    with conn.cursor(row_factory=tuple_row) as cur:
+        cur.execute(_INDEX_GAPS_SQL, (end - timedelta(days=days), end, index_code))
+        return [r[0] for r in cur.fetchall()]
+
+
 def run_bar_backfill(days: int = 10) -> None:
     """Re-fetch the IDX days the chain never got. The chain only ever chases TODAY (it returns the moment today's bar is
     in), so a day IDX refuses leaves a hole nothing closes: on 2026-09-23 a Cloudflare challenge ran from 16:29 into the
@@ -581,6 +606,7 @@ def run_bar_backfill(days: int = 10) -> None:
     that lifts overnight heals itself; one query and no network when there is nothing to heal. Features are not recomputed
     here - the next daily chain rebuilds them with its 45-day lookback, which covers anything this fills."""
     with get_connection() as conn:
+        _heal_index(conn, days)
         gaps = bar_gaps(conn, days)
         if not gaps:
             return
@@ -656,6 +682,20 @@ def run_regime_watch() -> None:
     logger.info("idx regime watch %s: gate %s (was %s)%s", r["date"], r["state"], r["was"], " - alerted" if r["alert"] else "")
 
 
+def run_signal_board() -> None:
+    """Record what each of the five best strategies said today, so the daily screen has a history and the
+    operator gets one alert per strategy instead of having to open five pages. Entries only; a book's own
+    rows are written by that book's run and are not touched here."""
+    from . import signalboard
+    with get_connection() as conn:
+        d = job_daily.latest_bar_date(conn)
+        if d is None:
+            return
+        res = signalboard.record(conn, d)
+    done = ", ".join(f"{r['strategy']}={r.get('rows', 0)}" for r in res["recorded"])
+    logger.info("idx signal board %s: %s", res["as_of"], done or "nothing")
+
+
 def run_registry_refresh() -> None:
     """Keep the strategies page's numbers in step with research: re-import every record from the newest ROI scorecard
     study into idx.strategy_state. Cheap and idempotent; a page shows `refreshed_at` so a stale import is visible."""
@@ -663,6 +703,22 @@ def run_registry_refresh() -> None:
     with get_connection() as conn:
         res = registry.refresh_scorecard(conn)
     logger.info("idx registry refresh: study=%s written=%s with_record=%s", res.get("study"), res.get("written"), res.get("with_record"))
+
+
+def _heal_index(conn, days: int) -> None:
+    """Fetch the index for any recent day whose bars are in but whose index never arrived."""
+    missing = index_gaps(conn, days)
+    if not missing:
+        return
+    logger.info("idx bar backfill: %d day(s) with bars but no index %s", len(missing), [str(d) for d in missing])
+    with IdxClient() as cl:
+        for d in missing:
+            try:
+                r = job_index.run(conn, cl, d)
+            except (CircuitOpen, BudgetExceeded) as e:
+                logger.warning("idx index backfill stopped at %s: %s", d, e)
+                return
+            logger.info("idx index backfill %s %s rows=%s", d, r.status, r.rows_out)
 
 
 def run_alert_sweep(days: int = 3) -> None:
@@ -749,6 +805,7 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_announce_recent, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="announce_recent")
     s.add_job(run_broker_snapshot, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="broker_snapshot")
     s.add_job(run_registry_refresh, CronTrigger(hour=20, minute=5, timezone=WIB), id="registry_refresh")
+    s.add_job(run_signal_board, CronTrigger(day_of_week="mon-fri", hour=20, minute=15, timezone=WIB), id="signal_board")
     s.add_job(run_regime_watch, CronTrigger(day_of_week="mon-fri", hour=17, minute=10, timezone=WIB), id="regime_watch")
     s.add_job(run_open_window_subscribe, CronTrigger(day_of_week="mon-fri", hour=8, minute=55, timezone=WIB), id="open_window_subscribe")
     s.add_job(run_open_window, CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone=WIB), id="open_window",

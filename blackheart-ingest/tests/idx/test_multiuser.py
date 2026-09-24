@@ -224,7 +224,12 @@ def test_one_persons_alerts_and_preferences_are_their_own(env) -> None:
     try:
         seen = {a["id"] for a in c.get("/idx/alerts?limit=200", headers=_as(env, ana)).json()}
         assert mine in seen and desk in seen and theirs not in seen
-        assert {a["id"] for a in c.get("/idx/alerts?limit=200&kind=feed", headers=_as(env, ana)).json()} == {desk}
+        # Only against the three rows this test made: the desk it runs on has real open alerts of its own
+        # (a live `kind=feed` coverage warning on 2026-09-24), and asserting the filter returns nothing
+        # else makes the test pass on an empty database and fail on a working one.
+        made = {mine, theirs, desk}
+        feed_ids = {a["id"] for a in c.get("/idx/alerts?limit=200&kind=feed", headers=_as(env, ana)).json()}
+        assert feed_ids & made == {desk}
         assert all(a["id"] > mine for a in c.get(f"/idx/alerts?limit=200&since={mine}", headers=_as(env, ana)).json())
 
         # preferences are per person, and unmuting removes the row rather than storing a false

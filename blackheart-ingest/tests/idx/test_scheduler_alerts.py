@@ -94,3 +94,31 @@ def test_bar_gaps_finds_a_failed_day_and_ignores_a_holiday(db) -> None:
             cur.execute("DELETE FROM idx.ingest_run WHERE job = 'daily' AND run_key = ANY(%s)",
                         ([failed_day.isoformat(), holiday.isoformat()],))
         db.commit()
+
+
+def test_index_gaps_finds_a_day_whose_bars_landed_without_an_index(db) -> None:
+    """The chain fetches the index once, right after the bars, and never returns - its next run exits
+    early because `latest_bar_date` already equals today. So a day whose index IDX published late is
+    left without one for good (2026-09-24: bars at 17:14:59, index zero rows two seconds later, all 45
+    indices available at 21:00). The backfill has to notice bars-without-an-index, not just no-bars."""
+    import datetime as dt
+    day = dt.date(2026, 3, 19)                                            # a holiday: no bars and no index in the db
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM idx.bar WHERE trade_date = %s AND code = 'ZZTEST'", (day,))
+        cur.execute("""INSERT INTO idx.bar (code, trade_date, source, basis, close, volume, value)
+                       VALUES ('ZZTEST', %s, 'idx', 'split_only', 100, 1, 100)""", (day,))
+    db.commit()
+    try:
+        days = (dt.date.today() - day).days + 1
+        assert day in scheduler.index_gaps(db, days=days), "a bar with no index for its day is a gap"
+        # and a day that has both is not a gap
+        with db.cursor() as cur:
+            cur.execute("SELECT max(trade_date) AS d FROM idx.index_daily WHERE index_code = 'COMPOSITE'")
+            row = cur.fetchone()
+        complete = row["d"] if isinstance(row, dict) else row[0]
+        if complete:
+            assert complete not in scheduler.index_gaps(db, days=days)
+    finally:
+        with db.cursor() as cur:
+            cur.execute("DELETE FROM idx.bar WHERE trade_date = %s AND code = 'ZZTEST'", (day,))
+        db.commit()
