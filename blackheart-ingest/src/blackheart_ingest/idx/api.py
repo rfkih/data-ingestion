@@ -351,6 +351,31 @@ def make_router(require_token) -> APIRouter:
         return {"strategy": {k: v for k, v in meta.items() if k != "history"},
                 "history": [{k: (v.isoformat() if isinstance(v, date | datetime) else v) for k, v in r.items()} for r in rows]}
 
+    @router.get("/registry")
+    def registry_list() -> dict[str, Any]:
+        """The desk registry: every edge the desk runs, its rule and falsifier, the books following it, and the record
+        imported from the newest ROI scorecard study. A strategy without a study shows no performance figure."""
+        from . import registry
+        with get_connection() as conn:
+            return registry.desk(conn)
+
+    @router.get("/registry/{key}")
+    def registry_detail(key: str) -> dict[str, Any]:
+        from . import registry
+        with get_connection() as conn:
+            out = registry.detail(conn, key)
+        if out is None:
+            raise HTTPException(status_code=404, detail="unknown strategy")
+        return out
+
+    @router.post("/registry/refresh", dependencies=[Depends(require_token)])
+    def registry_refresh(c: Caller = _CALLER) -> dict[str, Any]:
+        """Re-import every record from the newest roi_scorecard study (also a nightly job)."""
+        service_only(c, "refreshing the strategy registry")
+        from . import registry
+        with get_connection() as conn:
+            return registry.refresh_scorecard(conn)
+
     @router.get("/card/{code}")
     def card_get(code: str, as_of: str | None = None) -> dict[str, Any]:
         from . import card

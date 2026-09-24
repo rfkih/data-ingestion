@@ -799,6 +799,48 @@ def cmd_notify(a: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_registry(a: argparse.Namespace) -> int:
+    """The desk registry: what the desk runs, its record, and where the number came from."""
+    from . import registry
+    with get_connection() as conn:
+        if a.sub == "refresh":
+            res = registry.refresh_scorecard(conn)
+            print(f"imported {res['written']} entries ({res['with_record']} with a record) from study #{res['study']} ({res.get('as_of')})"
+                  if res["study"] else "no roi_scorecard study stored; nothing imported")
+            return 0 if res["study"] else 1
+        if a.sub == "show":
+            e = registry.detail(conn, a.key or "")
+            if e is None:
+                print(f"unknown strategy {a.key!r}; one of {', '.join(registry.BY_KEY)}")
+                return 1
+            sc = e["scorecard"] or {}
+            print(f"{e['label']}  [{e['status']} · {e['family']} · {e['cadence']}]")
+            print(f"  rule       {e['rule']}")
+            print(f"  falsifier  {e['falsifier'] or '-'}")
+            print(f"  runs in    {e['runs_in']}")
+            if sc.get("cagr_pct") is not None:
+                print(f"  record     {sc['cagr_pct']:+.1f} %/yr · Sharpe {sc.get('sharpe')} · mDD {sc.get('mdd_pct')} % · {sc.get('window')}")
+            if sc.get("effect"):
+                print(f"  effect     {sc['effect']}")
+            if sc.get("verdict"):
+                print(f"  verdict    {sc['verdict']}")
+            print(f"  books      {', '.join(b['book'] for b in e['books']) or '-'}")
+            print(f"  evidence   {', '.join(f'#{s['id']} {s['name']}' for s in e['studies']) or '-'}")
+            print(f"  refreshed  {e['refreshed_at'] or 'never - run: idx registry refresh'}")
+            return 0
+        d = registry.desk(conn)
+        print(f"{len(d['strategies'])} strategies · records from study #{d['scorecard_study']} ({d['scorecard_as_of']})")
+        for e in d["strategies"]:
+            sc = e["scorecard"] or {}
+            rec = (f"{sc['cagr_pct']:+6.1f} %/yr  Sharpe {sc.get('sharpe'):<5} mDD {sc.get('mdd_pct')} %"
+                   if sc.get("cagr_pct") is not None else (sc.get("effect") or "no record")[:44])
+            print(f"  {e['key']:<22} {e['status']:<10} {e['family']:<11} {rec:<48} {', '.join(b['book'] for b in e['books'])}")
+        if d["closed"]["families"]:
+            print()
+            print(f"closed by research: {'; '.join(d['closed']['families'])}")
+        return 0
+
+
 def cmd_broker(a: argparse.Namespace) -> int:
     import json
 
@@ -1347,6 +1389,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("text", nargs="?")
     p.add_argument("--status", action="store_true")
     p.set_defaults(fn=cmd_notify)
+    p = sub.add_parser("registry", help="the desk registry: list (every strategy with its imported record) | show KEY | refresh (re-import records from the newest roi_scorecard study)")
+    p.add_argument("sub", choices=["list", "show", "refresh"], nargs="?", default="list")
+    p.add_argument("key", nargs="?")
+    p.set_defaults(fn=cmd_registry)
     p = sub.add_parser("broker", help="broker summary feed (Stockbit data account): capture [--codes] [--detail] (all rolling windows 1D/1M/3M/1Y + the buyer->seller matrix, whole market; --detail = investor split, all boards, lots on the liquid names) | day [--codes|--universe] (today's 1-day snapshot only) | refresh (rotate the token) | probe CODE | backfill [--codes|--universe] (legacy, Pro-only now) | show CODE | reparse [--codes] | universe")
     p.add_argument("sub", choices=["capture", "day", "refresh", "probe", "backfill", "show", "reparse", "universe"])
     p.add_argument("--detail", action="store_true", help="capture: the 48-view matrix (investor ALL/FOREIGN/DOMESTIC x board REGULER/ALL x value/lots) instead of the 4 core views")
