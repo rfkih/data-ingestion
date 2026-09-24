@@ -94,7 +94,8 @@ def alert(conn: psycopg.Connection, severity: str, job: str | None, message: str
         row = cur.fetchone()
         alert_id = int(next(iter(row.values())) if isinstance(row, dict) else row[0])
     conn.commit()
-    logger.log(logging.CRITICAL if severity == "critical" else logging.WARNING, "idx alert [%s] %s: %s", severity, job, message)
+    level = {"critical": logging.CRITICAL, "warning": logging.WARNING}.get(severity, logging.INFO)
+    logger.log(level, "idx alert [%s] %s: %s", severity, job, message)      # an info row is a diary line, not a warning
     if notify_channels:
         try:                                                               # warning/critical also go out (Telegram), best effort
             from . import notify
@@ -149,13 +150,26 @@ def sweep_info(conn: psycopg.Connection, days: int = 3) -> int:
 
 
 ALERT_COLS = ["id", "ts", "severity", "job", "message", "kind", "strategy", "code", "book", "user_id", "payload",
-              "dedupe_key", "valid_until"]
+              "dedupe_key", "valid_until", "acknowledged_at"]
+
+# A person sees the desk's own rows plus anything about their books or addressed to them - never another account's.
+# The older ``book:X`` / ``ticket:X`` job convention is read too, so rows that predate the typed columns scope the
+# same way. Done in SQL so LIMIT counts the rows the person may see, not the rows that exist (review 2026-09-24).
+SCOPE_SQL = ("(user_id IS NULL OR user_id = %s) AND ("
+             "COALESCE(book, CASE WHEN split_part(job, ':', 1) IN ('book', 'ticket') THEN split_part(job, ':', 2) END) IS NULL"
+             " OR COALESCE(book, split_part(job, ':', 2)) = ANY(%s))")
 
 
 def open_alerts(conn: psycopg.Connection, limit: int = 50, *, kind: str | None = None, strategy: str | None = None,
-                code: str | None = None, since: int | None = None, include_expired: bool = False) -> list[dict[str, Any]]:
+                code: str | None = None, since: int | None = None, include_expired: bool = False,
+                user_id: str | None = None, books: list[str] | None = None) -> list[dict[str, Any]]:
     """Open (unacknowledged) alerts, newest first. An expired row (valid_until in the past) is left out unless asked
-    for: an execution read that was true fifteen seconds ago is not news, it is clutter."""
+    for: an execution read that was true fifteen seconds ago is not news, it is clutter.
+
+    ``since`` is an alert id - what a page asks for after a stream gap: rows newer than it by id, AND rows whose ``ts``
+    is newer than that row's. A dedupe key updates a row in place and keeps its id, so ``id > since`` alone would miss
+    an execution read that changed (review 2026-09-24). ``user_id`` scopes to a person, with ``books`` = their book
+    ids; None is a service that sees everything."""
     where = ["acknowledged_at IS NULL"]
     params: list[Any] = []
     for col, val in (("kind", kind), ("strategy", strategy), ("code", code)):
@@ -163,10 +177,13 @@ def open_alerts(conn: psycopg.Connection, limit: int = 50, *, kind: str | None =
             where.append(f"{col} = %s")
             params.append(val)
     if since is not None:
-        where.append("id > %s")
-        params.append(since)
+        where.append("(id > %s OR ts > (SELECT a2.ts FROM idx.alert a2 WHERE a2.id = %s))")
+        params.extend([since, since])
     if not include_expired:
         where.append("(valid_until IS NULL OR valid_until > now())")
+    if user_id is not None:
+        where.append(SCOPE_SQL)
+        params.extend([user_id, list(books or [])])
     params.append(limit)
     with conn.cursor() as cur:
         cur.execute(f"SELECT {', '.join(ALERT_COLS)} FROM idx.alert WHERE {' AND '.join(where)} "

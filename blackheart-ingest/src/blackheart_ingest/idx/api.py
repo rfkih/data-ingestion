@@ -115,11 +115,10 @@ def make_router(require_token) -> APIRouter:
         `valid_until` has passed) are left out."""
         from . import book as bk
         with get_connection() as conn:
-            rows = runlog.open_alerts(conn, min(max(limit, 1), 500), kind=kind, strategy=strategy, code=code, since=since)
-            if c.scoped:
-                mine = set(bk.list_books(conn, c.user_id, include_archived=True))
-                rows = [a for a in rows if stream.visible_to(a, books=mine, user_id=c.user_id, scoped=True)]
-            return rows
+            # scoped in SQL, so `limit` counts the rows this person may see rather than the rows that exist
+            books = list(bk.list_books(conn, c.user_id, include_archived=True)) if c.scoped else None
+            return runlog.open_alerts(conn, min(max(limit, 1), 500), kind=kind, strategy=strategy, code=code, since=since,
+                                      user_id=c.user_id if c.scoped else None, books=books)
 
     @router.get("/alerts/prefs")
     def alert_prefs_get(c: Caller = _CALLER) -> dict[str, Any]:
@@ -166,8 +165,9 @@ def make_router(require_token) -> APIRouter:
                 last = int(request.headers.get("last-event-id") or 0) or None
         from . import book as bk
         with get_connection() as conn:
-            replay = list(reversed(runlog.open_alerts(conn, stream.REPLAY_MAX, since=last))) if last else []
             books = set(bk.list_books(conn, c.user_id, include_archived=True)) if c.scoped else None
+            replay = list(reversed(runlog.open_alerts(conn, stream.REPLAY_MAX, since=last, user_id=c.user_id if c.scoped else None,
+                                                      books=list(books or [])))) if last else []
         h = stream.hub()
         queue = h.subscribe()
         await h.wait_ready(timeout=2.0)

@@ -276,3 +276,61 @@ def test_status_says_whether_this_worker_is_listening() -> None:
     body = _route("/idx/stream/status")()
     assert set(body) == {"connected", "subscribers", "last_id", "dropped"}
     assert isinstance(body["connected"], bool) and body["subscribers"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_an_acknowledgement_goes_out_as_its_own_event() -> None:
+    """The trigger fires on UPDATE too; a page must take an acknowledged row DOWN, not put it back."""
+    q: asyncio.Queue = asyncio.Queue()
+    gen = stream.events(q, replay=[], kinds=None, books=None, user_id=None, scoped=False, heartbeat=5.0)
+    await anext(gen)                                                  # hello
+    await q.put({"id": 9, "kind": "signal", "acknowledged_at": None, "book": None, "user_id": None, "job": None})
+    assert "event: alert" in (await anext(gen))
+    await q.put({"id": 9, "kind": "signal", "acknowledged_at": datetime.now(UTC), "book": None, "user_id": None, "job": None})
+    assert "event: ack" in (await anext(gen))
+    await gen.aclose()
+
+
+def test_replay_by_since_catches_a_row_that_was_updated_in_place(conn) -> None:
+    """A dedupe key keeps the row's id, so `id > since` alone would miss an execution read that changed."""
+    _clean(conn)
+    try:
+        first = runlog.alert(conn, "info", "test:bus", "leaning to the bid", kind="exec", dedupe_key="test:exec:9",
+                             notify_channels=False)
+        anchor = runlog.alert(conn, "info", "test:bus", "anchor", kind="ops", notify_channels=False)   # the page's last id
+        assert first < anchor
+        assert first not in {r["id"] for r in runlog.open_alerts(conn, 50, since=anchor)}
+        runlog.alert(conn, "info", "test:bus", "take the offer", kind="exec", dedupe_key="test:exec:9",
+                     notify_channels=False)                                              # same id, newer ts
+        got = {r["id"]: r for r in runlog.open_alerts(conn, 50, since=anchor)}
+        assert first in got and got[first]["message"] == "take the offer"
+    finally:
+        _clean(conn)
+
+
+def test_scoping_happens_in_sql_so_limit_counts_what_the_person_may_see(conn) -> None:
+    _clean(conn)
+    try:
+        for i in range(5):
+            runlog.alert(conn, "info", "test:bus", f"someone else {i}", kind="signal", book="live-other",
+                         notify_channels=False)
+        mine = runlog.alert(conn, "info", "test:bus", "mine", kind="signal", book="paper_mine", notify_channels=False)
+        legacy = runlog.alert(conn, "info", "test:bus", "legacy convention", notify_channels=False)
+        with conn.cursor() as cur:                                     # the pre-bus job convention, still honoured
+            cur.execute("UPDATE idx.alert SET job = 'book:paper_mine' WHERE id = %s", (legacy,))
+        conn.commit()
+        desk = runlog.alert(conn, "info", "test:bus", "desk", kind="feed", notify_channels=False)
+        addressed = runlog.alert(conn, "info", "test:bus", "for u1", kind="signal", user_id="u1", notify_channels=False)
+        other_user = runlog.alert(conn, "info", "test:bus", "for u2", kind="signal", user_id="u2", notify_channels=False)
+        rows = runlog.open_alerts(conn, 3, user_id="u1", books=["paper_mine"])   # limit 3 of what u1 may see
+        ids = [r["id"] for r in rows]
+        assert len(ids) == 3 and set(ids) <= {mine, legacy, desk, addressed}     # newest three of MINE, not of all rows
+        assert other_user not in ids and not any(r["book"] == "live-other" for r in rows)
+        everything = {r["id"] for r in runlog.open_alerts(conn, 50, user_id="u1", books=["paper_mine"])
+                      if r["job"] in ("test:bus", "book:paper_mine")}
+        assert everything == {mine, legacy, desk, addressed}
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM idx.alert WHERE job = 'book:paper_mine' AND message = 'legacy convention'")
+        conn.commit()
+        _clean(conn)

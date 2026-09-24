@@ -61,12 +61,20 @@ def in_window(now: datetime | None = None) -> bool:
     return n.weekday() < 5 and WINDOW_OPEN <= _hhmm(n) < WINDOW_CLOSE
 
 
+TICKET_LOOKBACK_DAYS = 7        # an issued ticket older than this with lines still open is stuck, not live
+
+
 def open_tickets(conn: psycopg.Connection, d: date) -> list[dict[str, Any]]:
-    """Today's issued tickets with at least one line still to work, for books that are not halted."""
+    """Issued tickets with at least one line still to work, for books that are not halted.
+
+    Not "today's" tickets: a trend ticket is drafted after the close and carries the bar's date - yesterday's - because
+    it is filled at the next open. Filtering on ticket_date = today found none of them (caught in review 2026-09-24).
+    A gap-fade ticket is dated today; both belong in the window. The lookback only keeps a forgotten ticket from
+    weeks ago out of the loop."""
     rows = _rows(conn, """
-        SELECT t.id, t.book FROM idx.ticket t
-         WHERE t.status = 'issued' AND t.ticket_date = %s
-         ORDER BY t.id""", (d,), ["id", "book"])
+        SELECT t.id, t.book, t.mode FROM idx.ticket t
+         WHERE t.status = 'issued' AND t.ticket_date BETWEEN %s AND %s
+         ORDER BY t.id""", (d - timedelta(days=TICKET_LOOKBACK_DAYS), d), ["id", "book", "mode"])
     out = []
     for r in rows:
         try:
@@ -77,9 +85,23 @@ def open_tickets(conn: psycopg.Connection, d: date) -> list[dict[str, Any]]:
             continue
         t = ticket.load(conn, r["id"])
         if t and any(ln["status"] in ("open", "partial") for ln in t["lines"]):
-            out.append({"id": t["id"], "book": t["book"], "codes": sorted({ln["code"] for ln in t["lines"]
-                                                                          if ln["status"] in ("open", "partial")})})
+            out.append({"id": t["id"], "book": t["book"], "mode": r["mode"],
+                        "codes": sorted({ln["code"] for ln in t["lines"] if ln["status"] in ("open", "partial")})})
     return out
+
+
+def ensure_subscribed(conn: psycopg.Connection, codes: list[str]) -> int:
+    """Put any ticket name not yet on the feed onto it. Called every pass, because a live ticket is issued by a person
+    (two-key) and may only exist after 08:55 - without this its names would read "no book yet" all window long."""
+    if not codes:
+        return 0
+    have = {r["code"] for r in _rows(conn, "SELECT code FROM idx.feed_symbol WHERE enabled AND code = ANY(%s)",
+                                     (codes,), ["code"])}
+    missing = sorted(set(codes) - have)
+    if missing:
+        fs.set_symbols(conn, missing, reason="ticket")
+        logger.info("idx open window: subscribed %d late name(s): %s", len(missing), " ".join(missing))
+    return len(missing)
 
 
 def subscribe(conn: psycopg.Connection, d: date | None = None) -> dict[str, Any]:
@@ -159,8 +181,13 @@ def tick_once(conn: psycopg.Connection, state: dict[int, dict[str, Any]], d: dat
     so an unchanged book stays off the bus. -> what happened, for the log."""
     now = now or datetime.now(UTC)
     d = d or now.astimezone(WIB).date()
-    out = {"tickets": 0, "lines": 0, "emitted": 0, "stale_feed": False}
-    for t_meta in open_tickets(conn, d):
+    out = {"tickets": 0, "lines": 0, "emitted": 0, "stale_feed": False, "subscribed": 0}
+    tickets = open_tickets(conn, d)
+    try:
+        out["subscribed"] = ensure_subscribed(conn, sorted({c for t in tickets for c in t["codes"]}))
+    except Exception:
+        logger.exception("idx open window: late subscribe failed; reading what the feed has")
+    for t_meta in tickets:
         try:
             r = execwatch.read(conn, t_meta["id"], d)
         except Exception:
@@ -170,8 +197,7 @@ def tick_once(conn: psycopg.Connection, state: dict[int, dict[str, Any]], d: dat
         if not r["feed"]["live"] and (r["feed"]["stale_s"] is None or r["feed"]["stale_s"] > STALE_FEED_S):
             out["stale_feed"] = True
             continue                                                  # a quiet feed says nothing about the book
-        t_full = ticket.load(conn, t_meta["id"])
-        strategy = _strategy_of((t_full or {}).get("mode"))
+        strategy = _strategy_of(t_meta.get("mode"))
         for ln in r["lines"]:
             out["lines"] += 1
             prev = state.get(ln["id"])

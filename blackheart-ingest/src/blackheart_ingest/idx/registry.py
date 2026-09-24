@@ -388,15 +388,16 @@ def today_for(conn: psycopg.Connection, key: str) -> dict[str, Any]:
     (during the open window that includes the live placement reads). Nothing here is a decision - the signals are what
     the rule saw, the alerts are what the desk was told."""
     from . import runlog, signals
-    rows = signals.latest(conn, key, limit=40)
-    as_of = rows[0]["as_of"] if rows else None
-    rows = [r for r in rows if r["as_of"] == as_of]
+    last = _rows(conn, "SELECT max(as_of) AS d FROM idx.strategy_signal WHERE strategy = %s", (key,), ["d"])
+    as_of = last[0]["d"] if last and last[0]["d"] else None
+    rows = signals.latest(conn, key, as_of=as_of, limit=500) if as_of else []   # the whole day, not its first forty
     alerts = runlog.open_alerts(conn, 40, strategy=key)
     return {"as_of": _iso(as_of),
             "signals": [{**r, "as_of": _iso(r["as_of"]), "created_at": _iso(r["created_at"]),
                          "ref_price": (str(r["ref_price"]) if r["ref_price"] is not None else None),
                          "size_pct": (str(r["size_pct"]) if r["size_pct"] is not None else None)} for r in rows],
-            "alerts": [{**a, "ts": _iso(a["ts"]), "valid_until": _iso(a["valid_until"])} for a in alerts]}
+            "alerts": [{**a, "ts": _iso(a["ts"]), "valid_until": _iso(a["valid_until"]),
+                        "acknowledged_at": _iso(a.get("acknowledged_at"))} for a in alerts]}
 
 
 def desk(conn: psycopg.Connection) -> dict[str, Any]:

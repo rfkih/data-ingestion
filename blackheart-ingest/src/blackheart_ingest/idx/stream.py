@@ -212,4 +212,6 @@ async def events(queue: asyncio.Queue[dict[str, Any] | None], *, replay: list[di
             yield sse("gap", json.dumps({"reason": "the connection fell behind; reconnect with ?since="}))
             continue
         if wanted(item, kinds) and visible_to(item, books=books, user_id=user_id, scoped=scoped):
-            yield sse("alert", row_json(item), event_id=int(item["id"]))
+            # the trigger fires on UPDATE too, so an acknowledgement lands here as well; a page must take that row
+            # DOWN, not put it back - so it goes out as its own event (review 2026-09-24)
+            yield sse("ack" if item.get("acknowledged_at") else "alert", row_json(item), event_id=int(item["id"]))

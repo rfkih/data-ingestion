@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 import pytest
@@ -61,7 +61,7 @@ def test_only_a_changed_read_goes_on_the_bus(conn, monkeypatch) -> None:
     reads = {"place": "rest_bid"}
 
     def fake_open_tickets(_conn, _d):
-        return [{"id": 41, "book": "paper_trend", "codes": ["BBCA"]}]
+        return [{"id": 41, "book": "paper_trend", "mode": "trend", "codes": ["BBCA"]}]
 
     def fake_read(_conn, _tid, _d):
         return {"ticket": 41, "book": "paper_trend", "status": "issued", "date": str(_d),
@@ -72,8 +72,8 @@ def test_only_a_changed_read_goes_on_the_bus(conn, monkeypatch) -> None:
                            "note": "the book leans to the bid"}]}
 
     monkeypatch.setattr(ow, "open_tickets", fake_open_tickets)
+    monkeypatch.setattr(ow, "ensure_subscribed", lambda _c, codes: 0)     # never touch the real feed table from a test
     monkeypatch.setattr(ow.execwatch, "read", fake_read)
-    monkeypatch.setattr(ow.ticket, "load", lambda _c, _i: {"id": 41, "book": "paper_trend", "mode": "trend"})
     monkeypatch.setattr(ow.runlog, "alert", lambda *a, **k: (sent.append(k), len(sent))[1])
 
     state: dict[int, dict] = {}
@@ -102,7 +102,8 @@ def test_only_a_changed_read_goes_on_the_bus(conn, monkeypatch) -> None:
 
 def test_a_stale_feed_says_nothing_about_the_book(conn, monkeypatch) -> None:
     sent: list[dict] = []
-    monkeypatch.setattr(ow, "open_tickets", lambda _c, _d: [{"id": 7, "book": "paper_trend", "codes": ["BBCA"]}])
+    monkeypatch.setattr(ow, "open_tickets", lambda _c, _d: [{"id": 7, "book": "paper_trend", "mode": "trend", "codes": ["BBCA"]}])
+    monkeypatch.setattr(ow, "ensure_subscribed", lambda _c, codes: 0)
     monkeypatch.setattr(ow.execwatch, "read", lambda _c, _t, _d: {
         "ticket": 7, "book": "paper_trend", "status": "issued", "date": str(_d),
         "feed": {"live": False, "stale_s": 400, "last_at": None},
@@ -137,3 +138,34 @@ def test_run_window_stops_when_there_is_nothing_left_to_work(conn, monkeypatch) 
     res = ow.run_window(conn, until=datetime(2099, 1, 1, tzinfo=UTC), poll_s=0, sleep=lambda _s: None,
                         now_fn=lambda: datetime(2026, 9, 24, 2, 5, tzinfo=UTC))
     assert res["stopped"] == "nothing left to work" and res["passes"] == 1
+
+
+def test_a_trend_ticket_is_dated_yesterday_and_still_belongs_in_the_window(conn, monkeypatch) -> None:
+    """The bug the review caught: a trend ticket is drafted after the close and carries the bar's date - the day BEFORE
+    the open it is filled at. Filtering on ticket_date = today found none of them."""
+    seen: dict = {}
+
+    def fake_rows(_conn, sql, params, cols):
+        seen["sql"], seen["params"] = sql, params
+        return [{"id": 141, "book": "paper_trend", "mode": "trend"}]
+    monkeypatch.setattr(ow, "_rows", fake_rows)
+    monkeypatch.setattr(ow.bk, "get_book", lambda _c, _b: {"book": "paper_trend", "status": "active"})
+    monkeypatch.setattr(ow.ticket, "load", lambda _c, _i: {"id": 141, "book": "paper_trend", "mode": "trend",
+                                                           "lines": [{"code": "AALI", "status": "open"},
+                                                                     {"code": "AYAM", "status": "filled"}]})
+    today = date(2026, 9, 22)
+    out = ow.open_tickets(conn, today)
+    lo, hi = seen["params"]
+    assert lo == today - timedelta(days=ow.TICKET_LOOKBACK_DAYS) and hi == today   # a window of days, not one day
+    assert "BETWEEN" in seen["sql"]
+    assert out == [{"id": 141, "book": "paper_trend", "mode": "trend", "codes": ["AALI"]}]   # only the open line
+
+
+def test_late_ticket_names_are_put_on_the_feed_every_pass(conn, monkeypatch) -> None:
+    """A live ticket is issued by a person and may only exist after 08:55; its names must still stream."""
+    calls: list = []
+    monkeypatch.setattr(ow, "_rows", lambda _c, sql, params, cols: [{"code": "BBCA"}])   # BBCA is already on the feed
+    monkeypatch.setattr(ow.fs, "set_symbols", lambda _c, codes, reason: calls.append((tuple(codes), reason)) or len(codes))
+    assert ow.ensure_subscribed(conn, ["BBCA", "TLKM", "ASII"]) == 2
+    assert calls == [(("ASII", "TLKM"), "ticket")]                # only the missing ones, tagged as the loop's own
+    assert ow.ensure_subscribed(conn, []) == 0 and len(calls) == 1
