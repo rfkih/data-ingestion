@@ -115,12 +115,17 @@ jobs:
           echo "SSH_HOST=${SSH_HOST}" >> "$GITHUB_ENV"
           SSH_USER=$(printf '%s' "${{ vars.VPS_USER }}" | tr -d '[:space:]')
           echo "SSH_USER=${SSH_USER}" >> "$GITHUB_ENV"
+          # A long `docker pull` sends nothing over the channel for minutes at a time, and on 2026-09-24 the
+          # deploy died at `client_loop: send disconnect: Broken pipe` after 4m30s of pulling - exit 255, the
+          # container never recreated. Keepalives hold the session open; ServerAliveCountMax x Interval is how
+          # long a genuinely dead link takes to be noticed.
+          echo "SSH_OPTS=-o ServerAliveInterval=20 -o ServerAliveCountMax=15 -o TCPKeepAlive=yes" >> "$GITHUB_ENV"
 
       - name: Capture rollback image
         run: |
           # FULL image ref, not just the tag: the pre-CI container ran a
           # locally-built image; a ghcr.io re-prefix would be unpullable.
-          PREV=$(ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" "docker inspect blackheart-inference --format '{{.Config.Image}}' 2>/dev/null || echo NONE")
+          PREV=$(ssh $SSH_OPTS -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" "docker inspect blackheart-inference --format '{{.Config.Image}}' 2>/dev/null || echo NONE")
           echo "PREV_IMAGE=${PREV:-NONE}" >> "$GITHUB_ENV"
           echo "Previous inference image: ${PREV}"
 
@@ -128,7 +133,7 @@ jobs:
         env:
           NEW_TAG: ${{ needs.build-image.outputs.sha_tag }}
         run: |
-          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+          ssh $SSH_OPTS -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
             "set -e && touch /home/starsky/blackheart/.env && grep -vE '^(INFERENCE_TAG|INFERENCE_IMAGE)=' /home/starsky/blackheart/.env > /tmp/.env.inf || true && echo 'INFERENCE_TAG=${NEW_TAG}' >> /tmp/.env.inf && mv /tmp/.env.inf /home/starsky/blackheart/.env"
           echo "NEW_TAG=${NEW_TAG}" >> "$GITHUB_ENV"
 
@@ -142,7 +147,7 @@ jobs:
           # secured binding; container-network consumers use the service
           # name. Artifacts path is /home/starsky/blackheart-artifacts (the
           # old blackheart-train/artifacts path was wrong - empty dir).
-          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+          ssh $SSH_OPTS -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
             "docker pull ghcr.io/${{ env.IMAGE_INFERENCE }}:${NEW_TAG} && \
              { docker rm -f blackheart-inference 2>/dev/null || true; \
                docker run -d --name blackheart-inference --restart unless-stopped \
@@ -156,14 +161,14 @@ jobs:
       - name: Inference healthcheck (with rollback on failure)
         run: |
           set +e
-          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+          ssh $SSH_OPTS -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
             'for i in $(seq 1 12); do curl -fsS http://127.0.0.1:8000/readyz >/dev/null && exit 0; sleep 10; done; exit 1'
           HEALTH=$?
           set -e
           if [ "$HEALTH" -ne 0 ]; then
             echo "::error::Inference healthcheck failed. Rolling back to ${PREV_IMAGE}."
             if [ "${PREV_IMAGE}" != "NONE" ]; then
-              ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+              ssh $SSH_OPTS -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
                 "docker rm -f blackheart-inference && docker run -d --name blackheart-inference --restart unless-stopped \
                  --network blackheart_default \
                  -p 127.0.0.1:8000:8000 \
@@ -178,7 +183,7 @@ jobs:
 
       - name: Verify ML artifacts present on VPS
         run: |
-          COUNT=$(ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+          COUNT=$(ssh $SSH_OPTS -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
             "find /home/starsky/blackheart-artifacts -name '*.pkl' 2>/dev/null | wc -l")
           echo "VPS artifact count: ${COUNT}"
           if [ "${COUNT:-0}" -eq 0 ]; then
@@ -190,7 +195,7 @@ jobs:
       - name: Prune stale Docker images
         if: success()
         run: |
-          ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
+          ssh $SSH_OPTS -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" \
             "docker image prune -af 2>&1 | tail -1"
 
       - name: Tag successful production deploy
