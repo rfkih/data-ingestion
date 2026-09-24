@@ -35,6 +35,11 @@ dependencies = [
     # as blackheart-train so binary compatibility is preserved when an
     # artifact moves between repos.
     "lightgbm>=4.5,<5",
+    # idx.co.id sits behind Cloudflare, which fingerprints the TLS + HTTP/2 handshake.
+    # libcurl-impersonate speaks a real browser's; plain curl and urllib are both
+    # challenged as of 2026-09-22 (see idx/client.py). Arrives transitively through
+    # yfinance today - declared here because the IDX data plane depends on it directly.
+    "curl_cffi>=0.7,<1",
     # Binance USDT-M futures liquidation stream (forceOrder accrual worker).
     # Already a uvicorn[standard] transitive, but we import it directly so
     # the dependency is explicit and pinned.

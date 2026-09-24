@@ -5,12 +5,19 @@ documented API. They sit behind Cloudflare, which occasionally answers a
 "Just a moment..." challenge page (HTTP 403, HTML) instead of JSON. The
 client therefore:
 
-* talks through ``curl`` (a subprocess, cookie jar in a temp file) when one is on the
-  PATH, else stdlib ``urllib`` - Cloudflare fingerprints the TLS handshake, not the
-  headers: ``httpx``/``requests`` were challenged from the start, ``urllib`` passed until
-  2026-09-14 and has been challenged since, while curl (Schannel on Windows) passes
-  (verified 2026-09-16: same headers, curl 200 vs urllib 403). ``INGEST_IDX_TRANSPORT``
-  = ``curl`` | ``urllib`` | ``auto`` (default) picks the transport,
+* talks through ``curl_cffi`` (libcurl-impersonate), which reproduces a real browser's TLS
+  handshake AND its HTTP/2 settings, falling back to a ``curl`` subprocess and then stdlib
+  ``urllib``. Cloudflare fingerprints the connection, not the headers, and it has tightened
+  twice: ``httpx``/``requests`` were challenged from the start, ``urllib`` passed until
+  2026-09-14, plain curl passed until 2026-09-22 and was challenged from 16:29 that day
+  (measured 2026-09-24: identical headers, every plain-curl request 403 - the whole site,
+  not just the API - while impersonate="chrome" returned all 963 rows over HTTP/3; neither
+  curl on that host had HTTP/2 at all, which is by itself a tell no browser sends). The
+  impersonation PROFILE matters as much as the library: ``chrome`` and ``safari`` passed,
+  the pinned older ``chrome124`` and ``edge101`` were still challenged, so the profile
+  tracks "current browser" and is worth re-checking when challenges come back.
+  ``INGEST_IDX_TRANSPORT`` = ``impersonate`` | ``curl`` | ``urllib`` | ``auto`` (default)
+  picks the transport, ``INGEST_IDX_IMPERSONATE`` the profile (default ``chrome``),
 * paces requests (``idx_rps``) and enforces a per-day request budget,
 * retries challenges / 5xx / non-JSON bodies with exponential backoff,
 * opens a circuit after N consecutive failures (one long pause, then raise),
@@ -186,11 +193,45 @@ def _curl_fetcher(timeout: float = 60.0) -> FetchFn | None:
     return fetch
 
 
+IMPERSONATE_ENV = "INGEST_IDX_IMPERSONATE"
+IMPERSONATE_DEFAULT = "chrome"                  # the moving "current Chrome" profile, not a pinned one - see the module docstring
+
+
+def _impersonate_fetcher(timeout: float = 60.0) -> FetchFn | None:
+    """Transport through ``curl_cffi``: libcurl-impersonate speaks a real browser's TLS handshake and HTTP/2 settings,
+    which is what Cloudflare actually measures. One session, so the challenge cookies it does hand out are reused.
+    None when the package is missing (it is a declared dependency; this only guards a half-installed environment)."""
+    try:
+        from curl_cffi import requests as cr
+    except ImportError:
+        return None
+    profile = os.environ.get(IMPERSONATE_ENV, "").strip() or IMPERSONATE_DEFAULT
+    proxy = os.environ.get("INGEST_IDX_PROXY", "").strip()
+    session = cr.Session(impersonate=profile, timeout=timeout,
+                         proxies={"http": proxy, "https": proxy} if proxy else None)
+    logger.info("idx client: impersonating %s%s", profile, f" via proxy {proxy}" if proxy else "")
+
+    def fetch(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        r = session.get(url, headers=headers)
+        return r.status_code, r.content
+
+    fetch.session = session                                              # type: ignore[attr-defined]  # closed by close()
+    return fetch
+
+
 def default_fetcher(timeout: float = 60.0) -> FetchFn:
-    """INGEST_IDX_TRANSPORT: ``curl`` (fail if absent), ``urllib``, or ``auto`` = curl when installed."""
+    """INGEST_IDX_TRANSPORT: ``impersonate`` / ``curl`` (each fails if unavailable), ``urllib``, or ``auto`` (default) =
+    impersonate, then curl, then urllib. Order is by how well each survives a Cloudflare challenge."""
     mode = os.environ.get("INGEST_IDX_TRANSPORT", "auto").strip().lower() or "auto"
     if mode == "urllib":
         return _urllib_fetcher(timeout)
+    if mode in ("auto", "impersonate"):
+        fetch = _impersonate_fetcher(timeout)
+        if fetch is not None:
+            return fetch
+        if mode == "impersonate":
+            raise RuntimeError("INGEST_IDX_TRANSPORT=impersonate but curl_cffi is not installed")
+        logger.warning("idx client: curl_cffi missing, falling back to curl (Cloudflare challenged plain curl on 2026-09-22)")
     fetch = _curl_fetcher(timeout)
     if fetch is None:
         if mode == "curl":
@@ -355,6 +396,12 @@ class IdxClient:
                 os.unlink(jar)
             except OSError:
                 pass
+        session = getattr(self._fetch, "session", None)
+        if session is not None:
+            try:
+                session.close()
+            except Exception:                                            # closing a transport must never fail a job
+                logger.debug("idx client: session close failed", exc_info=True)
 
     def __enter__(self) -> IdxClient:
         return self
