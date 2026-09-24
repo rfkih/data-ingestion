@@ -53,6 +53,7 @@ BOARD_LABEL = {"MARKET_TYPE_REGULER": "MARKET_BOARD_REGULER", "MARKET_TYPE_ALL":
 # What a daily capture asks for. CORE = the four windows of the whole market; DETAIL adds the investor split, the
 # all-boards view (negotiated crossings included) and the lot view - 48 requests per name instead of 4.
 MATRIX_CORE = [(per, "INVESTOR_TYPE_ALL", "MARKET_TYPE_REGULER", DATA_VALUE) for per in DIST_PERIODS]
+EMPTY_STREAK = 3                 # empty answers in a row before the loop reads it as pushback rather than empty names
 MATRIX_DETAIL = [(per, inv, brd, dt) for per in DIST_PERIODS for inv in DIST_INVESTORS for brd in ("MARKET_TYPE_REGULER", "MARKET_TYPE_ALL") for dt in DIST_DATA_TYPES]
 Fetcher = Callable[[str, dict[str, str]], tuple[int, bytes]]
 
@@ -785,17 +786,40 @@ def _captured(conn: psycopg.Connection, day: date) -> set[tuple[str, str, str, s
         ["code", "period", "investor_type", "market_board", "data_type"])}
 
 
+def _rest_until_data(code, period, inv, board, dtype, cfg, fetcher, sleep, backoff, max_backoffs, res, log):
+    """Rest and re-ask the same view. -> the fetch result once data comes back, or None when resting stops helping."""
+    for _ in range(max_backoffs):
+        res["backoffs"] += 1
+        log(f"idx broker capture: empty payloads - resting {backoff:.0f} s before retrying {code} {period}")
+        sleep(backoff)
+        out = fetch_dist(code, period, inv, board, dtype, cfg, fetcher)
+        res["requested"] += 1
+        if out[0] == 200 and out[3] is not None:
+            return out
+    return None
+
+
 def capture(conn: psycopg.Connection, codes: list[str], matrix: list[tuple[str, str, str, str]] | None = None,
             cfg: dict[str, Any] | None = None, *, rps: float = 1.0, fetcher: Fetcher | None = None,
             sleep: Callable[[float], None] = time.sleep, resume: bool = True, expected_date: date | None = None,
-            max_requests: int | None = None, log: Callable[[str], None] = logger.info) -> dict[str, Any]:
+            max_requests: int | None = None, empty_backoff: float = 60.0, max_backoffs: int = 2,
+            log: Callable[[str], None] = logger.info) -> dict[str, Any]:
     """Walk `matrix` (period, investor_type, market_board, data_type) over `codes`. Resumable, one request per second,
-    stops on the first auth/paywall/rate-limit. -> counts."""
+    stops on the first auth/paywall/rate-limit. -> counts.
+
+    Throttling looks like success here. Measured 2026-09-24: after roughly a thousand requests the endpoint keeps
+    answering HTTP 200 but with an empty payload (blank ``date_info``, no matrix), and it serves data again after about
+    a minute of rest - there is no 429 to stop on. A single empty answer is also what a name with no broker prints in
+    the window looks like, so one cannot be told from the other in isolation: this counts empties, and only when
+    `EMPTY_STREAK` arrive in a row treats it as pushback - rest `empty_backoff` seconds, retry the same view, and give
+    up the run after `max_backoffs` rests that change nothing. Empty answers are never stored, so a later run retries
+    them instead of resuming over a hole."""
     cfg = cfg or config()
     matrix = list(matrix or MATRIX_CORE)
     done = _captured(conn, expected_date) if (resume and expected_date is not None) else set()
-    res = {"codes": len(codes), "views": len(matrix), "requested": 0, "skipped": 0, "ok": 0, "failed": 0,
-           "rows": 0, "edges": 0, "date": None, "stopped": None}
+    res = {"codes": len(codes), "views": len(matrix), "requested": 0, "skipped": 0, "ok": 0, "failed": 0, "empty": 0,
+           "rows": 0, "edges": 0, "backoffs": 0, "date": None, "stopped": None}
+    streak = 0
     for code in codes:
         cu = code.upper()
         for period, inv, board, dtype in matrix:
@@ -818,6 +842,25 @@ def capture(conn: psycopg.Connection, codes: list[str], matrix: list[tuple[str, 
                 res["rows"] += n
                 res["edges"] += ne
                 res["date"] = res["date"] or str(d_to)
+                streak = 0
+            elif status == 200:                                   # answered, but with nothing in it: empty name or throttle
+                res["empty"] += 1
+                streak += 1
+                if streak >= EMPTY_STREAK:
+                    rested = _rest_until_data(cu, period, inv, board, dtype, cfg, fetcher, sleep, empty_backoff,
+                                              max_backoffs, res, log)
+                    if rested is None:
+                        res["stopped"] = f"empty payloads after {res['backoffs']} rests - rate limited, resume later"
+                        log(f"idx broker capture: stopped - {res['stopped']}")
+                        return res
+                    status, payload, d_from, d_to, err = rested
+                    streak = 0
+                    if status == 200 and d_to is not None:
+                        _, n, ne = store_dist(conn, cu, d_from or d_to, d_to, period, inv, board, dtype, status, payload, err)
+                        res["ok"] += 1
+                        res["rows"] += n
+                        res["edges"] += ne
+                        res["date"] = res["date"] or str(d_to)
             else:
                 res["failed"] += 1
                 log(f"idx broker capture: {cu} {period} {inv} {board} {dtype} -> {status} {err or 'no date'}")

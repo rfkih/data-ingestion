@@ -446,3 +446,58 @@ def test_store_dist_merges_value_and_volume_and_capture_resumes(conn) -> None:
             cur.execute("DELETE FROM idx.broker_flow WHERE code IN ('TEST', 'TEST2')")
             cur.execute("DELETE FROM idx.broker_summary_raw WHERE code IN ('TEST', 'TEST2')")
         conn.commit()
+
+
+EMPTY = {"message": "Successfully loaded Broker Distribution data",
+         "data": {"date_info": "", "by_value": {"top_broker_buy": [], "top_broker_sell": []},
+                  "by_volume": {"top_broker_buy": [], "top_broker_sell": []}, "start_date": "", "end_date": ""}}
+
+
+def test_capture_rests_on_a_streak_of_empty_payloads_and_gives_up(conn) -> None:
+    """Throttling answers 200 with an empty payload - there is no 429 to stop on (measured 2026-09-24)."""
+    _clean(conn)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM idx.broker_flow WHERE code LIKE 'TEST%'")
+    conn.commit()
+    cfg = {"key": "k", "base": broker.BASE, "params": dict(broker.DEFAULT_PARAMS)}
+    slept: list[float] = []
+    try:
+        # one isolated empty name is just an empty name: no rest, nothing stored for it, the run carries on
+        seq = [EMPTY, DIST_1Y, DIST_1Y, DIST_1Y]
+        calls = {"n": 0}
+
+        def mixed(url, headers):
+            p = seq[min(calls["n"], len(seq) - 1)]
+            calls["n"] += 1
+            return 200, json.dumps(p).encode()
+        res = broker.capture(conn, ["TEST"], broker.MATRIX_CORE, cfg, fetcher=mixed, sleep=slept.append, expected_date=None)
+        assert res["empty"] == 1 and res["ok"] == 3 and res["backoffs"] == 0 and res["stopped"] is None
+        assert 60.0 not in slept                                   # no rest was needed
+
+        # a throttled endpoint: every answer empty -> rest, retry, rest, retry, then stop instead of burning the budget
+        slept.clear()
+        res2 = broker.capture(conn, ["TEST", "TEST2"], broker.MATRIX_DETAIL, cfg,
+                              fetcher=lambda u, h: (200, json.dumps(EMPTY).encode()), sleep=slept.append,
+                              expected_date=None, empty_backoff=60.0, max_backoffs=2)
+        assert res2["stopped"] and "rate limited" in res2["stopped"]
+        assert res2["backoffs"] == 2 and res2["ok"] == 0 and res2["empty"] == broker.EMPTY_STREAK
+        assert slept.count(60.0) == 2                              # two rests, then it gave up
+        assert res2["requested"] == broker.EMPTY_STREAK + 2        # three views plus the two retries, not thousands
+
+        # the rest works: data on the retry resumes the run and resets the streak
+        slept.clear()
+        answers = [EMPTY, EMPTY, EMPTY, DIST_1Y]
+        i = {"n": 0}
+
+        def recovering(url, headers):
+            p = answers[min(i["n"], len(answers) - 1)]
+            i["n"] += 1
+            return 200, json.dumps(p).encode()
+        res3 = broker.capture(conn, ["TEST"], broker.MATRIX_CORE, cfg, fetcher=recovering, sleep=slept.append,
+                              expected_date=None, empty_backoff=30.0)
+        assert res3["backoffs"] == 1 and res3["stopped"] is None and res3["ok"] >= 1 and 30.0 in slept
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM idx.broker_flow WHERE code LIKE 'TEST%'")
+            cur.execute("DELETE FROM idx.broker_summary_raw WHERE code LIKE 'TEST%'")
+        conn.commit()

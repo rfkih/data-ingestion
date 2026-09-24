@@ -238,20 +238,22 @@ def run_broker_snapshot() -> None:
         # 2026-09-24: widened from the 1-day snapshot of the liquid names to the full capture for the WHOLE market - first
         # the four rolling windows (1D / 1M / 3M / 1Y) with the buyer->seller matrix for every name, so the irreplaceable
         # daily rows land early, then the 48-view detail matrix (investor split, all boards, lots) for every name (the
-        # operator's call, "data ID itu emas": ~36k requests, ~10 h at one request per second, done before the open).
-        # Resumable per (name, window, view, day); stops cleanly on pushback and picks up where it left off next run.
+        # operator's call, "data ID itu emas"). It will NOT get through all ~36k views in a night: the endpoint throttles
+        # after roughly a thousand requests by answering 200 with an empty payload, and capture() rests and then stops
+        # when that happens. That is the design - it is resumable per (name, window, view, day), so each night takes the
+        # next slice and the core views (the ones that cannot be recovered later) are always asked for first.
         last = job_daily.latest_bar_date(conn)
         try:
             cfg = broker.config_fresh(conn=conn)
             codes = broker.all_codes(conn)
             res = broker.capture(conn, codes, broker.MATRIX_CORE, cfg, expected_date=last, log=logger.debug)
-            logger.info("idx broker capture core %s ok=%s failed=%s skipped=%s rows=%s edges=%s", res.get("date"), res["ok"], res["failed"],
-                        res["skipped"], res["rows"], res["edges"])
+            logger.info("idx broker capture core %s ok=%s failed=%s empty=%s skipped=%s rows=%s edges=%s backoffs=%s", res.get("date"),
+                        res["ok"], res["failed"], res["empty"], res["skipped"], res["rows"], res["edges"], res["backoffs"])
             if not res["stopped"]:
                 cfg = broker.config_fresh(conn=conn)
                 res2 = broker.capture(conn, codes, broker.MATRIX_DETAIL, cfg, expected_date=last, log=logger.debug)
-                logger.info("idx broker capture detail %s ok=%s failed=%s skipped=%s rows=%s edges=%s", res2.get("date"), res2["ok"], res2["failed"],
-                            res2["skipped"], res2["rows"], res2["edges"])
+                logger.info("idx broker capture detail %s ok=%s failed=%s empty=%s skipped=%s rows=%s edges=%s backoffs=%s", res2.get("date"),
+                            res2["ok"], res2["failed"], res2["empty"], res2["skipped"], res2["rows"], res2["edges"], res2["backoffs"])
                 res = res2 if res2["stopped"] else res
         except broker.BrokerFetchError as e:
             runlog.alert(conn, "warning", "broker", f"broker capture: {e}")
