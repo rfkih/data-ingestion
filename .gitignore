@@ -19,6 +19,12 @@ screenshot/
 tmp_*
 .tmp_*
 .research_run_state.json.archived.*
+# The run-state files are actually named .research_run_state.<run>.json - the two exact-name rules above
+# never matched them, so 30 of them sat untracked in `git status` waiting to be committed by accident.
+.research_run_state.*
+# The agent scratch directory CLAUDE.md already calls gitignored. It was not: 4,423 files, one of them a
+# stored password (.rtmp/.pgpw).
+.rtmp/
 .wt-*/
 **/.next/
 **/node_modules/
