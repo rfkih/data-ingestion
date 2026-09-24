@@ -2,6 +2,8 @@
 an already-decided line, and the note it shows. No database — the read() path is exercised by the API test with a feed."""
 from __future__ import annotations
 
+import pytest
+
 from blackheart_ingest.idx import execwatch as ew
 
 
@@ -28,8 +30,14 @@ def test_note_is_factual_and_free_of_directive_words() -> None:
     import importlib.util
     from pathlib import Path
 
-    root = Path(ew.__file__).resolve().parents[4]
-    spec = importlib.util.spec_from_file_location("lint_words", root / "scripts" / "lint-words.py")
+    # From THIS file, like test_ara.py and test_wording.py do - not from the package. `ew.__file__`
+    # points into site-packages once the wheel is installed, and parents[4] there is the interpreter's
+    # lib directory, so CI failed on a missing scripts/lint-words.py while every local run passed.
+    root = Path(__file__).resolve().parents[3]
+    linter = root / "scripts" / "lint-words.py"
+    if not linter.exists():
+        pytest.skip(f"no word linter at {linter}")
+    spec = importlib.util.spec_from_file_location("lint_words", linter)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     notes = [
