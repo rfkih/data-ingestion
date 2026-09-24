@@ -832,6 +832,27 @@ def cmd_broker(a: argparse.Namespace) -> int:
                 return 1
             print(res)
             return 0 if not res["stopped"] else 1
+        if a.sub == "capture":
+            try:
+                cfg = broker.config_fresh(conn=conn)
+            except broker.BrokerFetchError as e:
+                print(f"config: {e}")
+                return 1
+            if a.codes:
+                codes = [c.strip().upper() for c in a.codes.split(",")]
+            elif a.min_v60:
+                codes = broker.detail_codes(conn, a.min_v60)
+            else:
+                codes = broker.all_codes(conn)
+            matrix = broker.MATRIX_DETAIL if a.detail else broker.MATRIX_CORE
+            print(f"capture: {len(codes)} names x {len(matrix)} views = {len(codes) * len(matrix)} requests at {a.rps}/s (resumable)")
+            try:
+                res = broker.capture(conn, codes, matrix, cfg, rps=a.rps, expected_date=_rows_last_bar(conn), max_requests=a.max, log=print)
+            except broker.BrokerFetchError as e:
+                print(f"capture stopped: {e}")
+                return 1
+            print(res)
+            return 0 if not res["stopped"] or res["stopped"].startswith("max requests") else 1
         if a.sub == "show":
             rows = broker.show(conn, a.code)
             if not rows:
@@ -1326,8 +1347,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("text", nargs="?")
     p.add_argument("--status", action="store_true")
     p.set_defaults(fn=cmd_notify)
-    p = sub.add_parser("broker", help="broker summary feed (Stockbit data account): day [--codes|--universe] (today's free distribution snapshot) | refresh (rotate the token) | probe CODE | backfill [--codes|--universe] (legacy, Pro-only now) | show CODE | reparse [--codes] | universe")
-    p.add_argument("sub", choices=["day", "refresh", "probe", "backfill", "show", "reparse", "universe"])
+    p = sub.add_parser("broker", help="broker summary feed (Stockbit data account): capture [--codes] [--detail] (all rolling windows 1D/1M/3M/1Y + the buyer->seller matrix, whole market; --detail = investor split, all boards, lots on the liquid names) | day [--codes|--universe] (today's 1-day snapshot only) | refresh (rotate the token) | probe CODE | backfill [--codes|--universe] (legacy, Pro-only now) | show CODE | reparse [--codes] | universe")
+    p.add_argument("sub", choices=["capture", "day", "refresh", "probe", "backfill", "show", "reparse", "universe"])
+    p.add_argument("--detail", action="store_true", help="capture: the 48-view matrix (investor ALL/FOREIGN/DOMESTIC x board REGULER/ALL x value/lots) instead of the 4 core views")
+    p.add_argument("--min-v60", dest="min_v60", type=float, help="capture: only names with 60d median value >= this (Rp); default = the whole market")
     p.add_argument("code", nargs="?")
     p.add_argument("--codes", help="comma-separated; default for backfill = --universe")
     p.add_argument("--universe", action="store_true", help="liquid names (60d value >= Rp 20 bn, price >= 1,000)")

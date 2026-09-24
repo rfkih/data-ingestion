@@ -220,7 +220,7 @@ def run_dividends() -> None:
 
 
 def run_broker_snapshot() -> None:
-    """Today's free broker-distribution snapshot for the liquid universe (card context; not a desk dependency).
+    """Daily broker-distribution capture: every rolling window the free endpoint serves, whole market (research feed).
 
     Off unless a Stockbit token is known (STOCKBIT_TOKEN / STOCKBIT_REFRESH_TOKEN in idx-local.env, or the relay row
     in idx.feed_token). Auto-refreshes from the newest refresh token first; a paywall/expired key stops the run
@@ -235,17 +235,30 @@ def run_broker_snapshot() -> None:
     with get_connection() as conn:
         if not (_os.environ.get(broker.TOKEN_ENV) or broker.newest_refresh_token(conn=conn)):
             return
+        # 2026-09-24: widened from the 1-day snapshot of the liquid names to the full capture for the WHOLE market - first
+        # the four rolling windows (1D / 1M / 3M / 1Y) with the buyer->seller matrix for every name, so the irreplaceable
+        # daily rows land early, then the 48-view detail matrix (investor split, all boards, lots) for every name (the
+        # operator's call, "data ID itu emas": ~36k requests, ~10 h at one request per second, done before the open).
+        # Resumable per (name, window, view, day); stops cleanly on pushback and picks up where it left off next run.
+        last = job_daily.latest_bar_date(conn)
         try:
             cfg = broker.config_fresh(conn=conn)
-            codes = universe_codes(conn)
-            res = broker.snapshot(conn, codes, cfg, expected_date=job_daily.latest_bar_date(conn), log=logger.info)
+            codes = broker.all_codes(conn)
+            res = broker.capture(conn, codes, broker.MATRIX_CORE, cfg, expected_date=last, log=logger.debug)
+            logger.info("idx broker capture core %s ok=%s failed=%s skipped=%s rows=%s edges=%s", res.get("date"), res["ok"], res["failed"],
+                        res["skipped"], res["rows"], res["edges"])
+            if not res["stopped"]:
+                cfg = broker.config_fresh(conn=conn)
+                res2 = broker.capture(conn, codes, broker.MATRIX_DETAIL, cfg, expected_date=last, log=logger.debug)
+                logger.info("idx broker capture detail %s ok=%s failed=%s skipped=%s rows=%s edges=%s", res2.get("date"), res2["ok"], res2["failed"],
+                            res2["skipped"], res2["rows"], res2["edges"])
+                res = res2 if res2["stopped"] else res
         except broker.BrokerFetchError as e:
-            runlog.alert(conn, "warning", "broker", f"broker snapshot: {e}")
-            logger.warning("idx broker snapshot: %s", e)
+            runlog.alert(conn, "warning", "broker", f"broker capture: {e}")
+            logger.warning("idx broker capture: %s", e)
             return
         if res["stopped"]:
-            runlog.alert(conn, "warning", "broker", f"broker snapshot stopped: {res['stopped']}")
-        logger.info("idx broker snapshot %s ok=%s failed=%s rows=%s", res.get("date"), res["ok"], res["failed"], res["rows"])
+            runlog.alert(conn, "warning", "broker", f"broker capture stopped: {res['stopped']}")
 
 
 def run_feed_watch() -> None:

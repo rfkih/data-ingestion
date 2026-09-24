@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -347,3 +348,101 @@ def test_snapshot_round_trip(conn) -> None:
         assert stop["ok"] == 0 and "402" in stop["stopped"]
     finally:
         _clean(conn)
+
+
+# ---------------------------------------------------------------------------------------------------- wide capture
+DIST_1Y = {"message": "ok",
+           "data": {"date_info": "2026-09-23", "start_date": "2025-09-23", "end_date": "2026-09-23",
+                    "by_value": {"top_broker_buy": [{"detail": {"code": "AK", "type": "Asing", "amount": 600_000_000_000},
+                                                     "distribute_to": [{"code": "CC", "type": "Pemerintah", "amount": 290_000_000_000},
+                                                                       {"code": "XL", "type": "Lokal", "amount": 240_000_000_000}]}],
+                                 "top_broker_sell": [{"detail": {"code": "CC", "type": "Pemerintah", "amount": 500_000_000_000},
+                                                      "distribute_to": [{"code": "AK", "type": "Asing", "amount": 290_000_000_000}]}]},
+                    "by_volume": {"top_broker_buy": [], "top_broker_sell": []}}}
+DIST_1Y_VOL = {"message": "ok",
+               "data": {"date_info": "2026-09-23", "start_date": "2025-09-23", "end_date": "2026-09-23",
+                        "by_value": {"top_broker_buy": [], "top_broker_sell": []},
+                        "by_volume": {"top_broker_buy": [{"detail": {"code": "AK", "type": "Asing", "amount": 1_000_000},
+                                                          "distribute_to": [{"code": "CC", "type": "Pemerintah", "amount": 600_000}]}],
+                                      "top_broker_sell": [{"detail": {"code": "CC", "type": "Pemerintah", "amount": 900_000}, "distribute_to": []}]}}}
+
+
+def test_parse_dist_totals_and_edges() -> None:
+    rows = broker.parse_dist_totals(DIST_1Y)
+    by = {r["broker"]: r for r in rows}
+    assert by["AK"]["net"] == Decimal(600_000_000_000) and by["CC"]["net"] == Decimal(-500_000_000_000)
+    assert [r["broker"] for r in rows] == ["AK", "CC"]
+    edges = broker.parse_dist_edges(DIST_1Y)
+    assert len(edges) == 3
+    assert edges[0] == {"side": "BUY", "broker": "AK", "broker_type": "Asing", "counterparty": "CC", "counterparty_type": "Pemerintah",
+                        "amount": Decimal(290_000_000_000)}
+    assert edges[2]["side"] == "SELL" and edges[2]["broker"] == "CC" and edges[2]["counterparty"] == "AK"
+    # the VOLUME view reads by_volume, and an empty by_value on it yields nothing
+    assert broker.parse_dist_totals(DIST_1Y_VOL, broker.DATA_VOLUME)[0]["buy"] == Decimal(1_000_000)
+    assert broker.parse_dist_totals(DIST_1Y_VOL) == [] and broker.parse_dist_edges(DIST_1Y) and broker.parse_dist_edges(DIST_1Y, broker.DATA_VOLUME) == []
+
+
+def test_fetch_dist_window_and_statuses() -> None:
+    cfg = {"key": "k", "base": broker.BASE, "params": dict(broker.DEFAULT_PARAMS)}
+    seen = {}
+
+    def fake(url, headers):
+        seen["url"] = url
+        return 200, json.dumps(DIST_1Y).encode()
+    status, _payload, d_from, d_to, err = broker.fetch_dist("ptba", broker.PERIOD_YEAR, "INVESTOR_TYPE_FOREIGN", "MARKET_TYPE_ALL", broker.DATA_VOLUME, cfg, fake)
+    assert status == 200 and err is None and (d_from, d_to) == (date(2025, 9, 23), date(2026, 9, 23))
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(seen["url"]).query))
+    assert q["symbol"] == "PTBA" and q["period"] == broker.PERIOD_YEAR and q["investor_type"] == "INVESTOR_TYPE_FOREIGN"
+    assert q["market_board"] == "MARKET_TYPE_ALL" and q["data_type"] == broker.DATA_VOLUME
+    with pytest.raises(broker.BrokerPaywall):
+        broker.fetch_dist("PTBA", cfg=cfg, fetcher=lambda u, h: (402, b"{}"))
+    with pytest.raises(broker.BrokerRateLimited):
+        broker.fetch_dist("PTBA", cfg=cfg, fetcher=lambda u, h: (429, b""))
+    assert broker.fetch_dist("PTBA", cfg=cfg, fetcher=lambda u, h: (400, b'{"message":"invalid"}'))[0] == 400
+    assert len(broker.MATRIX_CORE) == 4 and len(broker.MATRIX_DETAIL) == 48 and set(broker.BOARD_LABEL) == set(broker.DIST_BOARDS)
+
+
+def test_store_dist_merges_value_and_volume_and_capture_resumes(conn) -> None:
+    _clean(conn)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM idx.broker_flow WHERE code = 'TEST'")
+    conn.commit()
+    try:
+        d0, d1 = date(2025, 9, 23), date(2026, 9, 23)
+        args = ("TEST", d0, d1, broker.PERIOD_YEAR, "INVESTOR_TYPE_ALL", "MARKET_TYPE_REGULER")
+        raw_a, n_a, e_a = broker.store_dist(conn, *args, broker.DATA_VALUE, 200, DIST_1Y, None)
+        raw_b, n_b, e_b = broker.store_dist(conn, *args, broker.DATA_VOLUME, 200, DIST_1Y_VOL, None)
+        assert raw_a != raw_b and (n_a, e_a, n_b, e_b) == (2, 3, 2, 1)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT broker, buy_value, buy_lot, sell_lot, market_board, period FROM idx.broker_summary
+                            WHERE code = 'TEST' AND date_to = %s ORDER BY broker""", (d1,))
+            rows = cur.fetchall()
+            cur.execute("SELECT side, broker, counterparty, value, volume FROM idx.broker_flow WHERE code = 'TEST' ORDER BY side, broker, counterparty")
+            flow = cur.fetchall()
+        rows = [tuple(r.values()) if isinstance(r, dict) else tuple(r) for r in rows]
+        flow = [tuple(r.values()) if isinstance(r, dict) else tuple(r) for r in flow]
+        # one row per broker with value AND lots, the legacy board label, and the period that produced it
+        assert rows[0][:4] == ("AK", Decimal(600_000_000_000), Decimal(1_000_000), None) and rows[0][4:] == ("MARKET_BOARD_REGULER", broker.PERIOD_YEAR)
+        assert rows[1][0] == "CC" and rows[1][3] == Decimal(900_000)
+        # the AK<-CC edge carries both value (from the VALUE view) and volume (from the VOLUME view)
+        assert ("BUY", "AK", "CC", Decimal(290_000_000_000), Decimal(600_000)) in flow and len(flow) == 3
+        # capture: a fake API that serves the same payload for every view; resume skips what is stored for that day
+        calls = []
+
+        def fake(url, headers):
+            calls.append(url)
+            return 200, json.dumps(DIST_1Y if "VALUE" in url else DIST_1Y_VOL).encode()
+        cfg = {"key": "k", "base": broker.BASE, "params": dict(broker.DEFAULT_PARAMS)}
+        res = broker.capture(conn, ["TEST"], broker.MATRIX_CORE, cfg, fetcher=fake, sleep=lambda s: None, expected_date=d1)
+        assert res["requested"] == 3 and res["skipped"] == 1 and res["ok"] == 3 and res["stopped"] is None   # 1Y/ALL/REGULER/VALUE was stored above
+        again = broker.capture(conn, ["TEST"], broker.MATRIX_CORE, cfg, fetcher=fake, sleep=lambda s: None, expected_date=d1)
+        assert again["requested"] == 0 and again["skipped"] == 4
+        stop = broker.capture(conn, ["TEST"], broker.MATRIX_DETAIL, cfg, fetcher=lambda u, h: (429, b""), sleep=lambda s: None, expected_date=None)
+        assert stop["stopped"].startswith("HTTP 429") and stop["requested"] == 0
+        capped = broker.capture(conn, ["TEST", "TEST2"], broker.MATRIX_DETAIL, cfg, fetcher=fake, sleep=lambda s: None, expected_date=None, max_requests=5)
+        assert capped["requested"] == 5 and capped["stopped"] == "max requests 5"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM idx.broker_flow WHERE code IN ('TEST', 'TEST2')")
+            cur.execute("DELETE FROM idx.broker_summary_raw WHERE code IN ('TEST', 'TEST2')")
+        conn.commit()

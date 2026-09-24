@@ -41,6 +41,19 @@ REFRESH_URL = "https://exodus.stockbit.com/login/refresh"                   # PO
 DEFAULT_PARAMS = {"investor_type": "INVESTOR_TYPE_ALL", "market_board": "MARKET_BOARD_REGULER", "transaction_type": "TRANSACTION_TYPE_NET"}
 LIMIT = "100"
 LOT = 100
+# Verified against the live API 2026-09-24 (12 probes); everything else answers HTTP 400.
+PERIOD_DAY, PERIOD_MONTH, PERIOD_3M, PERIOD_YEAR = "TB_PERIOD_LAST_1_DAY", "TB_PERIOD_LAST_1_MONTH", "TB_PERIOD_LAST_3_MONTHS", "TB_PERIOD_LAST_1_YEAR"
+DIST_PERIODS = (PERIOD_DAY, PERIOD_MONTH, PERIOD_3M, PERIOD_YEAR)
+DIST_INVESTORS = ("INVESTOR_TYPE_ALL", "INVESTOR_TYPE_FOREIGN", "INVESTOR_TYPE_DOMESTIC")
+DIST_BOARDS = ("MARKET_TYPE_REGULER", "MARKET_TYPE_ALL", "MARKET_TYPE_TUNAI")
+DATA_VALUE, DATA_VOLUME = "BROKER_DISTRIBUTION_DATA_TYPE_VALUE", "BROKER_DISTRIBUTION_DATA_TYPE_VOLUME"
+DIST_DATA_TYPES = (DATA_VALUE, DATA_VOLUME)
+# Stored board label: keep the three years of history's spelling, one label per distinct board.
+BOARD_LABEL = {"MARKET_TYPE_REGULER": "MARKET_BOARD_REGULER", "MARKET_TYPE_ALL": "MARKET_BOARD_ALL", "MARKET_TYPE_TUNAI": "MARKET_BOARD_TUNAI"}
+# What a daily capture asks for. CORE = the four windows of the whole market; DETAIL adds the investor split, the
+# all-boards view (negotiated crossings included) and the lot view - 48 requests per name instead of 4.
+MATRIX_CORE = [(per, "INVESTOR_TYPE_ALL", "MARKET_TYPE_REGULER", DATA_VALUE) for per in DIST_PERIODS]
+MATRIX_DETAIL = [(per, inv, brd, dt) for per in DIST_PERIODS for inv in DIST_INVESTORS for brd in ("MARKET_TYPE_REGULER", "MARKET_TYPE_ALL") for dt in DIST_DATA_TYPES]
 Fetcher = Callable[[str, dict[str, str]], tuple[int, bytes]]
 
 
@@ -298,12 +311,14 @@ def store(conn: psycopg.Connection, code: str, d_from: date, d_to: date, cfg: di
     """Upsert the raw payload and its parsed rows; -> (raw_id, n_rows)."""
     p = cfg["params"]
     key = (code.upper(), d_from, d_to, p["investor_type"], p["market_board"], p["transaction_type"])
+    dt = p.get("data_type") or DATA_VALUE
+    per = p.get("period") or "LEGACY"                     # the per-window feed and the old 1-day snapshot carry no period
     with conn.cursor() as cur:
-        cur.execute("""INSERT INTO idx.broker_summary_raw (code, date_from, date_to, investor_type, market_board, transaction_type, http_status, payload, error)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (code, date_from, date_to, investor_type, market_board, transaction_type) DO UPDATE SET
+        cur.execute("""INSERT INTO idx.broker_summary_raw (code, date_from, date_to, investor_type, market_board, transaction_type, data_type, period, http_status, payload, error)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (code, date_from, date_to, investor_type, market_board, transaction_type, data_type, period) DO UPDATE SET
                            http_status = EXCLUDED.http_status, payload = EXCLUDED.payload, error = EXCLUDED.error, fetched_at = now()
-                       RETURNING id""", (*key, status, psycopg.types.json.Jsonb(payload) if payload is not None else None, error))
+                       RETURNING id""", (*key, dt, per, status, psycopg.types.json.Jsonb(payload) if payload is not None else None, error))
         row = cur.fetchone()
         raw_id = int(next(iter(row.values())) if isinstance(row, dict) else row[0])
         n = _store_rows(cur, key, raw_id, payload)
@@ -375,6 +390,22 @@ def universe_codes(conn: psycopg.Connection, min_v60: float = 20e9, min_price: f
         (min_v60, min_price), ["code"])]
 
 
+def all_codes(conn: psycopg.Connection) -> list[str]:
+    """Every name with a bar on the last trading day on the main or development board - the whole market, for capture."""
+    return [r["code"] for r in _rows(conn, """
+        SELECT b.code FROM idx.bar b JOIN idx.listing l USING (code)
+         WHERE b.source = 'idx' AND b.trade_date = (SELECT max(trade_date) FROM idx.bar WHERE source = 'idx')
+           AND l.board IN ('Utama', 'Pengembangan') ORDER BY b.code""", (), ["code"])]
+
+
+def detail_codes(conn: psycopg.Connection, min_v60: float = 5e9) -> list[str]:
+    """Names liquid enough for the 48-view detail matrix: 60-day median traded value >= min_v60 on the last bar."""
+    return [r["code"] for r in _rows(conn, """
+        SELECT f.code FROM idx.feature_daily f JOIN idx.listing l USING (code)
+         WHERE f.trade_date = (SELECT max(trade_date) FROM idx.feature_daily) AND f.value_60d_median >= %s
+           AND l.board IN ('Utama', 'Pengembangan') ORDER BY f.code""", (min_v60,), ["code"])]
+
+
 def backfill(conn: psycopg.Connection, codes: list[str], start: date, end: date, *, window: int = 20, rps: float = 1.0,
              cfg: dict[str, Any] | None = None, fetcher: Fetcher | None = None, sleep: Callable[[float], None] = time.sleep,
              resume: bool = True, max_requests: int | None = None, log: Callable[[str], None] = logger.info) -> dict[str, Any]:
@@ -433,11 +464,16 @@ def detector(conn: psycopg.Connection, code: str, n: int = 5) -> list[dict[str, 
 
 # ============================================================================================= daily distribution feed
 # Stockbit closed the per-window ``marketdetectors`` endpoint behind Pro (HTTP 402) on 2026-09-18. The free
-# ``order-trade/broker/distribution`` endpoint still serves, per name, the LATEST trading day's buyer->seller value
-# matrix. There is no history and no multi-day window (a ``date=`` in the past is ignored; only LAST_1_DAY is valid),
-# so the daily feed accumulates one snapshot per day going forward and stores it as a one-day "window"
-# (date_from == date_to) in the same ``idx.broker_summary`` / ``idx.broker_detector`` tables. The window history
-# backfilled to 2023 stays untouched.
+# ``order-trade/broker/distribution`` endpoint still serves, per name, a buyer->seller value matrix, free.
+#
+# Windows (re-probed 2026-09-24, research/IDX_BREAKOUT_ACCUM_2026-09-24.md section D): ``period=`` DOES take longer
+# windows - TB_PERIOD_LAST_1_DAY, LAST_1_MONTH, LAST_3_MONTHS and LAST_1_YEAR all answer 200 and the payload's
+# start_date / end_date span the stated window (BBCA's top buy broker: Rp 40,695 bn over LAST_1_YEAR against Rp 138 bn
+# over LAST_1_DAY, so the aggregation is real). Every other enum tried answers 400. What is NOT available is moving the
+# window into the past: ``date=``, ``end_date=``, ``to=`` and ``start_date=`` are all ignored and the window always ends
+# on the last trading day. So: aggregates yes, history no - the daily feed still accumulates one snapshot per day going
+# forward and stores it as a one-day "window" (date_from == date_to) in the same ``idx.broker_summary`` /
+# ``idx.broker_detector`` tables. The window history backfilled to 2023 stays untouched.
 
 def _is_distribution(payload: Any) -> bool:
     return bool(isinstance(payload, dict) and isinstance(payload.get("data"), dict)
@@ -585,6 +621,207 @@ def snapshot(conn: psycopg.Connection, codes: list[str], cfg: dict[str, Any] | N
             res["failed"] += 1
             log(f"idx broker snapshot: {cu} -> {status} {err or 'no date'}")
         sleep(1.0 / rps if rps > 0 else 0)
+    return res
+
+
+# ======================================================================================= wide capture (all windows)
+# Probed 2026-09-24: the free distribution endpoint answers for four rolling windows, three investor splits, three
+# boards and two data types, and every payload carries the buyer -> seller matrix. ``capture`` walks a matrix of those
+# for a list of names, stores the per-broker totals (idx.broker_summary), the matrix (idx.broker_flow) and the payload
+# itself (idx.broker_summary_raw), and is resumable: a (name, window, view) already stored with HTTP 200 is skipped.
+
+def dist_params(period: str, investor_type: str, market_board: str, data_type: str) -> dict[str, str]:
+    return {"period": period, "investor_type": investor_type, "market_board": market_board, "data_type": data_type}
+
+
+def fetch_dist(code: str, period: str = PERIOD_DAY, investor_type: str = "INVESTOR_TYPE_ALL",
+               market_board: str = "MARKET_TYPE_REGULER", data_type: str = DATA_VALUE,
+               cfg: dict[str, Any] | None = None, fetcher: Fetcher | None = None) -> tuple[int, Any, date | None, date | None, str | None]:
+    """One distribution view -> (status, payload | None, window start, window end, error). Raises the stop-the-loop errors."""
+    cfg = cfg or config()
+    headers = {"Authorization": f"Bearer {cfg['key']}", "X-Platform": "web", "Accept": "application/json",
+               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) blackheart-idx research feed"}
+    q = {"date": "", "symbol": code.upper(), "investor_type": investor_type, "market_board": market_board,
+         "data_type": data_type, "period": period}
+    try:
+        status, body = (fetcher or _urllib_fetch)(DIST_BASE + "?" + urllib.parse.urlencode(q), headers)
+    except (urllib.error.URLError, OSError) as e:
+        return 0, None, None, None, f"{type(e).__name__}: {e}"
+    if status in (401, 403):
+        raise BrokerAuthError(f"HTTP {status} for {code}: key expired or the account is not allowed")
+    if status == 402:
+        raise BrokerPaywall(f"HTTP 402 for {code}: broker distribution is Pro-only for this account")
+    if status == 429:
+        raise BrokerRateLimited(f"HTTP 429 for {code}: rate limited - stop and retry later")
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else None
+    except (ValueError, UnicodeDecodeError) as e:
+        return status, None, None, None, f"not JSON: {e}"
+    d_from = d_to = None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data, dict):
+        def day(v):
+            try:
+                return date.fromisoformat(str(v)[:10])
+            except (ValueError, TypeError):
+                return None
+        d_to = day(data.get("end_date")) or day(data.get("date_info"))
+        d_from = day(data.get("start_date")) or d_to
+    return status, payload, d_from, d_to, None if status == 200 else f"HTTP {status}"
+
+
+def _dist_block(payload: Any, data_type: str) -> dict[str, Any]:
+    """The by_value or by_volume block, whichever this data_type filled."""
+    data = (payload or {}).get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return {}
+    blk = data.get("by_volume" if data_type == DATA_VOLUME else "by_value")
+    return blk if isinstance(blk, dict) else {}
+
+
+def parse_dist_totals(payload: Any, data_type: str = DATA_VALUE) -> list[dict[str, Any]]:
+    """One row per broker: its gross buy and sell on this view, plus the net. Value or lots, per data_type."""
+    blk = _dist_block(payload, data_type)
+    sides: dict[str, dict[str, Any]] = {}
+    for name, side in (("top_broker_buy", "buy"), ("top_broker_sell", "sell")):
+        for it in blk.get(name) or []:
+            det = it.get("detail") if isinstance(it, dict) else None
+            if not isinstance(det, dict) or not det.get("code"):
+                continue
+            b = str(det["code"]).strip()
+            r = sides.setdefault(b, {"broker": b, "investor": det.get("type") or None, "buy": None, "sell": None})
+            r[side] = (r[side] or Decimal(0)) + (_num(det.get("amount")) or Decimal(0))
+            r["investor"] = r["investor"] or det.get("type") or None
+    # a side the broker is absent from stays NULL (it was below the top-12 cut, not zero); the net treats it as zero
+    rows = [{"broker": r["broker"], "investor": r["investor"], "buy": r["buy"], "sell": r["sell"],
+             "net": (r["buy"] or Decimal(0)) - (r["sell"] or Decimal(0))} for r in sides.values()]
+    rows.sort(key=lambda r: r["net"], reverse=True)
+    return rows
+
+
+def parse_dist_edges(payload: Any, data_type: str = DATA_VALUE) -> list[dict[str, Any]]:
+    """The buyer -> seller matrix: one row per (side, broker, counterparty)."""
+    blk = _dist_block(payload, data_type)
+    out = []
+    for name, side in (("top_broker_buy", "BUY"), ("top_broker_sell", "SELL")):
+        for it in blk.get(name) or []:
+            det = it.get("detail") if isinstance(it, dict) else None
+            if not isinstance(det, dict) or not det.get("code"):
+                continue
+            broker, btype = str(det["code"]).strip(), det.get("type") or None
+            for e in it.get("distribute_to") or []:
+                if not isinstance(e, dict) or not e.get("code"):
+                    continue
+                out.append({"side": side, "broker": broker, "broker_type": btype, "counterparty": str(e["code"]).strip(),
+                            "counterparty_type": e.get("type") or None, "amount": _num(e.get("amount")) or Decimal(0)})
+    return out
+
+
+def store_dist(conn: psycopg.Connection, code: str, d_from: date, d_to: date, period: str, investor_type: str,
+               market_board: str, data_type: str, status: int, payload: Any, error: str | None) -> tuple[int, int, int]:
+    """Upsert one distribution view -> (raw_id, broker rows, matrix edges). Value and lots merge into the same rows."""
+    board = BOARD_LABEL.get(market_board, market_board)
+    key = (code.upper(), d_from, d_to, investor_type, board, "TRANSACTION_TYPE_NET")
+    is_vol = data_type == DATA_VOLUME
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO idx.broker_summary_raw (code, date_from, date_to, investor_type, market_board, transaction_type, data_type, period,
+                           http_status, payload, error)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (code, date_from, date_to, investor_type, market_board, transaction_type, data_type, period) DO UPDATE SET
+                           http_status = EXCLUDED.http_status, payload = EXCLUDED.payload, error = EXCLUDED.error, fetched_at = now()
+                       RETURNING id""", (*key, data_type, period, status,
+                                         psycopg.types.json.Jsonb(payload) if payload is not None else None, error))
+        row = cur.fetchone()
+        raw_id = int(next(iter(row.values())) if isinstance(row, dict) else row[0])
+        if payload is None or status != 200:
+            conn.commit()
+            return raw_id, 0, 0
+        totals = parse_dist_totals(payload, data_type)
+        if is_vol:
+            cur.executemany("""INSERT INTO idx.broker_summary (code, date_from, date_to, investor_type, market_board, transaction_type, broker,
+                                   buy_lot, sell_lot, net_lot, investor, period, raw_id)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                               ON CONFLICT (code, date_from, date_to, investor_type, market_board, transaction_type, broker) DO UPDATE SET
+                                   buy_lot = EXCLUDED.buy_lot, sell_lot = EXCLUDED.sell_lot, net_lot = EXCLUDED.net_lot,
+                                   investor = COALESCE(idx.broker_summary.investor, EXCLUDED.investor),
+                                   period = COALESCE(idx.broker_summary.period, EXCLUDED.period), fetched_at = now()""",
+                            [(*key, r["broker"], r["buy"], r["sell"], r["net"], r["investor"], period, raw_id) for r in totals])
+        else:
+            cur.executemany("""INSERT INTO idx.broker_summary (code, date_from, date_to, investor_type, market_board, transaction_type, broker,
+                                   buy_value, sell_value, net_value, investor, period, raw_id)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                               ON CONFLICT (code, date_from, date_to, investor_type, market_board, transaction_type, broker) DO UPDATE SET
+                                   buy_value = EXCLUDED.buy_value, sell_value = EXCLUDED.sell_value, net_value = EXCLUDED.net_value,
+                                   investor = COALESCE(EXCLUDED.investor, idx.broker_summary.investor),
+                                   period = EXCLUDED.period, raw_id = EXCLUDED.raw_id, fetched_at = now()""",
+                            [(*key, r["broker"], r["buy"], r["sell"], r["net"], r["investor"], period, raw_id) for r in totals])
+            det = distribution_detector(payload)
+            if det:
+                cols = list(det)
+                cur.execute("DELETE FROM idx.broker_detector WHERE code = %s AND date_from = %s AND date_to = %s AND investor_type = %s"
+                            " AND market_board = %s AND transaction_type = %s", key)
+                cur.execute(f"""INSERT INTO idx.broker_detector (code, date_from, date_to, investor_type, market_board, transaction_type,
+                                    {', '.join(cols)}, period, raw_id)
+                                VALUES ({', '.join(['%s'] * (6 + len(cols) + 2))})""", (*key, *[det[c] for c in cols], period, raw_id))
+        edges = parse_dist_edges(payload, data_type)
+        amount_col = "volume" if is_vol else "value"
+        cur.executemany(f"""INSERT INTO idx.broker_flow (code, date_from, date_to, investor_type, market_board, side, broker, counterparty,
+                                broker_type, counterparty_type, {amount_col}, period, raw_id)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (code, date_from, date_to, investor_type, market_board, period, side, broker, counterparty) DO UPDATE SET
+                                {amount_col} = EXCLUDED.{amount_col}, broker_type = COALESCE(EXCLUDED.broker_type, idx.broker_flow.broker_type),
+                                counterparty_type = COALESCE(EXCLUDED.counterparty_type, idx.broker_flow.counterparty_type), fetched_at = now()""",
+                        [(code.upper(), d_from, d_to, investor_type, board, e["side"], e["broker"], e["counterparty"],
+                          e["broker_type"], e["counterparty_type"], e["amount"], period, raw_id) for e in edges])
+    conn.commit()
+    return raw_id, len(totals), len(edges)
+
+
+def _captured(conn: psycopg.Connection, day: date) -> set[tuple[str, str, str, str, str]]:
+    """(code, period, investor_type, stored board label, data_type) already stored OK for a window ending on `day`."""
+    return {(r["code"], r["period"], r["investor_type"], r["market_board"], r["data_type"]) for r in _rows(conn, """
+        SELECT code, period, investor_type, market_board, data_type FROM idx.broker_summary_raw
+         WHERE http_status = 200 AND date_to = %s AND period <> 'LEGACY'""", (day,),
+        ["code", "period", "investor_type", "market_board", "data_type"])}
+
+
+def capture(conn: psycopg.Connection, codes: list[str], matrix: list[tuple[str, str, str, str]] | None = None,
+            cfg: dict[str, Any] | None = None, *, rps: float = 1.0, fetcher: Fetcher | None = None,
+            sleep: Callable[[float], None] = time.sleep, resume: bool = True, expected_date: date | None = None,
+            max_requests: int | None = None, log: Callable[[str], None] = logger.info) -> dict[str, Any]:
+    """Walk `matrix` (period, investor_type, market_board, data_type) over `codes`. Resumable, one request per second,
+    stops on the first auth/paywall/rate-limit. -> counts."""
+    cfg = cfg or config()
+    matrix = list(matrix or MATRIX_CORE)
+    done = _captured(conn, expected_date) if (resume and expected_date is not None) else set()
+    res = {"codes": len(codes), "views": len(matrix), "requested": 0, "skipped": 0, "ok": 0, "failed": 0,
+           "rows": 0, "edges": 0, "date": None, "stopped": None}
+    for code in codes:
+        cu = code.upper()
+        for period, inv, board, dtype in matrix:
+            if (cu, period, inv, BOARD_LABEL.get(board, board), dtype) in done:
+                res["skipped"] += 1
+                continue
+            if max_requests is not None and res["requested"] >= max_requests:
+                res["stopped"] = f"max requests {max_requests}"
+                return res
+            try:
+                status, payload, d_from, d_to, err = fetch_dist(cu, period, inv, board, dtype, cfg, fetcher)
+            except BrokerFetchError as e:
+                res["stopped"] = str(e)
+                log(f"idx broker capture: stopped - {e}")
+                return res
+            res["requested"] += 1
+            if status == 200 and d_to is not None:
+                _, n, ne = store_dist(conn, cu, d_from or d_to, d_to, period, inv, board, dtype, status, payload, err)
+                res["ok"] += 1
+                res["rows"] += n
+                res["edges"] += ne
+                res["date"] = res["date"] or str(d_to)
+            else:
+                res["failed"] += 1
+                log(f"idx broker capture: {cu} {period} {inv} {board} {dtype} -> {status} {err or 'no date'}")
+            sleep(1.0 / rps if rps > 0 else 0)
     return res
 
 
