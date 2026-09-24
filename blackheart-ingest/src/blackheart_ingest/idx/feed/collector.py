@@ -583,8 +583,10 @@ class Collector:
     # ---- main loop -----------------------------------------------------------------------------------------------
     async def run(self) -> int:
         if not self.singleton():
-            logger.error("another collector holds the advisory lock %r - exiting", LOCK_KEY)
-            return 2
+            # A no-op start, not a failure: the 10-minute watchdog trigger fires whether or not a collector is up, and a
+            # non-zero exit would put the task into its restart-on-failure loop. Same convention as scheduler.main().
+            logger.warning("another collector holds the advisory lock %r - already running, exiting", LOCK_KEY)
+            return 0
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
