@@ -196,7 +196,10 @@ def _market(conn: psycopg.Connection, D: date) -> str:
 def build(conn: psycopg.Connection, as_of: date | None = None, *, next_n: int = 10, codes: list[str] | None = None) -> dict[str, Any]:
     """Build the pack for the latest candidate run on/before as_of (running the candidate list first if needed)."""
     run = _rows(conn, "SELECT max(run_date) FROM idx.candidate WHERE (%s::date IS NULL OR run_date <= %s)", (as_of, as_of), ["d"])[0]["d"]
-    last_bar = _rows(conn, "SELECT max(trade_date) FROM idx.bar WHERE source IN ('idx', 'yahoo') AND (%s::date IS NULL OR trade_date <= %s)",
+    # The same anchor candidates.build uses - the last day the chain finished. Against max(idx.bar) a half-built day sits
+    # ahead of anything the candidate list can be built for, so this rebuilt the list on every single call and stored a
+    # run that was empty.
+    last_bar = _rows(conn, "SELECT max(trade_date) FROM idx.feature_daily WHERE (%s::date IS NULL OR trade_date <= %s)",
                      (as_of, as_of), ["d"])[0]["d"]
     if run is None or (last_bar and run < last_bar):
         res = cand.build(conn, as_of)

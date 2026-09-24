@@ -52,7 +52,14 @@ def board_from_remarks(remarks: str | None) -> str | None:
 
 
 def build(conn: psycopg.Connection, as_of: date | None = None) -> dict[str, Any]:
-    last = _rows(conn, "SELECT max(trade_date) FROM idx.bar WHERE source IN ('idx', 'yahoo') AND (%s::date IS NULL OR trade_date <= %s)",
+    # The latest day the chain FINISHED, which is the latest feature_daily day - not the latest bar, and not the latest
+    # daily_summary either. Features are the last step of the chain, so a day that has them has everything below: bars,
+    # the summary, and the liquidity window this filters on. Anchoring on anything earlier in the chain lets a half-built
+    # day become "the day" and the screen goes blank - 2026-09-23 did it twice in one morning, first as a Yahoo-fallback
+    # day with bars and no summary, then as a backfilled day with a summary and no features. Candidates, scores, the
+    # screener and /pub all returned zero rows. A partial day must never blank the desk: show the last finished one and
+    # let the chain (or the bar backfill, which runs the same steps) move the date forward when it is really ready.
+    last = _rows(conn, "SELECT max(trade_date) FROM idx.feature_daily WHERE (%s::date IS NULL OR trade_date <= %s)",
                  (as_of, as_of), ["d"])[0]["d"]
     D: date = last
     # raw close x listed shares of the day = market cap on the day's own basis (the adjusted close is on today's split basis,
