@@ -45,9 +45,17 @@ def _rows(conn: psycopg.Connection, sql: str, params: tuple, cols: list[str]) ->
         return out
 
 
-def latest_day(conn: psycopg.Connection) -> date | None:
+def latest_day(conn: psycopg.Connection, index_code: str = "COMPOSITE") -> date | None:
+    """The last day this read can be built from in full: one that has BOTH a day summary and an index
+    close. They do not land together - a `daily` run during the session writes a summary for a day whose
+    index has not been published yet (2026-09-24: 963 summary rows, no index row), and anchoring on the
+    summary alone put a half-built day on the screen with a blank index above it. Same rule as
+    `candidates.build`: show the last day that is actually finished."""
     with conn.cursor() as cur:
-        cur.execute("SELECT max(trade_date) AS d FROM idx.daily_summary")
+        cur.execute("""SELECT max(s.trade_date) AS d FROM idx.daily_summary s
+                        WHERE EXISTS (SELECT 1 FROM idx.index_daily i
+                                       WHERE i.trade_date = s.trade_date AND i.index_code = %s)""",
+                    (index_code,))
         row = cur.fetchone()
     return (row.get("d") if isinstance(row, dict) else row[0]) if row else None
 
@@ -169,6 +177,30 @@ def world(conn: psycopg.Connection, series: tuple[str, ...] = WORLD_SERIES) -> l
     return out
 
 
+def day_facts(conn: psycopg.Connection, d: date, index_code: str = "COMPOSITE") -> dict[str, Any]:
+    """The six figures the design prints under the index chart.
+
+    The design's first fact is the index's OPEN. There is no such number: IDX publishes previous, high,
+    low and close for an index and no open (null on all 1,618 COMPOSITE rows). So the first fact is the
+    previous close, which the exchange does publish, under its own label - the figure is real or it is
+    not shown. Shares, value and trades are the market's own totals from the day summary, which is also
+    what breadth is counted from, so the numbers on this screen all come from one table."""
+    ix = _rows(conn, """SELECT previous, high, low, close FROM idx.index_daily
+                         WHERE index_code = %s AND trade_date = %s""", (index_code, d),
+               ["previous", "high", "low", "close"])
+    tot = _rows(conn, """SELECT sum(volume) AS shares, sum(value) AS value, sum(frequency) AS trades
+                           FROM idx.daily_summary WHERE trade_date = %s""", (d,), ["shares", "value", "trades"])
+    i = ix[0] if ix else {}
+    t = tot[0] if tot else {}
+    return {
+        "previous": _f(i.get("previous")), "high": _f(i.get("high")), "low": _f(i.get("low")),
+        "close": _f(i.get("close")),
+        "shares": _f(t.get("shares")), "value": _f(t.get("value")), "trades": _f(t.get("trades")),
+        "no_open": True,
+        "why_no_open": "IDX publishes previous, high, low and close for an index - never an open",
+    }
+
+
 def overview(conn: psycopg.Connection, d: date | None = None) -> dict[str, Any]:
     """One call for the top of the desk: the index, breadth, foreign flow, sectors, movers, the world."""
     from . import chart
@@ -178,6 +210,7 @@ def overview(conn: psycopg.Connection, d: date | None = None) -> dict[str, Any]:
     return {
         "as_of": d.isoformat(),
         "index": chart.index_view(conn, bars=130, minutes=240),
+        "facts": day_facts(conn, d),
         "breadth": breadth(conn, d),
         "foreign": foreign(conn, d),
         "sectors": sectors(conn, d),
@@ -186,4 +219,4 @@ def overview(conn: psycopg.Connection, d: date | None = None) -> dict[str, Any]:
     }
 
 
-__all__ = ["breadth", "foreign", "latest_day", "movers", "overview", "sectors", "world"]
+__all__ = ["breadth", "day_facts", "foreign", "latest_day", "movers", "overview", "sectors", "world"]
