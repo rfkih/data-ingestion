@@ -156,6 +156,17 @@ def make_router(require_token) -> APIRouter:
             rows = q.latest(conn, codes.split(","))
         return [{k: (v.isoformat() if isinstance(v, date | datetime) else v) for k, v in r.items()} for r in rows]
 
+    @router.get("/market")
+    def market_overview() -> dict[str, Any]:
+        """The top of the desk in one call: the index, breadth (advancers/decliners against each name's own
+        previous close), foreign flow, the 11 IDX-IC sectors value-weighted, the day's movers above a
+        liquidity floor, and the macro series. Two honesty flags travel with it: foreign value is
+        `value_is_estimated` (IDX publishes the legs in shares), and `sectors.unclassified` counts the
+        names that have no IDX-IC sector, so no screen can imply this is the whole market."""
+        from . import market as mk
+        with get_connection() as conn:
+            return mk.overview(conn)
+
     @router.get("/chart/index")
     def chart_index(bars: int = 260, minutes: int = 240) -> dict[str, Any]:
         """The market itself for the home screen: COMPOSITE daily candles, the intraday panel the tick feed carries as
