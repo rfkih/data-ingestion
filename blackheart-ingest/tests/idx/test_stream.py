@@ -167,3 +167,112 @@ def test_quiet_hours_window_maths() -> None:
     assert not prefs.in_quiet_hours(wrap, time(12, 0))
     assert prefs.in_quiet_hours(same_day, time(12, 0)) and not prefs.in_quiet_hours(same_day, time(20, 0))
     assert not prefs.in_quiet_hours({"quiet_from": None, "quiet_to": None}, time(3, 0))
+
+
+# ---------------------------------------------------------------------- the stream route, replay and headers
+# httpx's ASGI transport collects a response body before handing it over, so a TestClient cannot read an endless
+# one - it simply hangs (measured 2026-09-24). The route is an ordinary coroutine returning a StreamingResponse, so
+# it is called directly here and its body iterator is read with a timeout: the same code, without an HTTP server.
+
+def _route(path: str):
+    from blackheart_ingest.workers.server import app
+    for r in app.routes:
+        if getattr(r, "path", None) == path and "GET" in getattr(r, "methods", set()):
+            return r.endpoint
+    raise AssertionError(f"no GET route {path}")
+
+
+class _Req:
+    """The two things the stream route asks of a Request."""
+
+    def __init__(self, headers: dict[str, str] | None = None):
+        self.headers = headers or {}
+
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+def _service_caller():
+    from blackheart_ingest.idx.who import Caller
+    return Caller(actor="scheduler", user_id=None, email=None, service=True)
+
+
+async def _frames(resp, want: int, timeout: float = 5.0) -> list[str]:
+    """Read `want` complete SSE frames off a StreamingResponse, then stop."""
+    sep = "\n\n"
+    frames, buf = [], ""
+    it = resp.body_iterator.__aiter__()
+    while len(frames) < want:
+        chunk = await asyncio.wait_for(it.__anext__(), timeout)
+        buf += chunk if isinstance(chunk, str) else chunk.decode()
+        while sep in buf:
+            frame, buf = buf.split(sep, 1)
+            if frame.strip():
+                frames.append(frame + sep)
+    return frames
+
+
+def _ids(frames: list[str]) -> list[int]:
+    return [int(f.split("id: ")[1].split("\n")[0]) for f in frames if f.startswith("id: ")]
+
+
+@pytest.mark.asyncio
+async def test_a_reconnect_replays_exactly_what_it_missed(conn) -> None:
+    """The point of `since`: a dropped connection costs latency, never rows."""
+    _clean(conn)
+    try:
+        first = runlog.alert(conn, "info", "test:bus", "one", kind="signal", notify_channels=False)
+        second = runlog.alert(conn, "info", "test:bus", "two", kind="signal", notify_channels=False)
+        third = runlog.alert(conn, "info", "test:bus", "three", kind="signal", notify_channels=False)
+        route = _route("/idx/stream")
+
+        resp = await route(_Req(), since=first, kinds="signal", c=_service_caller())
+        assert resp.media_type == "text/event-stream"
+        assert "no-cache" in resp.headers["cache-control"] and resp.headers["x-accel-buffering"] == "no"
+        frames = await _frames(resp, 3)
+        assert frames[0].startswith("event: hello")
+        assert _ids(frames[1:]) == [second, third]            # in order, and the row it already had is not repeated
+        await resp.body_iterator.aclose()
+
+        # the browser's own header is read when the query string does not say
+        resp2 = await route(_Req({"last-event-id": str(second)}), since=None, kinds="signal", c=_service_caller())
+        frames2 = await _frames(resp2, 2)
+        assert _ids(frames2[1:]) == [third]
+        await resp2.body_iterator.aclose()
+    finally:
+        _clean(conn)
+
+
+@pytest.mark.asyncio
+async def test_the_kind_filter_applies_to_the_replay_too(conn) -> None:
+    _clean(conn)
+    try:
+        base = runlog.alert(conn, "info", "test:bus", "anchor", kind="ops", notify_channels=False)
+        runlog.alert(conn, "info", "test:bus", "an ara touch", kind="ara", code="BBCA", notify_channels=False)
+        wanted_id = runlog.alert(conn, "info", "test:bus", "a signal", kind="signal", notify_channels=False)
+        resp = await _route("/idx/stream")(_Req(), since=base, kinds="signal", c=_service_caller())
+        frames = await _frames(resp, 2)
+        assert _ids(frames[1:]) == [wanted_id]
+        await resp.body_iterator.aclose()
+    finally:
+        _clean(conn)
+
+
+@pytest.mark.asyncio
+async def test_a_page_with_no_since_starts_from_now(conn) -> None:
+    """No `since` means no replay: a fresh page shows what the API gave it, not a week of history."""
+    _clean(conn)
+    try:
+        runlog.alert(conn, "info", "test:bus", "before", kind="signal", notify_channels=False)
+        resp = await _route("/idx/stream")(_Req(), since=None, kinds=None, c=_service_caller())
+        frames = await _frames(resp, 1)
+        assert json.loads(frames[0].split("data: ")[1])["replayed"] == 0
+        await resp.body_iterator.aclose()
+    finally:
+        _clean(conn)
+
+
+def test_status_says_whether_this_worker_is_listening() -> None:
+    body = _route("/idx/stream/status")()
+    assert set(body) == {"connected", "subscribers", "last_id", "dropped"}
+    assert isinstance(body["connected"], bool) and body["subscribers"] >= 0
