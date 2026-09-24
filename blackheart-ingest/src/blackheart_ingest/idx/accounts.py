@@ -19,7 +19,7 @@ import re
 import secrets
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import psycopg
@@ -175,7 +175,11 @@ def make_reset(conn: psycopg.Connection, email: str, minutes: int = RESET_MINUTE
     token = secrets.token_urlsafe(32)
     with conn.cursor() as cur:
         cur.execute("UPDATE idx.password_reset SET used_at = now() WHERE user_id = %s AND used_at IS NULL", (user["id"],))
-        cur.execute("INSERT INTO idx.password_reset (user_id, token_hash, expires_at) VALUES (%s, %s, now() + (%s || ' minutes')::interval)",
+        # clock_timestamp(), not now(): now() is the TRANSACTION's start time, so a token minted inside a long-running
+        # transaction is stamped with a clock that stopped when that transaction opened - it can be born already expired,
+        # or outlive its window by however long the caller had been holding the transaction.
+        cur.execute("INSERT INTO idx.password_reset (user_id, token_hash, expires_at) "
+                    "VALUES (%s, %s, clock_timestamp() + (%s || ' minutes')::interval)",
                     (user["id"], hashlib.sha256(token.encode()).hexdigest(), str(int(minutes))))
     conn.commit()
     return token
@@ -187,14 +191,18 @@ def use_reset(conn: psycopg.Connection, token: str, new_password: str) -> dict[s
         raise ValueError(why)
     h = hashlib.sha256((token or "").strip().encode()).hexdigest()
     with conn.cursor() as cur:
-        cur.execute("SELECT id, user_id, expires_at, used_at FROM idx.password_reset WHERE token_hash = %s", (h,))
+        # The expiry is judged by the clock that WROTE it. Comparing a database timestamp against this process's own
+        # datetime.now() is two clocks pretending to be one: they drift apart on separate hosts, and a link that is
+        # expired by one is still live by the other. The database decides, in the same statement that reads the row.
+        cur.execute("SELECT id, user_id, expires_at, used_at, expires_at < clock_timestamp() AS expired "
+                    "FROM idx.password_reset WHERE token_hash = %s", (h,))
         row = cur.fetchone()
         row = dict(row) if row else None
         if not row:
             raise ValueError("This reset link is not valid")
         if row["used_at"] is not None:
             raise ValueError("This reset link has already been used")
-        if row["expires_at"] < now_utc():
+        if row["expired"]:
             raise ValueError("This reset link has expired; ask for a new one")
         cur.execute("UPDATE idx.app_user SET password_hash = %s, updated_at = now() WHERE id = %s", (hash_password(new_password), row["user_id"]))
         cur.execute("UPDATE idx.password_reset SET used_at = now() WHERE id = %s", (row["id"],))
@@ -331,6 +339,3 @@ def count_users(conn: psycopg.Connection) -> int:
         cur.execute("SELECT count(*) AS n FROM idx.app_user")
         return int(dict(cur.fetchone())["n"])
 
-
-def now_utc() -> datetime:
-    return datetime.now(UTC)
