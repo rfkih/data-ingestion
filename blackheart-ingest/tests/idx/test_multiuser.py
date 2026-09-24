@@ -208,3 +208,42 @@ def test_own_book_helper(env) -> None:
     with pytest.raises(Exception, match="no book"):
         who.own_book(conn, "no-such-book", desk)
     book.archive(conn, bk)
+
+
+def test_one_persons_alerts_and_preferences_are_their_own(env) -> None:
+    """Phase 4 scoping: the bus is shared, the reading of it is not."""
+    c, conn = env["client"], env["conn"]
+    ana, budi = EMAILS
+    ana_id, budi_id = str(env["users"][ana]["id"]), str(env["users"][budi]["id"])
+    from blackheart_ingest.idx import runlog
+    mine = runlog.alert(conn, "info", "test:scope", "for ana", kind="signal", strategy="trend_small",
+                        user_id=ana_id, notify_channels=False)
+    theirs = runlog.alert(conn, "info", "test:scope", "for budi", kind="signal", strategy="trend_small",
+                          user_id=budi_id, notify_channels=False)
+    desk = runlog.alert(conn, "warning", "test:scope", "for the desk", kind="feed", notify_channels=False)
+    try:
+        seen = {a["id"] for a in c.get("/idx/alerts?limit=200", headers=_as(env, ana)).json()}
+        assert mine in seen and desk in seen and theirs not in seen
+        assert {a["id"] for a in c.get("/idx/alerts?limit=200&kind=feed", headers=_as(env, ana)).json()} == {desk}
+        assert all(a["id"] > mine for a in c.get(f"/idx/alerts?limit=200&since={mine}", headers=_as(env, ana)).json())
+
+        # preferences are per person, and unmuting removes the row rather than storing a false
+        assert c.get("/idx/alerts/prefs", headers=_as(env, ana)).json()["prefs"] == []
+        assert c.put("/idx/alerts/prefs", json={"kind": "signal", "muted": True}, headers=_as(env, ana)).status_code == 200
+        assert [p["kind"] for p in c.get("/idx/alerts/prefs", headers=_as(env, ana)).json()["prefs"]] == ["signal"]
+        assert c.get("/idx/alerts/prefs", headers=_as(env, budi)).json()["prefs"] == []
+        assert c.put("/idx/alerts/prefs", json={"kind": "nonsense", "muted": True},
+                     headers=_as(env, ana)).status_code == 422
+        c.put("/idx/alerts/prefs", json={"kind": "signal", "muted": False}, headers=_as(env, ana))
+        assert c.get("/idx/alerts/prefs", headers=_as(env, ana)).json()["prefs"] == []
+
+        # a mute stops the phone, never the record: the row is still on the bus for that person to read
+        from blackheart_ingest.idx import prefs as P
+        P.set_pref(conn, ana_id, kind="signal", muted=True)
+        assert P.allows(conn, ana_id, "signal") is False
+        assert mine in {a["id"] for a in c.get("/idx/alerts?limit=200", headers=_as(env, ana)).json()}
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM idx.alert WHERE job = 'test:scope'")
+            cur.execute("DELETE FROM idx.alert_pref WHERE user_id = ANY(%s)", ([ana_id, budi_id],))
+        conn.commit()
