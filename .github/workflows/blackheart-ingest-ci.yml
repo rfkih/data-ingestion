@@ -124,7 +124,12 @@ jobs:
 
       - name: Capture rollback tag
         run: |
-          PREV=$(ssh $SSH_OPTS -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" "docker inspect blackheart-ingest --format '{{.Config.Image}}' 2>/dev/null | awk -F: '{print \$NF}' || echo NONE")
+          # One line, always. `docker inspect` on a container that does not exist prints an empty line, and the
+          # `|| echo NONE` then appends a second - a two-line value, which $GITHUB_ENV rejects outright
+          # ("Invalid format 'NONE'"). That is how the 2026-09-24 inference deploy died before it did anything:
+          # the rollback capture failed because there was nothing to roll back to.
+          PREV=$(ssh $SSH_OPTS -i ~/.ssh/id_ed25519 "${SSH_USER}@${SSH_HOST}" "docker inspect blackheart-ingest --format '{{.Config.Image}}' 2>/dev/null | head -n1 | awk -F: '{print \$NF}'" || true)
+          PREV=$(printf '%s' "$PREV" | tr -d '[:space:]')
           echo "PREV_TAG=${PREV:-NONE}" >> "$GITHUB_ENV"
           echo "Previous ingest tag: ${PREV}"
 
