@@ -621,6 +621,30 @@ def run_bar_backfill(days: int = 10) -> None:
         logger.info("idx bar backfill: healed=%s still missing=%s", [str(d) for d in healed], [str(d) for d in still])
 
 
+def run_open_window_subscribe() -> None:
+    """08:55 WIB: put today's ticket names on the tick feed, so the book is streaming when the auction matches."""
+    from . import openwindow as ow
+    if today_wib().weekday() >= 5:
+        return
+    with get_connection() as conn:
+        res = ow.subscribe(conn)
+    logger.info("idx open window subscribe: %d name(s) for %d ticket(s)", len(res["codes"]), len(res["tickets"]))
+
+
+def run_open_window() -> None:
+    """09:00-09:30 WIB: stream a placement read for every open ticket line (study #99's execution timing) onto the
+    alert bus, then take the ticket names off the feed. One writer only - the loop holds an advisory lock."""
+    from . import openwindow as ow
+    if today_wib().weekday() >= 5:
+        return
+    with get_connection() as conn:
+        try:
+            res = ow.run_window(conn)
+            logger.info("idx open window: %s", res)
+        finally:
+            ow.unsubscribe(conn)
+
+
 def run_regime_watch() -> None:
     """One alert on the day the index regime turns (overlay.regime_change_alert); silence in between."""
     from . import overlay as ov
@@ -726,6 +750,9 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_broker_snapshot, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="broker_snapshot")
     s.add_job(run_registry_refresh, CronTrigger(hour=20, minute=5, timezone=WIB), id="registry_refresh")
     s.add_job(run_regime_watch, CronTrigger(day_of_week="mon-fri", hour=17, minute=10, timezone=WIB), id="regime_watch")
+    s.add_job(run_open_window_subscribe, CronTrigger(day_of_week="mon-fri", hour=8, minute=55, timezone=WIB), id="open_window_subscribe")
+    s.add_job(run_open_window, CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone=WIB), id="open_window",
+              max_instances=1, misfire_grace_time=300)
     s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=7, minute=30, timezone=WIB), id="macro")
     s.add_job(run_feed_watch, IntervalTrigger(minutes=5), id="feed_watch")
     s.add_job(run_token_guard, IntervalTrigger(minutes=10), id="token_guard")

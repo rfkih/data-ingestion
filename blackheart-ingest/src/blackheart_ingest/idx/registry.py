@@ -50,6 +50,7 @@ REGISTRY: list[dict[str, Any]] = [
         "books": {"rule": "annual", "strategy": "strict"},
         "runs_in": "candidates.py / scores.py, rebalance ticket each May",
         "evidence": [66, 47],
+        "years": {"catalog": True},
         "note": "The only strategy with real fills (IPOT). Its 2020-26 window is one cycle; the 2023-26 half earned +14 % a "
                 "year against +31 % in 2020-23.",
     },
@@ -64,6 +65,7 @@ REGISTRY: list[dict[str, Any]] = [
         "books": {"rule": "trend", "trend_variant": "small"},
         "runs_in": "trend_book.py, nightly draft + scheduler",
         "evidence": [23, 22, 46, 44, 45],
+        "years": {"study": 23, "path": ["results", "small", "years"], "unit": "fraction"},
         "note": "2020-26 is the best 6-year block for this rule in 22 years. Thirty exit variants were tested; none beat the "
                 "10 % trail.",
     },
@@ -318,6 +320,48 @@ def refresh_scorecard(conn: psycopg.Connection) -> dict[str, Any]:
     return {"study": study["id"], "as_of": str(study["as_of"]), "written": written, "with_record": with_record}
 
 
+# ------------------------------------------------------------------------------------- the per-year record
+# Each study shapes its own summary, so there is no generic "give me the yearly returns" - an entry names the path into
+# its own evidence instead (reviewed once, here), and an entry with no such path simply has no yearly row on the page.
+
+def _dig(doc: Any, path: list[Any]) -> Any:
+    for step in path:
+        if isinstance(doc, dict):
+            doc = doc.get(step)
+        elif isinstance(doc, list) and isinstance(step, int) and -len(doc) <= step < len(doc):
+            doc = doc[step]
+        else:
+            return None
+        if doc is None:
+            return None
+    return doc
+
+
+def years_for(conn: psycopg.Connection, entry: dict[str, Any]) -> dict[str, Any] | None:
+    """-> {"source": "study #23" | "research record", "years": {year: percent}} or None when nothing stored has one."""
+    spec = entry.get("years")
+    if not spec:
+        return None
+    if spec.get("catalog"):
+        from . import strategies
+        rows = [r for r in strategies.history(conn, entry["catalog"]) if r.get("size") in (None, 0)]
+        row = next((r for r in rows if (r.get("yearly") or {})), None)
+        if row is None:
+            return None
+        years = {str(k): float(v) for k, v in (row["yearly"] or {}).items() if v is not None}
+        return {"source": "research record", "years": years} if years else None
+    raw = _dig(_study_summary(conn, spec["study"]) or {}, list(spec["path"]))
+    if not isinstance(raw, dict) or not raw:
+        return None
+    mult = 100.0 if spec.get("unit") == "fraction" else 1.0
+    return {"source": f"study #{spec['study']}", "years": {str(k): float(v) * mult for k, v in raw.items() if v is not None}}
+
+
+def _study_summary(conn: psycopg.Connection, study_id: int) -> dict[str, Any] | None:
+    rows = _rows(conn, "SELECT summary FROM idx.study WHERE id = %s", (study_id,), ["summary"])
+    return rows[0]["summary"] if rows else None
+
+
 # ------------------------------------------------------------------------------------------------------- read
 def _state(conn: psycopg.Connection) -> dict[str, dict[str, Any]]:
     rows = _rows(conn, "SELECT key, status, scorecard, evidence, source_study, refreshed_at FROM idx.strategy_state",
@@ -337,6 +381,22 @@ def _entry(e: dict[str, Any], st: dict[str, Any] | None) -> dict[str, Any]:
     out["source_study"] = (st or {}).get("source_study")
     out["has_record"] = bool(out["scorecard"])
     return out
+
+
+def today_for(conn: psycopg.Connection, key: str) -> dict[str, Any]:
+    """What this strategy is saying right now: the signals of its most recent run, and its open rows on the alert bus
+    (during the open window that includes the live placement reads). Nothing here is a decision - the signals are what
+    the rule saw, the alerts are what the desk was told."""
+    from . import runlog, signals
+    rows = signals.latest(conn, key, limit=40)
+    as_of = rows[0]["as_of"] if rows else None
+    rows = [r for r in rows if r["as_of"] == as_of]
+    alerts = runlog.open_alerts(conn, 40, strategy=key)
+    return {"as_of": _iso(as_of),
+            "signals": [{**r, "as_of": _iso(r["as_of"]), "created_at": _iso(r["created_at"]),
+                         "ref_price": (str(r["ref_price"]) if r["ref_price"] is not None else None),
+                         "size_pct": (str(r["size_pct"]) if r["size_pct"] is not None else None)} for r in rows],
+            "alerts": [{**a, "ts": _iso(a["ts"]), "valid_until": _iso(a["valid_until"])} for a in alerts]}
 
 
 def desk(conn: psycopg.Connection) -> dict[str, Any]:
@@ -370,6 +430,8 @@ def detail(conn: psycopg.Connection, key: str) -> dict[str, Any] | None:
             ["id", "name", "as_of", "note", "report_path"])}
         studies = [{**found[i], "as_of": _iso(found[i]["as_of"])} for i in ids if i in found]
     row["studies"] = studies
+    row["yearly"] = years_for(conn, e)
+    row["today"] = today_for(conn, key)
     if e.get("catalog"):                                      # the annual families keep their per-size research record
         from . import strategies
         row["catalog_history"] = [{k: _iso(v) for k, v in r.items()} for r in strategies.history(conn, e["catalog"])]
