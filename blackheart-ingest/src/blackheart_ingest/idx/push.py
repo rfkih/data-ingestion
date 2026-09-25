@@ -181,7 +181,9 @@ def send_all(conn: psycopg.Connection, title: str, body: str, data: dict[str, An
     try:
         devs = devices(conn, user_id=user_id)
         out["devices"] = len(devs)
-        if not devs:
+        if not devs:                                                    # FCM works, the message has nowhere to land: say so.
+            logger.warning("idx push: no enabled device for %s; dropped: %s",                  # silent before 2026-09-24, so a
+                           f"user {user_id}" if user_id else "the desk", title)                # feed-down alert vanished unseen
             return out
         bearer = bearer or access_token(sender=sender)
     except Exception as e:

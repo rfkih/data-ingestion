@@ -77,6 +77,54 @@ def test_notify_split_title() -> None:
     assert notify.ticket_data({"id": 3, "book": "trend_live"}) == {"route": "/m/ticket?book=trend_live", "kind": "ticket", "book": "trend_live", "ticket": 3}
 
 
+def _fake_broadcast(calls, devices_of):
+    """push.broadcast with a device count per account: {user_id or None: n}."""
+    def broadcast(title, body, data=None, *, sender=None, user_id=None):
+        n = devices_of.get(user_id, 0)
+        calls.append({"user_id": user_id, "title": title, "devices": n})
+        return {"sent": n, "failed": 0, "gone": 0, "devices": n, "configured": True}
+    return broadcast
+
+
+def test_desk_alert_falls_back_to_every_phone(monkeypatch) -> None:
+    """The 2026-09-24 silent outage: the ops account had no phone (the only one was signed in as another account), so
+    twelve feed-down alerts went nowhere. Desk news now reaches every phone on the desk rather than being dropped."""
+    calls: list[dict] = []
+    monkeypatch.setattr(push, "configured", lambda: True)
+    monkeypatch.delenv(notify.TOKEN_ENV, raising=False)
+    monkeypatch.setenv(notify.OPS_ENV, "ops@example.com")
+    monkeypatch.setattr(notify, "ops_user_id", lambda: "ops-uid")
+    monkeypatch.setattr(notify, "owner_of", lambda book: "owner-uid" if book == "someones-book" else None)
+    monkeypatch.setattr(push, "broadcast", _fake_broadcast(calls, {None: 1}))          # one phone, on neither account
+
+    assert notify.on_alert("warning", "feed", "stockbit/feed: DOWN - last frame 50614s ago")
+    assert [c["user_id"] for c in calls] == ["ops-uid", None]                          # tried ops, then the whole desk
+    assert calls[-1]["title"] == "[WARNING] feed"
+
+    calls.clear()                                                                      # a book alert stays with its owner
+    assert notify.on_alert("critical", "book:someones-book", "level hit") is False
+    assert [c["user_id"] for c in calls] == ["owner-uid"]
+
+    calls.clear()                                                                      # ops account unset: still desk news
+    monkeypatch.setattr(notify, "ops_user_id", lambda: None)
+    assert notify.send("feed is back")
+    assert [c["user_id"] for c in calls] == [None]
+
+    calls.clear()                                                                      # a database hiccup is not "no phone"
+    monkeypatch.setattr(notify, "ops_user_id", lambda: "ops-uid")
+    monkeypatch.setattr(push, "broadcast", lambda t, b, d=None, *, sender=None, user_id=None: {
+        "sent": 0, "devices": 0, "configured": True, "error": "OperationalError: connection refused"})
+    assert notify.send("feed is down") is False
+
+
+def test_send_all_says_when_nothing_is_registered(conn, sa_file, caplog) -> None:
+    """A push with no device to land on is a warning in the log, not a silent return."""
+    with caplog.at_level("WARNING"):
+        rep = push.send_all(conn, "Feed", "DOWN", user_id=str(uuid.uuid4()))
+    assert rep["devices"] == 0 and rep["sent"] == 0
+    assert any("no enabled device" in r.getMessage() for r in caplog.records)
+
+
 @pytest.fixture(scope="module")
 def conn():
     dsn = os.environ.get("INGEST_DB_DSN")
