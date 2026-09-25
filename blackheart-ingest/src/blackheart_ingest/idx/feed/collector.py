@@ -328,6 +328,7 @@ class Collector:
         self.renew_tried = False
         self.started = datetime.now(UTC)
         self.connected_at: datetime | None = None
+        self._lock_conn: psycopg.Connection | None = None      # the session the advisory lock lives on
 
     # ---- db (loop thread only) -----------------------------------------------------------------------------------
     def db(self) -> psycopg.Connection:
@@ -374,7 +375,22 @@ class Collector:
             cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (LOCK_KEY,))
             got = bool(cur.fetchone()[0])
         self.db().commit()
+        if got:
+            self._lock_conn = self.conn
         return got
+
+    def hold_lock(self) -> bool:
+        """Still the only collector? An advisory lock lives on the SESSION that took it, so a Postgres
+        restart drops it while this process carries on streaming - measured on 2026-09-25, when the
+        container was recreated and `pg_locks` came back holding nothing at all while the collector kept
+        writing. That is exactly the state the lock exists to prevent.
+
+        Checked on every heartbeat. On the same session it costs nothing; after a reconnect it takes the
+        lock again, which is the repair. False means another collector got there first and this one
+        should stand down - the watchdog will not start a replacement while that one holds it."""
+        if self.conn is not None and not self.conn.closed and self.conn is self._lock_conn:
+            return True
+        return self.singleton()
 
     # ---- token + key ---------------------------------------------------------------------------------------------
     def load_token(self) -> bool:
@@ -574,6 +590,13 @@ class Collector:
                 last_status = time.monotonic()
                 self.set_state(self.state)
                 await self.check_expiry()
+                try:
+                    if not self.hold_lock():
+                        logger.error("another collector now holds %r - standing down", LOCK_KEY)
+                        self.event("close", "another collector holds the lock")
+                        self.stop.set()
+                except Exception:                       # a database hiccup is not a reason to stop streaming
+                    logger.warning("feed: could not verify the advisory lock", exc_info=True)
 
     def flush(self, *, force: bool = False) -> None:
         trades, books = self.proc.drain(time.monotonic(), force=force)

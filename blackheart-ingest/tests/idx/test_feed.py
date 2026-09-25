@@ -271,3 +271,38 @@ def test_raw_archive_round_trip_and_replay_parsing(tmp_path):
     for frame, at in RawArchive.iter_frames(files[0]):
         p.on_frame(frame, at)
     assert p.n_frames == 2 and [t["price"] for t in p.trades] == [4210, 4220]
+
+
+def test_the_lock_is_retaken_after_the_session_behind_it_goes_away() -> None:
+    """An advisory lock lives on the session that took it. When Postgres restarts, the lock goes with the
+    connection while this process keeps streaming - the exact state the lock exists to prevent (seen on
+    2026-09-25, when the container was recreated and pg_locks came back empty). The heartbeat re-takes it
+    on a fresh session, and stands the collector down only if somebody else got there first."""
+    from blackheart_ingest.idx.feed import collector as C
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.closed = False
+
+    c = C.Collector.__new__(C.Collector)                       # no database, no sockets: the decision logic only
+    taken = {"n": 0}
+    c.conn = FakeConn()
+    c._lock_conn = c.conn
+
+    def fake_singleton() -> bool:
+        taken["n"] += 1
+        c._lock_conn = c.conn
+        return fake_singleton.result
+
+    fake_singleton.result = True
+    c.singleton = fake_singleton                                # type: ignore[method-assign]
+
+    assert c.hold_lock() is True and taken["n"] == 0, "the same live session is not re-locked every beat"
+
+    c.conn = FakeConn()                                         # a reconnect: new session, no lock on it
+    assert c.hold_lock() is True and taken["n"] == 1, "a new session must take the lock again"
+    assert c.hold_lock() is True and taken["n"] == 1, "and then stop re-taking it"
+
+    c.conn = FakeConn()
+    fake_singleton.result = False                               # somebody else holds it now
+    assert c.hold_lock() is False, "a second collector means this one stands down"

@@ -60,3 +60,34 @@ def test_paper_fill_lock_released_on_error(two_conns) -> None:
         with ticket._book_lock(a, key):
             raise RuntimeError("boom")
     assert not _held_elsewhere(b, key)
+
+
+def _dsn():
+    import os
+    return os.environ.get("INGEST_DB_DSN")
+
+
+def test_holds_lock_answers_who_owns_it_not_whether_the_socket_works() -> None:
+    """The old keep_lock ran `SELECT 1` and took a working connection as proof the lock was held. It is
+    not: a lock lives on the session. On 2026-09-25 the Postgres container was recreated, every client
+    reconnected, pg_locks came back empty, and that check kept passing while the scheduler ran unlocked."""
+    import psycopg
+    import pytest as _pytest
+
+    from blackheart_ingest.idx import scheduler as S
+
+    dsn = _dsn()
+    if not dsn:
+        _pytest.skip("INGEST_DB_DSN not set")
+    key = "test-holds-lock"
+    with psycopg.connect(dsn, connect_timeout=5) as a, psycopg.connect(dsn, connect_timeout=5) as b:
+        assert S.holds_lock(a, key) is False
+        assert S.try_singleton_lock(a, key) is True
+        assert S.holds_lock(a, key) is True
+
+        # b's socket is perfectly healthy and b holds nothing - the distinction the old check could not make
+        with b.cursor() as cur:
+            cur.execute("SELECT 1")
+        b.commit()
+        assert S.holds_lock(b, key) is False
+        assert S.try_singleton_lock(b, key) is False, "a second holder must be refused"
