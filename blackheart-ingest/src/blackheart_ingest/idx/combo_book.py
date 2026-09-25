@@ -54,13 +54,17 @@ DEFAULTS: dict[str, Any] = {
     "ml": {"margin": 2.0, "ema": 3, "confirm": 0.05, "confirm_days": 10, "max_hold": 60, "min_v60": 5e9, "min_price": 100.0,
            # confirmation rules [threshold, trading days]; None = the single rule (confirm, confirm_days). ML-8 (#175) ens4 =
            # [[0.05, 10], [0.08, 10], [0.10, 10], [0.08, 5]]: each rule watches its own level with an equal share of the ML slot.
-           "confirm_rules": None},
+           "confirm_rules": None,
+           # only names on the main boards (Utama/Pengembangan) on the day: 22 of 672 backtest ML trades were on a watch-list
+           # board (Akselerasi / Pemantauan Khusus), which the desk's other sleeves never buy (operator 2026-09-26)
+           "main_board_only": True},
     # participation cap: a new buy may not exceed this share of the name's 20-day mean traded value (FE-2 #198: square-root impact
     # makes the trend sleeve lose 25 % of its return near Rp 10 B without it). None = uncapped (ML: a cap cost more in skipped
     # signals than it saved). The gap sleeve keeps its own, tighter cap: 1 % of the 60-day median value (gapfade.PARTICIPATION).
     "adv_cap": {"trend": 0.05, "ml": None},
 }
 ADV_DAYS = 20
+MAIN_BOARDS = "12"                    # daily_summary.remarks board digit: 1 Utama, 2 Pengembangan
 # the strategy catalog the app shows (name, one-liner, rhythm line) - the same three sleeves the runner knows
 CATALOG: dict[str, dict[str, str]] = {
     "gap": {"name": "Gap fade", "one": "Buys main-board names that open 7 % or more under the previous close and sells into the same close.",
@@ -231,13 +235,13 @@ def ml_scores(conn: psycopg.Connection, b: dict[str, Any], d: date, S: dict[str,
     t_lo = t_hi - timedelta(days=int(m["ema"]) * 3 + 4)
     rows = _rows(conn, """
         SELECT p.code, (p.made_at AT TIME ZONE 'Asia/Jakarta')::date AS d, p.pred_ret, p.ref_price, f.value_60d_median AS v60,
-               s.bid, s.offer, b.close
+               s.bid, s.offer, b.close, s.remarks
           FROM idx.ml_prediction p
           JOIN idx.feature_daily f ON f.code = p.code AND f.trade_date = (p.made_at AT TIME ZONE 'Asia/Jakarta')::date
           LEFT JOIN idx.daily_summary s ON s.code = p.code AND s.trade_date = f.trade_date
           LEFT JOIN idx.bar b ON b.code = p.code AND b.trade_date = f.trade_date AND b.source = 'idx'
          WHERE p.horizon = '5d' AND p.made_at > %s AND p.made_at <= %s AND p.pred_ret IS NOT NULL""", (t_lo, t_hi),
-        ["code", "d", "pred_ret", "ref_price", "v60", "bid", "offer", "close"])
+        ["code", "d", "pred_ret", "ref_price", "v60", "bid", "offer", "close", "remarks"])
     if not rows:
         return pd.DataFrame(columns=["code", "e", "rt", "close", "v60"])
     P = pd.DataFrame(rows)
@@ -252,6 +256,8 @@ def ml_scores(conn: psycopg.Connection, b: dict[str, Any], d: date, S: dict[str,
     P = P.sort_values(["code", "d"])
     P["e"] = P.groupby("code")["ex"].transform(lambda s: s.ewm(span=int(m["ema"]), min_periods=1).mean())
     L = P[P["d"] == d].copy()
+    if m.get("main_board_only"):                                        # board digit = 5th char of the remarks notation
+        L = L[L["remarks"].fillna("").str[4:5].isin(list(MAIN_BOARDS))]
     fee_b, fee_s = float(b["fee_buy_pct"]) / 100, float(b["fee_sell_pct"]) / 100
     tk = L["close"].map(lambda p: float(ticket.tick_size(Decimal(str(p)))))
     c_in = np.where((L["offer"] > 0) & (L["offer"] >= L["close"]), L["offer"] / L["close"] - 1, tk / L["close"]) + fee_b

@@ -245,14 +245,19 @@ def disable_symbols(conn: psycopg.Connection, codes: list[str]) -> int:
     return n
 
 
-def liquid_codes(conn: psycopg.Connection, n: int = 100) -> list[str]:
-    """The n most traded main-board names by 60-day median value on the latest feature day, plus every name any active
-    book holds and every watchlist name - the default subscription."""
+LIQUID_FLOOR = 5e9   # Rp: the desk's liquidity floor (60-day median value) - the gap-fade scan's universe
+
+
+def liquid_codes(conn: psycopg.Connection, n: int = 100, floor: float = LIQUID_FLOOR) -> list[str]:
+    """The n most traded names by 60-day median value on the latest feature day AND every name at or above ``floor``, plus
+    every name any active book holds and every watchlist name - the default subscription. The floor is what makes the feed
+    see every name the gap-fade scan can trade (top-100 alone covered ~114 of ~170, 2026-09-25 live audit)."""
     with conn.cursor(row_factory=tuple_row) as cur:
-        cur.execute("""WITH d AS (SELECT max(trade_date) AS d FROM idx.feature_daily)
-                       SELECT f.code FROM idx.feature_daily f, d
-                        WHERE f.trade_date = d.d AND f.value_60d_median IS NOT NULL
-                        ORDER BY f.value_60d_median DESC NULLS LAST LIMIT %s""", (n,))
+        cur.execute("""WITH d AS (SELECT max(trade_date) AS d FROM idx.feature_daily),
+                            r AS (SELECT f.code, f.value_60d_median AS v,
+                                         row_number() OVER (ORDER BY f.value_60d_median DESC NULLS LAST) AS k
+                                    FROM idx.feature_daily f, d WHERE f.trade_date = d.d AND f.value_60d_median IS NOT NULL)
+                       SELECT code FROM r WHERE k <= %s OR v >= %s""", (n, floor))
         codes = [r[0] for r in cur.fetchall()]
         cur.execute("SELECT DISTINCT p.code FROM idx.position p JOIN idx.book b ON b.book = p.book WHERE p.lots > 0 AND b.archived_at IS NULL")
         codes += [r[0] for r in cur.fetchall()]

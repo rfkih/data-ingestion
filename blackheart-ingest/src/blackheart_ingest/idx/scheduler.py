@@ -16,6 +16,7 @@ Schedule (WIB):
   every 2 min     ara_touch           in-session: held/watched names at the ARA limit - locked / sellers queued / faded (study #101)
   20:25 Mon-Fri   risk_check          risk report of each real book holding names (idx/risk.py); one warning a day per book past risk.LIMITS
   20:40 Mon-Fri   ml_daily            self-learning prediction desk (idx/ml): realise, retrain the daily horizons, predict, score
+  20:50 Mon-Fri   feed_symbols        feed subscription = every name >= Rp 5 bn 60-day median value + top 100 + held + watched
   16:30 Mon-Fri   ml_intraday_train   retrain the 1/10/30/60-minute horizons on every feed day
   every 1 min     ml_intraday_predict in-session: score every live name for the minute horizons
   every 10 min    ml_evaluate         fill in what happened for every forecast whose horizon has passed
@@ -210,17 +211,24 @@ def _all_books(conn) -> list[dict]:
 
 
 def check_rebalance_due() -> None:
-    """Early May: remind the operator to build the annual ticket if none exists for this year's run."""
+    """Early May: remind the operator to build the annual ticket for every real annual-rule book (not archived, not paper)
+    that has none yet for this year's run. It used to watch only the book called 'live', which was archived in 2026-09."""
+    from . import ticket
     d = today_wib()
     if not (d.month == 5 and d.day <= 10) or d.weekday() >= 5:
         return
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM idx.ticket WHERE book = 'live' AND mode = 'rebalance' AND ticket_date >= %s", (date(d.year, 4, 25),))
-            row = cur.fetchone()
-            n = next(iter(row.values())) if isinstance(row, dict) else row[0]
-        if not n:
-            runlog.alert(conn, "warning", "ticket", f"annual rebalance window ({d.year}): no rebalance ticket built yet - `idx ticket build --book live`")
+            cur.execute("SELECT book FROM idx.book WHERE rule = 'annual' AND archived_at IS NULL ORDER BY book")
+            books = [r["book"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+        for book in (b for b in books if ticket.is_live(b)):
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM idx.ticket WHERE book = %s AND mode = 'rebalance' AND ticket_date >= %s", (book, date(d.year, 4, 25)))
+                row = cur.fetchone()
+                n = next(iter(row.values())) if isinstance(row, dict) else row[0]
+            if not n:
+                runlog.alert(conn, "warning", "ticket", f"annual rebalance window ({d.year}): no rebalance ticket built yet for {book} - "
+                             f"`idx ticket build --book {book}`", book=book, dedupe_key=f"rebalance_due:{book}:{d}")
 
 
 def run_dividends() -> None:
@@ -497,6 +505,17 @@ def run_track_report() -> None:
     text = "\n\n".join(blocks)
     logger.info("idx track: %d book(s)", len(blocks))
     notify.send(text, title=f"Track record {d:%d %b}")
+
+
+def run_feed_symbols() -> None:
+    """Nightly: the feed's 'liquid' subscription = every name at or above the Rp 5 bn floor (plus the top 100, held and
+    watched names), so a name that becomes liquid is watched from the next session and gap-fade sees its whole universe.
+    The collector re-reads idx.feed_symbol on its own timer and resubscribes when the list changed."""
+    from .feed import store as fs
+    with get_connection() as conn:
+        codes = fs.liquid_codes(conn)
+        n = fs.set_symbols(conn, codes, reason="liquid", replace=True)
+    logger.info("idx feed symbols: %d liquid/held/watched names subscribed", n)
 
 
 def run_feed_audit() -> None:
@@ -1060,6 +1079,7 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_registry_refresh, CronTrigger(hour=20, minute=5, timezone=WIB), id="registry_refresh")
     s.add_job(run_signal_board, CronTrigger(day_of_week="mon-fri", hour=20, minute=15, timezone=WIB), id="signal_board")
     s.add_job(run_risk_check, CronTrigger(day_of_week="mon-fri", hour=20, minute=25, timezone=WIB), id="risk_check")
+    s.add_job(run_feed_symbols, CronTrigger(day_of_week="mon-fri", hour=20, minute=50, timezone=WIB), id="feed_symbols")
     s.add_job(run_regime_watch, CronTrigger(day_of_week="mon-fri", hour=17, minute=10, timezone=WIB), id="regime_watch")
     s.add_job(run_open_window_subscribe, CronTrigger(day_of_week="mon-fri", hour=8, minute=55, timezone=WIB), id="open_window_subscribe")
     s.add_job(run_open_window, CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone=WIB), id="open_window",
