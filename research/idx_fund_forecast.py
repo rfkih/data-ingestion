@@ -93,7 +93,7 @@ def load(conn) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     b["trade_date"] = pd.to_datetime(b["trade_date"])
     b = b.sort_values(["code", "trade_date"])
     log(f"bars {len(b):,}")
-    a = pd.read_sql(f"""SELECT code, (published_at AT TIME ZONE 'Asia/Jakarta')::date AS d, kind FROM idx.announcement
+    a = pd.read_sql("""SELECT code, (published_at AT TIME ZONE 'Asia/Jakarta')::date AS d, kind FROM idx.announcement
                          WHERE kind = ANY(%(k)s) AND code IS NOT NULL""", conn, params={"k": ANN_KINDS})
     a["d"] = pd.to_datetime(a["d"])
     log(f"announcements {len(a):,}")
