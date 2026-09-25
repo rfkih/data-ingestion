@@ -88,7 +88,7 @@ def tick(p):
 
 def load(conn):
     q = lambda sql, params=(): pd.read_sql(sql, conn, params=params)  # noqa: E731
-    bars = q("""SELECT b.code, b.trade_date, b.close, b.adj_factor, b.volume, s.bid, s.offer, s.bid_volume AS bv, s.offer_volume AS ov, s.frequency AS freq,
+    bars = q("""SELECT b.code, b.trade_date, b.close, b.adj_factor, b.volume, s.bid, s.offer, s.bid_volume AS bv, s.offer_volume AS ov, s.frequency AS freq, s.remarks,
                        s.foreign_buy AS fb, s.foreign_sell AS fs, f.foreign_net_share_5d AS f5, f.foreign_net_share_20d AS f20, f.value_60d_median AS v60
                   FROM idx.bar b LEFT JOIN idx.daily_summary s USING (code, trade_date) LEFT JOIN idx.feature_daily f USING (code, trade_date)
                  WHERE b.source = 'idx' AND b.trade_date BETWEEN %s AND %s""", (START, END))
@@ -103,17 +103,58 @@ def load(conn):
     return bars, listing, idx, macro, buyb, splits, pead
 
 
-def panels(bars, listing):
+# Board filter of the research universes (engine fix 2026-09-25, research/IDX_ENGINE_FIX_2026-09-25.md; bias measured in #189).
+#   pit      (default) the board ON THE DAY from idx.daily_summary.remarks (5th char; the 2020-01..07 notation's last char),
+#            applied in build() as a per-day mask on LIQ (and so BLUE/BASKET/ENERGY); every code keeps its column.
+#   current  the pre-fix behaviour: drop every code whose CURRENT idx.listing.board is not Utama/Pengembangan (look-ahead:
+#            loses names that later fell to Pemantauan Khusus/delisted, keeps names that were on Akselerasi/PK at the time).
+#            Only to reproduce reports written before 2026-09-25.  IDX_BOARD_MODE=current|pit.
+BOARD_MODES = ("pit", "current")
+OK_BOARD_DIGITS = ("1", "2")                 # Utama, Pengembangan
+
+
+def board_mode(mode=None):
+    m = (mode or os.environ.get("IDX_BOARD_MODE") or "pit").strip().lower()
+    if m not in BOARD_MODES:
+        raise ValueError(f"IDX_BOARD_MODE must be one of {BOARD_MODES}, got {m!r}")
+    return m
+
+
+def board_digit(remarks: pd.Series) -> pd.Series:
+    """Board digit from daily_summary.remarks: 5th char (1 Utama .. 5 Ekonomi Baru); the 2020-01..07 8-char notation carries it
+    as the last char (agrees 696/696 with the new notation on the switch day, #189). None when unreadable."""
+    rm = remarks.fillna("").astype(str)
+    d5, old = rm.str[4], rm.str[-1]
+    return pd.Series(np.where(d5.isin(list("12345")), d5, np.where((rm.str.len() == 8) & old.isin(list("123")), old, None)), index=remarks.index)
+
+
+def pit_board_mask(bars: pd.DataFrame, dates, cols) -> pd.DataFrame:
+    """True where the code sat on Utama/Pengembangan on that day (per code forward- then back-filled over unreadable days,
+    exactly #189's `pit_board`)."""
+    b = bars[["code", "trade_date"]].copy()
+    b["b"] = board_digit(bars["remarks"]).to_numpy()
+    b["trade_date"] = pd.to_datetime(b["trade_date"])
+    B = b.pivot(index="trade_date", columns="code", values="b").reindex(index=dates, columns=cols).ffill().bfill()
+    return B.isin(OK_BOARD_DIGITS)
+
+
+def panels(bars, listing, board=None):
+    mode = board_mode(board)
     bars = bars.copy()
     for c in ("close", "adj_factor", "volume", "bid", "offer", "bv", "ov", "freq", "fb", "fs", "f5", "f20", "v60"):
         bars[c] = pd.to_numeric(bars[c], errors="coerce")
     bars["adj"] = bars["close"] * bars["adj_factor"].fillna(1.0)
     bars["fnet"] = (bars["fb"].fillna(0) - bars["fs"].fillna(0)) * bars["close"]
-    ok = set(listing.loc[listing["board"].isin(["Utama", "Pengembangan"]), "code"])
-    bars = bars[bars["code"].isin(ok)]
+    if mode == "current":
+        ok = set(listing.loc[listing["board"].isin(["Utama", "Pengembangan"]), "code"])
+        bars = bars[bars["code"].isin(ok)]
+    elif "remarks" not in bars:
+        raise ValueError("IDX_BOARD_MODE=pit needs daily_summary.remarks in bars (S.load selects it)")
     P = {c: bars.pivot(index="trade_date", columns="code", values=c).sort_index() for c in ("adj", "close", "volume", "bid", "offer", "bv", "ov", "freq", "fnet", "f5", "f20", "v60")}
     for k in P:
         P[k].index = pd.to_datetime(P[k].index)
+    if mode == "pit":
+        P["board_ok"] = pit_board_mask(bars, P["adj"].index, P["adj"].columns)
     return P
 
 
@@ -133,6 +174,8 @@ def build(P, listing, idx, macro, buyb, splits, pead):
     adj, close, vol = P["adj"], P["close"], P["volume"]
     dates, cols = adj.index, adj.columns
     liq = (P["v60"] >= LIQ) & (close >= MIN_PRICE) & (vol > 0) & adj.notna()
+    if "board_ok" in P:                                                   # pit mode: board on the day (see panels)
+        liq &= P["board_ok"].reindex(index=dates, columns=cols).fillna(False).astype(bool)
     blue = liq & (P["v60"] >= BLUE_LIQ) & (close >= BLUE_PRICE)
     rank_v = P["v60"].where(blue).rank(axis=1, ascending=False)
     basket = blue & (rank_v <= BASKET_N)

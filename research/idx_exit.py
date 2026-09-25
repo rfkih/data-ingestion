@@ -88,13 +88,22 @@ def load_hl(conn, P):
     return out["high"] * f, out["low"] * f
 
 
-def load_all(dsn, cache=None):
+def load_all(dsn, cache=None, board=None):
+    """(P, unis, comp, H, L). board: 'pit' (default) or 'current' (pre-2026-09-25 look-ahead filter), else IDX_BOARD_MODE.
+    A cache written under the other board mode is REFUSED (a pre-fix cache has no P['board_ok'] = 'current'), so a stale
+    tmp/exit_cache.pkl can no longer silently bypass the point-in-time board fix."""
+    mode = S.board_mode(board)
     if cache and os.path.exists(cache):
         with open(cache, "rb") as fh:
-            return pickle.load(fh)
+            data = pickle.load(fh)
+        cached = "pit" if "board_ok" in data[0] else "current"
+        if cached != mode:
+            raise RuntimeError(f"{cache} holds board mode {cached!r} panels but {mode!r} was asked for: point IDX_EXIT_CACHE at a "
+                               f"{mode} cache (e.g. tmp/exit_cache_pit.pkl) or set IDX_BOARD_MODE={cached} to reproduce an old report")
+        return data
     with psycopg.connect(dsn) as conn:
         bars, listing, idx, macro, buyb, splits, pead = S.load(conn)
-        P = S.panels(bars, listing)
+        P = S.panels(bars, listing, board=mode)
         _, unis, comp = S.build(P, listing, idx, macro, buyb, splits, pead)
         H, L = load_hl(conn, P)
     data = (P, unis, comp, H, L)

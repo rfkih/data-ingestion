@@ -62,7 +62,8 @@ def tick(p):
 
 # ------------------------------------------------------------------------------------------------------------------ data
 def load(conn) -> pd.DataFrame:
-    bars = pd.read_sql("""SELECT b.code, b.trade_date, b.open, b.high, b.low, b.close, b.volume, b.value, s.remarks, f.value_60d_median AS v60
+    # opens back-filled from Yahoo (jobs/bar_open.py, open_src='yahoo') are chart data, not IDX opening prints: keep them out
+    bars = pd.read_sql("""SELECT b.code, b.trade_date, CASE WHEN b.open_src = 'idx' THEN b.open END AS open, b.high, b.low, b.close, b.volume, b.value, s.remarks, f.value_60d_median AS v60
                             FROM idx.bar b JOIN idx.daily_summary s USING (code, trade_date) LEFT JOIN idx.feature_daily f USING (code, trade_date)
                            WHERE b.source = 'idx' AND b.trade_date BETWEEN %s AND %s""", conn, params=(START, END))
     for c in ("open", "high", "low", "close", "volume", "value", "v60"):

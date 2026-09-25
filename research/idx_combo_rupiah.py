@@ -55,8 +55,10 @@ def ml_trades(P, dates, codes, A, raw, offer, bid, liq):
     return [{"strat": "ML", "code": codes[r.j], "t_in": int(r.t_in), "t_out": int(r.t_out)} for r in log.itertuples()]
 
 
-def trend_trades(dsn, dates):
-    P, unis, comp, Hp, Lp = E.load_all(dsn, os.environ.get("IDX_EXIT_CACHE"))
+def trend_trades(dsn, dates, *, cache=None, board=None, legacy_shift=False):
+    """The deployed trend book's own K-10 trades mapped onto `dates`. cache defaults to IDX_EXIT_CACHE; board -> E.load_all.
+    legacy_shift=True reproduces the pre-2026-09-25 mapping (every trade one session late) for old reports only."""
+    P, unis, comp, Hp, Lp = E.load_all(dsn, cache if cache is not None else os.environ.get("IDX_EXIT_CACHE"), board=board)
     c_in, c_out = S.costs(P)
     adj, vol = P["adj"], P["volume"]
     d_tr = adj.index
@@ -80,9 +82,14 @@ def trend_trades(dsn, dates):
     _, trs, open_ = E.run_book(A, H, L, c_in, c_out, entry, vr.to_numpy(float), rule, small)
     pos = {d: i for i, d in enumerate(dates)}
     out = []
+    lag = 1 if legacy_shift else 0
     for tup in trs:
         e, j, hold = tup[0], tup[1], tup[4]
-        d_in, d_out = d_tr[e + 1], d_tr[e + 1 + hold]           # the simulator enters at close e+1 (the tuple's e is the signal day)
+        # E.run_book's tuple: e = the FILL day (signal at close e-1, bought at close e), hold = exit fill day - e.
+        # (Before 2026-09-25 this read d_tr[e + 1], d_tr[e + 1 + hold] - every trend trade replayed one session late.)
+        if e + lag + hold >= len(d_tr):
+            continue
+        d_in, d_out = d_tr[e + lag], d_tr[e + lag + hold]
         if d_in in pos and d_out in pos:
             out.append({"strat": "trend", "code": adj.columns[j], "t_in": pos[d_in], "t_out": pos[d_out]})
     return out
