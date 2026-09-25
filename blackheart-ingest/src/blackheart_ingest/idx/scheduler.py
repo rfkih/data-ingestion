@@ -434,6 +434,28 @@ def run_ara_watch() -> None:
         logger.error("ara watch failed: %s", (r.stderr or "")[-2000:])
         return
     logger.info("idx ara watch: %s", (r.stdout or "").strip().splitlines()[:1])
+    _ara_feed_subscribe(d)
+
+
+ARA_PAPER_N = 5
+
+
+def _ara_feed_subscribe(d: date) -> None:
+    """Record tomorrow's intraday path of the model's top ARA picks: they are small caps outside the liquid feed list, and
+    menu 45's stop question (does a 3-6 % stop cut the losers or shake out the winners first?) can only be answered from
+    minute bars (operator 2026-09-26). PAPER measurement only - reason 'ara_paper', replaced every night; no ticket, no book."""
+    from .feed import store as fs
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT code FROM idx.ara_watch WHERE run_date = %s AND p_lock IS NOT NULL ORDER BY p_lock DESC LIMIT %s",
+                            (d, ARA_PAPER_N))
+                codes = [r["code"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+            if codes:
+                fs.set_symbols(conn, codes, reason="ara_paper", replace=True)
+        logger.info("idx ara paper feed: %s", ", ".join(codes) or "no picks")
+    except Exception:
+        logger.exception("idx ara paper feed subscribe failed")
 
 
 def run_ara_touch() -> None:
