@@ -68,7 +68,8 @@ def dsn() -> str:
 
 def load(d: str) -> dict[str, pd.DataFrame]:
     with psycopg.connect(d) as conn, conn.cursor() as cur:
-        cur.execute("""SELECT code, trade_date, open, high, low, close, volume, value, adj_factor FROM idx.bar
+        # opens back-filled from Yahoo (open_src='yahoo') are chart data, not IDX opening prints: keep them out
+        cur.execute("""SELECT code, trade_date, CASE WHEN open_src = 'idx' THEN open END AS open, high, low, close, volume, value, adj_factor FROM idx.bar
                         WHERE source = 'idx' AND trade_date >= '2019-09-01'""")
         df = pd.DataFrame(cur.fetchall(), columns=["code", "d", "open", "high", "low", "close", "volume", "value", "af"])
     for c in ("open", "high", "low", "close", "volume", "value", "af"):

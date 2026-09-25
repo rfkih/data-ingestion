@@ -105,7 +105,8 @@ def tick(px):
 # ---------------------------------------------------------------- data
 def load(conn):
     q = lambda s, p=(): pd.read_sql(s, conn, params=p)  # noqa: E731
-    bars = q("""SELECT b.code, b.trade_date, b.open, b.close, b.adj_factor, s.bid, s.offer, f.value_60d_median AS v60, f.mcap
+    # opens back-filled from Yahoo (open_src='yahoo') are chart data, not IDX opening prints: keep them out
+    bars = q("""SELECT b.code, b.trade_date, CASE WHEN b.open_src = 'idx' THEN b.open END AS open, b.close, b.adj_factor, s.bid, s.offer, f.value_60d_median AS v60, f.mcap
                   FROM idx.bar b LEFT JOIN idx.daily_summary s USING (code, trade_date) LEFT JOIN idx.feature_daily f USING (code, trade_date)
                  WHERE b.source = 'idx' AND b.trade_date >= '2019-10-01'""")
     fund = q("""SELECT f.code, f.period_end, f.published_at, f.months, f.net_profit, f.net_profit_prior, f.revenue, f.revenue_prior, f.cfo,

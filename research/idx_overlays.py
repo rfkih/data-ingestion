@@ -53,9 +53,10 @@ def load(conn, codes):
     f20, f5, liq (trailing 60d median value >= 5bn)."""
     with conn.cursor() as cur:
         cur.execute("SET max_parallel_workers_per_gather = 0")   # docker /dev/shm is small; avoid parallel DSM spill
+        # opens back-filled from Yahoo (open_src='yahoo') are chart data, not IDX opening prints: keep them out
         cur.execute(
             """
-            SELECT b.trade_date, b.code, b.open * b.adj_factor, b.high * b.adj_factor, b.low * b.adj_factor,
+            SELECT b.trade_date, b.code, CASE WHEN b.open_src = 'idx' THEN b.open END * b.adj_factor, b.high * b.adj_factor, b.low * b.adj_factor,
                    b.close * b.adj_factor, b.value, f.foreign_net_share_20d, f.foreign_net_share_5d, f.value_60d_median
               FROM idx.bar b LEFT JOIN idx.feature_daily f USING (trade_date, code)
              WHERE b.source = 'idx' AND b.code = ANY(%s) ORDER BY b.trade_date, b.code

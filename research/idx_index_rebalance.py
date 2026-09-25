@@ -101,8 +101,9 @@ def tick(px):
 
 
 def load(conn):
+    # opens back-filled from Yahoo (open_src='yahoo') are chart data, not IDX opening prints: keep them out
     q = """SELECT b.trade_date d, b.code, b.close::float c, b.adj_factor::float af, b.value::float v,
-                  CASE WHEN b.open_missing THEN NULL ELSE b.open::float END o,
+                  CASE WHEN b.open_missing OR b.open_src IS DISTINCT FROM 'idx' THEN NULL ELSE b.open::float END o,
                   s.bid::float bid, s.offer::float offer, s.listed_shares::float sh
            FROM idx.bar b LEFT JOIN idx.daily_summary s USING (code, trade_date)
            WHERE b.source = 'idx' AND b.trade_date >= '2019-01-01'"""

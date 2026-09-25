@@ -447,7 +447,8 @@ def main() -> int:
     rv = E["reverse"]
     R["reverse_split"] = {"n_raw": int(len(rv)), "events": [f"{r.code} {r.pub.date()} {r.title}" for r in rv.itertuples()], "verdict": "UNTESTABLE (4 events)"}
     # 2025+ open-entry diagnostic (gross, market-adjusted not needed): open of e vs close of e + H
-    opn = pd.read_sql("select code, trade_date d, open from idx.bar where trade_date >= '2025-01-01' and open > 0 and source='idx'", conn)
+    # opens back-filled from Yahoo (open_src='yahoo') are chart data, not IDX opening prints: keep them out
+    opn = pd.read_sql("select code, trade_date d, CASE WHEN open_src = 'idx' THEN open END AS open from idx.bar where trade_date >= '2025-01-01' and open > 0 and source='idx'", conn)
     opn["d"] = pd.to_datetime(opn["d"])
     ow = opn.pivot(index="d", columns="code", values="open").reindex(index=D["dates"], columns=D["codes"]).to_numpy(float)
     diag_open = {}

@@ -83,8 +83,9 @@ def load_yahoo(code):
 def load_idx(conn, code):
     """Per date: dict(o, h, l, c, value, open_missing) on the IDX reference-price basis."""
     out = {}
+    # opens back-filled from Yahoo (open_src='yahoo') are chart data, not IDX opening prints: keep them out
     for d, o, h, l, c, v, f, om in conn.execute(
-        "SELECT trade_date, open, high, low, close, value, adj_factor, open_missing FROM idx.bar "
+        "SELECT trade_date, CASE WHEN open_src = 'idx' THEN open END AS open, high, low, close, value, adj_factor, open_missing FROM idx.bar "
         "WHERE code=%s AND source='idx' ORDER BY trade_date", (code,)):
         f = float(f)
         out[d.isoformat()] = {"o": float(o) * f if o is not None else None, "h": float(h) * f, "l": float(l) * f,

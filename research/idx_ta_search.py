@@ -173,7 +173,8 @@ def load_panels(cut: pd.Timestamp | None):
     P, unis, comp, Hp, Lp = E.load_all(dsn(), PIT_CACHE, board="pit")
     adj = P["adj"]
     with psycopg.connect(dsn()) as conn:
-        o = pd.DataFrame(conn.execute("SELECT code, trade_date, open::float8, adj_factor::float8 FROM idx.bar WHERE source = 'idx'").fetchall(),
+        # opens back-filled from Yahoo (open_src='yahoo') are chart data, not IDX opening prints: keep them out
+        o = pd.DataFrame(conn.execute("SELECT code, trade_date, (CASE WHEN open_src = 'idx' THEN open END)::float8 AS open, adj_factor::float8 FROM idx.bar WHERE source = 'idx'").fetchall(),
                          columns=["code", "d", "open", "af"])
     o["d"] = pd.to_datetime(o["d"])
     Op = o.pivot(index="d", columns="code", values="open").reindex(index=adj.index, columns=adj.columns)
