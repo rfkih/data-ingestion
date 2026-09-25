@@ -977,6 +977,10 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_open_window, CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone=WIB), id="open_window",
               max_instances=1, misfire_grace_time=300)
     s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=7, minute=30, timezone=WIB), id="macro")
+    # BPS publishes the monthly inflation reading around midday on the 1st (measured: 2026-09-01 12:26 WIB), long after the
+    # 07:30 pull; a second pull at 14:00 lands it the same day, before the 20:40 ML training, and retries whatever failed in
+    # the morning. Same job, and `pull` is incremental, so the cost is one round of small requests.
+    s.add_job(run_macro, CronTrigger(day_of_week="mon-sat", hour=14, minute=0, timezone=WIB), id="macro_pm")
     s.add_job(run_feed_watch, IntervalTrigger(minutes=5), id="feed_watch")
     s.add_job(run_token_guard, IntervalTrigger(minutes=10), id="token_guard")
     s.add_job(run_gapfade_entry, CronTrigger(day_of_week="mon-fri", hour=9, minute="0,5", timezone=WIB), id="gapfade_entry")

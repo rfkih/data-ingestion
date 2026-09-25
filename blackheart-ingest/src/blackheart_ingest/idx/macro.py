@@ -39,11 +39,17 @@ JOB = "idx.macro"
 class Series:
     key: str
     label: str
-    source: str            # fred | yahoo | bi | worldbank
+    source: str            # fred | yahoo | bi | worldbank | bps
     source_id: str
     freq: str              # D | M | Q | A | event
     unit: str              # pct | idr | usd | index | myr
     group: str             # indonesia | global | commodity
+
+
+BPS_BASE = "https://webapi.bps.go.id/v1/api"
+BPS_INFLATION_VAR = "2263"       # "Inflasi Tahunan (Y-on-Y) 38 Provinsi (2022=100)", row INDONESIA (vervar 9999); monthly from 2024-01
+BPS_ID_MONTHS = {"januari": 1, "februari": 2, "maret": 3, "april": 4, "mei": 5, "juni": 6, "juli": 7, "agustus": 8, "september": 9,
+                 "oktober": 10, "november": 11, "desember": 12}
 
 
 CATALOG: tuple[Series, ...] = (
@@ -53,6 +59,10 @@ CATALOG: tuple[Series, ...] = (
     Series("id_gdp_qoq", "Indonesia GDP growth, q/q (OECD)", "fred", "NAEXKP01IDQ657S", "Q", "pct", "indonesia"),
     Series("id_gdp_annual", "Indonesia GDP growth, annual (World Bank)", "worldbank", "NY.GDP.MKTP.KD.ZG", "A", "pct", "indonesia"),
     Series("id_cpi", "Indonesia CPI index (OECD, lagged)", "fred", "IDNCPIALLMINMEI", "M", "index", "indonesia"),
+    # BPS inflation y/y, pct, monthly. source_id = the BPS variable id (find it: `idx macro bps-find inflasi`); "0" = not
+    # configured yet -> the pull skips it with a warning. Needs INGEST_BPS_API_KEY. The ML panel prefers this over the OECD
+    # index's y/y wherever it exists (daily.load_macro), so the CPI feature stays current after the OECD series stopped (2025-04).
+    Series("id_inflation_yoy", "Indonesia inflation y/y, pct (BPS)", "bps", BPS_INFLATION_VAR, "M", "pct", "indonesia"),
     Series("us10y", "US 10-year Treasury yield", "fred", "DGS10", "D", "pct", "global"),
     Series("fedfunds", "Fed funds effective rate", "fred", "FEDFUNDS", "M", "pct", "global"),
     Series("vix", "VIX", "fred", "VIXCLS", "D", "index", "global"),
@@ -154,7 +164,74 @@ def fetch_worldbank(indicator: str, since: date) -> list[tuple[date, Decimal]]:
     return sorted(out)
 
 
+def _bps_get(params: dict[str, str]) -> dict[str, Any]:
+    from ..shared.settings import get_settings
+    key = get_settings().bps_api_key
+    if not key:
+        raise RuntimeError("INGEST_BPS_API_KEY not set (register at webapi.bps.go.id)")
+    q = "&".join(f"{k}={urllib.request.quote(str(v))}" for k, v in {**params, "key": key}.items())
+    req = urllib.request.Request(f"{BPS_BASE}/list/?{q}", headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    doc = json.loads(urllib.request.urlopen(req, timeout=60).read())
+    if doc.get("status") != "OK":
+        raise RuntimeError(f"BPS: {doc.get('message') or doc.get('status')}")
+    return doc
+
+
+def bps_find(keyword: str, domain: str = "0000", pages: int = 5) -> list[dict[str, Any]]:
+    """Variables (model=var) whose title contains ``keyword``; the operator picks the national monthly y-on-y inflation one."""
+    out = []
+    for page in range(1, pages + 1):
+        doc = _bps_get({"model": "var", "domain": domain, "page": page, "keyword": keyword})
+        rows = doc.get("data") or []
+        rows = rows[1] if len(rows) == 2 and isinstance(rows[1], list) else rows
+        if not rows:
+            break
+        for r in rows:
+            title = str(r.get("title") or r.get("label") or "")
+            if keyword.lower() in title.lower():
+                out.append({"var_id": r.get("var_id") or r.get("val"), "title": title, "unit": r.get("unit"), "subject": r.get("sub_name") or r.get("subj")})
+    return out
+
+
+def fetch_bps(var_id: str, since: date, domain: str = "0000") -> list[tuple[date, Decimal]]:
+    """model=data for one variable, every year from ``since``; monthly readings come as derived periods (turtahun = month
+    names); the national row is vervar 9999 (INDONESIA). -> (last day of the month, value)."""
+    if var_id in ("", "0"):
+        raise RuntimeError("BPS variable id not configured (idx macro bps-find inflasi, then macro.BPS_INFLATION_VAR)")
+    out: list[tuple[date, Decimal]] = []
+    years = _bps_get({"model": "th", "domain": domain, "var": var_id}).get("data") or []
+    years = years[1] if len(years) == 2 and isinstance(years[1], list) else years
+    for y in years:
+        label, th = str(y.get("th") or y.get("label")), str(y.get("th_id") or y.get("val"))   # model=th rows carry "th"/"th_id"
+        if not label.isdigit() or int(label) < since.year:
+            continue
+        doc = _bps_get({"model": "data", "domain": domain, "var": var_id, "th": th})
+        content = doc.get("datacontent") or {}
+        turth = {str(t.get("val")): str(t.get("label")).strip().lower() for t in (doc.get("turtahun") or [])}
+        nat = [v for v in (doc.get("vervar") or []) if str(v.get("label", "")).upper().startswith("INDONESIA")]
+        ver = str(nat[0]["val"]) if nat else "9999"
+        turvars = [str(t.get("val")) for t in (doc.get("turvar") or [])] or ["0"]
+        for k, v in content.items():                                     # key = vervar + var + turvar + th + turtahun
+            tur = None
+            for tv in turvars:
+                prefix = ver + str(var_id) + tv + th
+                if k.startswith(prefix):
+                    tur = k[len(prefix):]
+                    break
+            if tur is None:
+                continue
+            month = BPS_ID_MONTHS.get(turth.get(tur, ""), None)
+            if month is None or v is None:
+                continue
+            d = (date(int(label), month, 1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+            if d >= since:
+                out.append((d, Decimal(str(round(float(v), 4)))))
+    return sorted(set(out))
+
+
 def fetch(series: Series, since: date) -> list[tuple[date, Decimal]]:
+    if series.source == "bps":
+        return fetch_bps(series.source_id, since)
     if series.source == "fred":
         return fetch_fred(series.source_id, since)
     if series.source == "yahoo":

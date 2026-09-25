@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     auth_token: SecretStr = SecretStr("")
 
     fred_api_key: str = ""
+    bps_api_key: str = ""          # webapi.bps.go.id (free registration); macro series with source "bps"
 
     # Inference webhook settings for batch-predict trigger after feature compute.
     inference_base_url: str = "http://127.0.0.1:8000"

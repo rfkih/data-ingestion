@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 MIN_CLOSE = 50.0                       # below this the tick is the whole move
 MIN_VALUE20_FIT = 1e8                  # Rp 100 M mean daily value to be a training row
 MIN_VALUE20_PREDICT = 2e8              # Rp 200 M to be scored (a forecast on a name that never trades is noise)
-MACRO_SERIES = ["usdidr", "bi_rate", "bi_rate_hist", "us10y", "vix", "brent", "gold", "cpo", "fedfunds", "id_cpi", "id_gdp_qoq"]
+MACRO_SERIES = ["usdidr", "bi_rate", "bi_rate_hist", "us10y", "vix", "brent", "gold", "cpo", "fedfunds", "id_cpi", "id_gdp_qoq", "id_inflation_yoy"]
 MACRO_RET = {"usdidr", "brent", "gold", "cpo", "vix"}
 # When is a reading dated obs_date actually KNOWN at the desk's 16:00 WIB cut? (point-in-time; the release, not the period)
 #   same_day   BI-Rate: the RDG decision is announced ~14:00 WIB on obs_date
@@ -34,7 +34,7 @@ MACRO_RET = {"usdidr", "brent", "gold", "cpo", "vix"}
 #              month ends -> first business day of the next month; BPS publishes the CPI on the 1st business day of the next month
 #   quarter_release   BPS publishes GDP ~5 weeks after the quarter ends (obs_date = quarter start -> +4 months +5 days -> next bday)
 MACRO_RELEASE = {"bi_rate": "same_day", "usdidr": "next_day", "us10y": "next_day", "vix": "next_day", "brent": "next_day", "gold": "next_day",
-                 "cpo": "next_day", "fedfunds": "month_next_bday", "bi_rate_hist": "month_next_bday", "id_cpi": "month_next_bday",
+                 "cpo": "next_day", "fedfunds": "month_next_bday", "bi_rate_hist": "month_next_bday", "id_cpi": "month_next_bday", "id_inflation_yoy": "month_next_bday",
                  "id_gdp_qoq": "quarter_release"}
 
 FEATURES: list[str] = [
@@ -132,6 +132,10 @@ def load_macro(conn: psycopg.Connection) -> pd.DataFrame:
         yoy = pd.Series(yoy - np.r_[np.full(12, np.nan), yoy[:-12]], index=cpi.index)
         M.loc[cpi.index, "value"] = yoy
         M.loc[cpi.index, "series"] = "id_cpi_yoy"
+    bps = M["series"] == "id_inflation_yoy"                             # BPS y/y in pct -> the same log y/y; wins over the OECD index on overlap
+    M.loc[bps, "value"] = np.log1p(pd.to_numeric(M.loc[bps, "value"], errors="coerce") / 100.0)
+    M.loc[bps, "series"] = "id_cpi_yoy"
+    M.loc[bps, "obs"] = M.loc[bps, "obs"] + pd.Timedelta(seconds=1)      # sorts after the OECD row of the same month -> keep="last"
     hist = M["series"] == "bi_rate_hist"
     M.loc[hist, "series"] = "bi_rate"                                    # one policy-rate series; the event rows win on overlap
     M = M.sort_values(["series", "d", "obs"]).drop_duplicates(["series", "d"], keep="last")
