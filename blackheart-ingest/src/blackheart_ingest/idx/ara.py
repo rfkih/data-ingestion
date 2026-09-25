@@ -193,7 +193,14 @@ def latest_watch(conn: psycopg.Connection) -> dict[str, Any]:
         if r.get("confidence") is None:
             r["confidence"] = ara_model.confidence(float(r["p_lock"]))
     cov = coverage(conn, rows[0]["bar_date"] if rows and rows[0].get("bar_date") else d)
-    return {"run_date": d, "rows": rows, "facts": ara_model.FACTS, "coverage": {**cov, "shown": len(rows)}}
+    # Whether the run kept the WHOLE ranking (0040, from the 2026-09-25 evening on) or only its list (every run before): a
+    # name missing from a whole-ranking run was not scored at all; missing from a list-only run says nothing about it.
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("SELECT count(*) AS n, bool_or(NOT listed) AS whole FROM idx.ara_watch WHERE run_date = %s", (d,))
+        st = cur.fetchone()
+    return {"run_date": d, "rows": rows, "facts": ara_model.FACTS,
+            "coverage": {**cov, "shown": len(rows), "stored": int(st["n"]) if st else len(rows), "whole_ranking": bool(st and st["whole"]),
+                         "min_prev": ara_model.MIN_PREV}}
 
 
 def name_watch(conn: psycopg.Connection, code: str) -> dict[str, Any] | None:

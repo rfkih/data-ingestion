@@ -139,6 +139,37 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   earnings yield could belong to a company wins): `report_rescaled` re-parses the whole workbook, `eps_rescaled` fixes EPS only,
   `scale_mismatch` / `eps_mismatch` are stored in `fundamental.flags` (`scale_mismatch` surfaces as a candidate warning).
   All unit-tested; `fin parse --reparse` re-derives everything from the archived files (safe to run in parallel by code chunks).
+- **Company logos (`idx/logos.py`, 2026-09-25; operator: "buat semua saham memiliki logo nya masing2 ... dari stockbit"):**
+  Stockbit's public CDN `https://assets.stockbit.com/logos/companies/{CODE}.png` (no login, ~5-7 KB), downloaded ONCE into
+  `<data>/idx/logos/{CODE}.png` and served by `GET /idx/logo/{code}` (PNG, `Cache-Control: public, max-age=604800`; 404 = no
+  logo -> the web shows a two-letter monogram). The CDN answers **403, not 404,** for a logo it lacks: one 403 is recorded as
+  `{CODE}.missing` (not asked again until `--refresh`), five in a row stop the run as pushback (and the false misses are
+  forgotten). CLI `idx logos [--codes A,B] [--refresh]` (PowerShell: quote the comma list); job `logos` Sunday 10:00 WIB takes
+  new listings. The web proxy (`blackheart-idx-web/src/app/idx/[...path]/route.ts`) passes `image/*` through as bytes.
+- **Online learning agent (`idx/agent.py`, migrations 0042 `idx.agent_sample` / `idx.agent_decision` / `idx.agent_model` + 0043
+  `exit_at`, 2026-09-25; operator: "kalau untung dapet reward, kita kasih modal" -> trade the live feed and learn from each session).
+  PAPER ONLY, virtual Rp 20 M, Rp 2 M a position, <= 3 per decision, <= 10 open. Decision minutes Mon-Thu 09:15 10:00 11:00 13:45
+  14:30, Fri 09:15 10:00 11:00 14:15 14:45 (job `agent_decide`, every minute, acts once per decision minute). Actions (TP, stop,
+  sessions held after entry): TP1 1/1/0, TP2 2/2/0, H1 3/3/1, H2 4/4/2, H5 6/5/5 (operator: "akhir hari ga harus menjual"); exit at
+  the bracket or at the bid of the last grid minute of the last holding session; an overnight gap through the stop sells at
+  the open. Fill model: offer at the decision minute + 0.10 %, TP when a later minute's high reaches it, stop one tick below
+  (both in one minute = stop), 0.20 % sell fee, lots. Learner: full-feedback counterfactual samples (every feed name x decision
+  minute x action, from the tape; a multi-day row is stored only once its holding time is over - early bracket hits alone
+  would bias it) -> per-action Bayesian linear posterior (ridge 10, rewards clipped +-5 %) whose covariance is inflated by the
+  SESSION design effect 1 + (m - 1) rho (same-day names share the market move: 4 sessions gave deff 47-90) and an action needs
+  samples from >= 3 sessions; a name is bought only when the PESSIMISTIC reward (posterior mean - 1 sd) clears +0.3 %.
+  (Thompson sampling was the first design and was dropped the same day: with full feedback, exploring buys no information,
+  and the walk-forward replay showed it betting the book on a one-day-old action.) Features = ml/intraday.py minute features
+  (same code path live and settled) + yesterday's broker tape (top-3 net-buy share, buyer HHI) + the desk's tools (intraday ML
+  10/30/60m P(up) at the minute, daily ML 1d/5d from the evening before, yesterday's stock_state, ARA p_lock). Placebo agent
+  'random' takes the same number of names at random. Job `agent_settle` 16:50: samples (today + matured multi-day of the last
+  7 sessions), paper fills of every open decision, refit. CLI `idx agent warmstart [--resample]|settle [--date]|decide|report`.
+  State 2026-09-25: model #5 on 6,683 samples; unconditional mean reward -1.3 % for every action; replay 09-23..25 -> no trade
+  (best lower bound -2.5 %). Expect weeks of abstaining before the evidence supports a trade.
+  **JUDGEMENT RULE (declared 2026-09-25, before any live decision): after >= 20 settled sessions and >= 30 ts trades, the agent
+  is a candidate for real capital only if ALL: its cumulative paper P&L > 0; its mean reward per trade beats the random agent's
+  by >= 0.5 pp; the t-stat of the daily P&L difference (ts - random, sessions with trades) >= 2; positive P&L on >= 60 % of
+  its trading sessions. Otherwise it stays paper.** Real money is the operator's call and goes through draft tickets.
 - **One name on one screen (`idx/chart.py`, routes `GET /idx/chart/{code}`, `/chart/{code}/depth`, `/chart/codes`,
   2026-09-24):** adjusted daily candles from `idx.bar`, one-minute candles from `idx.feed_bar_1m` (subscribed names only,
   history starts when the collector first ran), the ten levels each side from `idx.feed_book`, and `trend_state` - the
@@ -209,11 +240,15 @@ build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
   the advisory lock held **exits 0** (a no-op, not a failure — a non-zero exit would arm restart-on-failure every 2 minutes).
   The same watchdog is on **"Blackheart IDX scheduler"** (`scripts/idx-scheduler-task.ps1`), which had the same logon-only
   defect. **Token:** the operator
-  logs in to stockbit.com and pastes the `credentialStorage` cookie at `http://127.0.0.1:8001/idx/feed/relay` (or
-  `STOCKBIT_TOKEN=` in `idx-local.env` — re-read live, no restart) — needed once per week now: **headless renewal works**
+  logs in to stockbit.com and pastes the `credentialStorage` cookie at `http://127.0.0.1:8001/idx/feed/relay` — needed
+  only if the laptop was off for 7+ days: **headless renewal works**
   (verified 2026-09-22: `POST exodus.stockbit.com/login/refresh`, refresh token as `Authorization: Bearer`, body `{}`;
   access 24 h, refresh 7 d, both rotate). `broker.refresh_and_persist(conn=)` / `idx broker refresh` takes the newest refresh
-  token of `idx-local.env` vs the relay row (`idx.feed_token`, by JWT `iat`) and writes the new pair back to both. Three
+  token (the relay row `idx.feed_token`; env only as a fallback, by JWT `iat`) and stores the new pair in `idx.feed_token`.
+  **Since 2026-09-25 the tokens live ONLY in `idx.feed_token`** (operator: "token nya ditaruh di db aja"): `broker.config()`
+  reads the access token from the DB, the relay route no longer writes the env file, and `idx-local.env` holds no Stockbit
+  token. The env file is written only as an EMERGENCY copy when the DB write fails after a refresh (the refresh token
+  rotates, so a lost pair is a lost session). Three
   places renew: scheduler job `token_renew` every 30 min (`broker.renew_if_needed`, when < 3 h remain), the collector
   itself 45 min before expiry (worker thread, then `load_token`), and the 20:20 broker snapshot (`config_fresh(conn=)`).
   ★ **`token_guard` every 10 min (2026-09-22) is the one that guarantees a session for the trading day**: off-session it keeps

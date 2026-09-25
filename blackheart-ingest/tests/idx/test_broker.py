@@ -319,17 +319,37 @@ def test_renew_if_needed_respects_the_session_end(monkeypatch) -> None:
     assert not rep["renewed"] and "no refresh token" in rep["reason"]
 
 
-def test_refresh_and_persist_writes_env(tmp_path) -> None:
+def test_refresh_and_persist_stores_in_db_not_env(tmp_path, monkeypatch) -> None:
+    from blackheart_ingest.idx.feed import store as feed_store
     env_file = tmp_path / "idx-local.env"
-    env_file.write_text("# comment\n#STOCKBIT_TOKEN=old\nSTOCKBIT_REFRESH_TOKEN=oldR\nOTHER=keep\n", encoding="utf-8")
+    env_file.write_text("# comment\nSTOCKBIT_REFRESH_TOKEN=oldR\nOTHER=keep\n", encoding="utf-8")
     env = {"STOCKBIT_REFRESH_TOKEN": "oldR"}
-    got = broker.refresh_and_persist(env, str(env_file), poster=lambda u, b, t: (200, _REFRESH_RESP))
+    saved = []
+    monkeypatch.setattr(broker, "_relay_refresh_token", lambda conn: None)
+    monkeypatch.setattr(feed_store, "save_token", lambda conn, fields, source: saved.append((fields["access_token"], fields.get("refresh_token"), source)))
+    got = broker.refresh_and_persist(env, str(env_file), poster=lambda u, b, t: (200, _REFRESH_RESP), conn=object())
     assert got == "NEWACCESS"
+    assert saved == [("NEWACCESS", "NEWREFRESH", "refresh")]                  # the pair goes to idx.feed_token
+    assert env_file.read_text(encoding="utf-8") == "# comment\nSTOCKBIT_REFRESH_TOKEN=oldR\nOTHER=keep\n"   # env untouched
+
+
+def test_refresh_and_persist_env_is_only_the_emergency_copy(tmp_path, monkeypatch) -> None:
+    import psycopg
+
+    from blackheart_ingest.idx.feed import store as feed_store
+    env_file = tmp_path / "idx-local.env"
+    env_file.write_text("STOCKBIT_REFRESH_TOKEN=oldR\nOTHER=keep\n", encoding="utf-8")
+
+    def boom(conn, fields, source):
+        raise psycopg.OperationalError("db down")
+    monkeypatch.setattr(broker, "_relay_refresh_token", lambda conn: None)
+    monkeypatch.setattr(feed_store, "save_token", boom)
+    got = broker.refresh_and_persist({"STOCKBIT_REFRESH_TOKEN": "oldR"}, str(env_file), poster=lambda u, b, t: (200, _REFRESH_RESP), conn=object())
     txt = env_file.read_text(encoding="utf-8")
-    assert "STOCKBIT_TOKEN=NEWACCESS" in txt and "STOCKBIT_REFRESH_TOKEN=NEWREFRESH" in txt and "OTHER=keep" in txt
-    assert "#STOCKBIT_TOKEN=old" not in txt and "REFRESH_TOKEN=oldR" not in txt
-    with pytest.raises(broker.BrokerAuthError, match="STOCKBIT_REFRESH_TOKEN"):
-        broker.refresh_and_persist({}, str(env_file))
+    assert got == "NEWACCESS" and "STOCKBIT_TOKEN=NEWACCESS" in txt and "STOCKBIT_REFRESH_TOKEN=NEWREFRESH" in txt and "OTHER=keep" in txt
+    monkeypatch.setattr(broker, "_relay_refresh_token", lambda conn: None)
+    with pytest.raises(broker.BrokerAuthError, match="refresh token"):
+        broker.refresh_and_persist({}, str(env_file), conn=object())
 
 
 def test_snapshot_round_trip(conn) -> None:

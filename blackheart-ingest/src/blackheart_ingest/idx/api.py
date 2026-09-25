@@ -287,6 +287,38 @@ def make_router(require_token) -> APIRouter:
         with get_connection() as conn:
             return ch.view(conn, code, bars=bars, minutes=minutes)
 
+    @router.get("/logo/{code}")
+    def logo(code: str) -> Response:
+        """The company's logo (PNG, fetched once from Stockbit's public CDN into the data dir - idx/logos.py). 404 when
+        there is none, so a screen shows its monogram instead. Cached a week by the browser."""
+        from fastapi.responses import FileResponse
+
+        from . import logos
+        p = logos.path_for(code)
+        if p is None:
+            raise HTTPException(status_code=404, detail=f"no logo for {code.upper()}")
+        return FileResponse(p, media_type="image/png", headers={"Cache-Control": "public, max-age=604800"})
+
+    @router.get("/state")
+    def state_board(as_of: str | None = None, state: str | None = None, min_value: float = 0.0, limit: int = 200) -> dict[str, Any]:
+        """Every name's chart state on a day (default: the last bar day): breakout / breakdown / sideways / uptrend /
+        downtrend / transition, with counts per state and the measures behind each. Fixed rules shared with the trend
+        book and study #130 - a reading, not a forecast (`means` says what each state has been worth)."""
+        from . import stock_state as ss
+        try:
+            d = date.fromisoformat(as_of) if as_of else None
+            with get_connection() as conn:
+                return ss.board(conn, d, state=state, min_value=min_value, limit=limit)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+    @router.get("/state/{code}")
+    def state_one(code: str, history: int = 60) -> dict[str, Any]:
+        """One name's chart state today with its measures, and its state on each of the last `history` trading days."""
+        from . import stock_state as ss
+        with get_connection() as conn:
+            return ss.one(conn, code, history=history)
+
     @router.get("/chart/{code}/depth")
     def chart_depth(code: str) -> dict[str, Any]:
         """Just the order book, for a screen that polls it: ten levels each side, totals, spread and queue imbalance.
@@ -1105,13 +1137,8 @@ def make_router(require_token) -> APIRouter:
                 fields = fs.parse_relay(body)
         except (ValueError, TypeError) as e:
             raise HTTPException(status_code=422, detail=f"no usable token: {e}") from None
-        with get_connection() as conn:
+        with get_connection() as conn:                                           # idx.feed_token is the one place the tokens live
             row = fs.save_token(conn, fields, source=source, provider="stockbit")
-        if fields.get("refresh_token"):                                          # the broker feed reads the env file too
-            path = broker._default_env_file()
-            if path:
-                broker.write_env_token(path, broker.TOKEN_ENV, fields["access_token"])
-                broker.write_env_token(path, broker.REFRESH_ENV, fields["refresh_token"])
         response.headers["Access-Control-Allow-Origin"] = "*"
         return {"ok": True, "user_id": row["user_id"], "source": source, "refresh_token": bool(fields.get("refresh_token")),
                 "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None}

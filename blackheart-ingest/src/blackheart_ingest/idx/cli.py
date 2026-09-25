@@ -963,6 +963,63 @@ def _rows_last_bar(conn):
         return next(iter(r.values())) if isinstance(r, dict) else r[0]
 
 
+def cmd_logos(a: argparse.Namespace) -> int:
+    from . import logos
+    with get_connection() as conn:
+        codes = [c.strip().upper() for c in a.codes.split(",")] if a.codes else logos.listed_codes(conn)
+    r = logos.fetch(codes, refresh=a.refresh)
+    print(f"logos: asked {r['asked']}, saved {r['saved']}, already had {r['have']}, none on the CDN {len(r['missing'])}"
+          + (f" ({', '.join(r['missing'][:20])}{' ...' if len(r['missing']) > 20 else ''})" if r["missing"] else "")
+          + (f" - STOPPED: {r['stopped']}" if r["stopped"] else ""))
+    return 1 if r["stopped"] else 0
+
+
+def cmd_agent(a: argparse.Namespace) -> int:
+    import json as _json
+
+    from . import agent
+    with get_connection() as conn:
+        if a.sub == "warmstart":
+            rep = agent.warmstart(conn, resample=a.resample)
+        elif a.sub == "settle":
+            rep = agent.settle(conn, _d(a.date) if a.date else _today())
+        elif a.sub == "decide":
+            rep = agent.decide(conn)
+        else:
+            rep = agent.report(conn)
+            for name, x in rep["agents"].items():
+                wr = f"{x['win_rate'] * 100:.0f} %" if x["win_rate"] is not None else "-"
+                print(f"{name:7s} sessions {x['sessions']:3d} trades {x['trades']:4d} win {wr:>5s} take-profits {x['tp']:3d} "
+                      f"open {x.get('open', 0):2d}  P&L Rp {x['pnl']:+,.0f}  NAV Rp {x['nav']:,.0f}")
+                for act, v in sorted((x.get("by_action") or {}).items()):
+                    print(f"          {act:4s} {v['n']:4d} trades, avg {v['avg_reward'] * 100:+.2f} %")
+            if not rep["agents"]:
+                print("no settled decisions yet")
+            return 0
+    print(_json.dumps(rep, default=str, indent=1))
+    return 0
+
+
+def cmd_state(a: argparse.Namespace) -> int:
+    from . import stock_state as ss
+    with get_connection() as conn:
+        if a.code:
+            r = ss.one(conn, a.code, _d(a.as_of) if a.as_of else None)
+            if r.get("state") is None:
+                print(r.get("why"))
+                return 1
+            print(f"{r['code']} {r['as_of']}: {r['state']} for {r['since']} days, close {r['close']}, vol x{r['vol_ratio']}, "
+                  f"{(r['pct_from_60d_high'] or 0) * 100:+.1f} % from the 60-day high, {(r['pct_from_ma200'] or 0) * 100:+.1f} % from MA200"
+                  + (" (out of a base)" if r["from_base"] else ""))
+            return 0
+        r = ss.board(conn, _d(a.as_of) if a.as_of else None, state=a.state, min_value=a.min_value, limit=a.limit)
+    print(f"states {r['as_of']} (value >= Rp {a.min_value:,.0f}): " + ", ".join(f"{k} {v}" for k, v in r["counts"].items()))
+    for n in r["names"]:
+        print(f"  {n['code']:6s} {n['state']:10s} {n['since']:3d} d  vol x{n['vol_ratio'] or 0:5.1f}  "
+              f"60d-high {(n['pct_from_60d_high'] or 0) * 100:+6.1f} %  value Rp {(n['value_60d'] or 0) / 1e9:6.1f} bn" + ("  base" if n["from_base"] else ""))
+    return 0
+
+
 def cmd_trend(a: argparse.Namespace) -> int:
     from . import trend_book
     with get_connection() as conn:
@@ -1581,6 +1638,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["devices", "test"])
     p.add_argument("--text")
     p.set_defaults(fn=cmd_push)
+    p = sub.add_parser("logos", help="company logos from Stockbit's CDN into the data dir: [--codes A,B] [--refresh]")
+    p.add_argument("--codes")
+    p.add_argument("--refresh", action="store_true", help="download again even when a logo (or a known miss) is on disk")
+    p.set_defaults(fn=cmd_logos)
+    p = sub.add_parser("agent", help="online learning agent, PAPER only: warmstart | settle [--date D] | decide | report")
+    p.add_argument("sub", choices=["warmstart", "settle", "decide", "report"])
+    p.add_argument("--date")
+    p.add_argument("--resample", action="store_true", help="warmstart: recompute the samples of every session (new features)")
+    p.set_defaults(fn=cmd_agent)
+    p = sub.add_parser("state", help="chart state per name (breakout/breakdown/sideways/uptrend/downtrend/transition): [--state S] [--min-value V] [--code C] [--as-of D]")
+    p.add_argument("--state", choices=["breakout", "breakdown", "sideways", "uptrend", "downtrend", "transition"])
+    p.add_argument("--min-value", type=float, default=1e9, help="60-day average traded value floor, rupiah (default 1 bn)")
+    p.add_argument("--code")
+    p.add_argument("--as-of")
+    p.add_argument("--limit", type=int, default=30)
+    p.set_defaults(fn=cmd_state)
     p = sub.add_parser("trend", help="trend book (breakout + trailing stop): build [--book B] [--as-of D] (dry: print only) | run (store + issue/draft) | books")
     p.add_argument("sub", choices=["build", "run", "books"])
     p.add_argument("--book", default="paper_trend")

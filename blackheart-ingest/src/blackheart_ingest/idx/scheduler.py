@@ -954,6 +954,68 @@ def run_combo_expire() -> None:
     _combo_each("scorecard")
 
 
+def run_logos() -> None:
+    """Sunday 10:00 WIB: logos for names listed since the last run (the ones on disk are not asked again)."""
+    from . import logos
+    with get_connection() as conn:
+        codes = logos.listed_codes(conn)
+    r = logos.fetch(codes)
+    logger.info("idx logos: %s", {k: (len(v) if isinstance(v, list) else v) for k, v in r.items()})
+
+
+def run_agent_decide() -> None:
+    """Every minute; acts only inside a decision minute (idx/agent.py: 5 a day) and once per minute. PAPER: writes decisions
+    of the learning agent and its random placebo, never an order. A decision with no live minutes yet is retried for 2 min."""
+    from . import agent
+    now = datetime.now(WIB)
+    m = agent.in_decision_window(now)
+    if m is None:
+        return
+    key = m.isoformat()
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM idx.ingest_run WHERE job = 'agent:decide' AND run_key = %s", (key,))
+            if cur.fetchone():
+                return
+        try:
+            rep = agent.decide(conn, now)
+        except Exception as e:
+            conn.rollback()
+            logger.exception("agent decide failed")
+            rep = {"ok": False, "why": f"{type(e).__name__}: {e}"[:300]}
+        if not rep.get("ok") and now < m + timedelta(minutes=2):
+            return
+        r = runlog.RunResult("agent:decide", key)
+        r.status = "ok" if rep.get("ok") else "skipped"
+        r.rows_in = int(rep.get("candidates", 0))
+        r.rows_out = len((rep.get("picks") or {}).get("ts", []))
+        r.detail = rep
+        runlog.finish(conn, runlog.start(conn, "agent:decide", key), r)
+        conn.commit()
+        logger.info("idx agent decide %s: %s", key, rep)
+
+
+def run_agent_settle() -> None:
+    """16:40 WIB Mon-Fri: the session's counterfactual samples, both agents' paper fills, tonight's model."""
+    from . import agent
+    d = today_wib()
+    with get_connection() as conn:
+        if d not in agent.feed_days(conn):
+            return
+        rid = runlog.start(conn, "agent:settle", d.isoformat())
+        r = runlog.RunResult("agent:settle", d.isoformat())
+        try:
+            rep = agent.settle(conn, d)
+            r.rows_out, r.detail = int(rep.get("samples", 0)), rep
+        except Exception as e:
+            conn.rollback()
+            r.status, r.error = "failed", f"{type(e).__name__}: {e}"[:500]
+            logger.exception("agent settle failed")
+        runlog.finish(conn, rid, r)
+        conn.commit()
+        logger.info("idx agent settle %s: %s", d, r.status)
+
+
 def build() -> BlockingScheduler:  # noqa: F821
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -1016,6 +1078,11 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_combo_confirm, IntervalTrigger(minutes=2), id="combo_confirm", misfire_grace_time=60)
     s.add_job(run_combo_nudge, CronTrigger(day_of_week="mon-fri", hour="16,19", minute=30, timezone=WIB), id="combo_nudge")
     s.add_job(run_combo_expire, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="combo_expire")
+    # the online learning agent (idx/agent.py): paper decisions at 5 minutes a day, settlement + refit after the intraday train
+    s.add_job(run_logos, CronTrigger(day_of_week="sun", hour=10, minute=0, timezone=WIB), id="logos", misfire_grace_time=86400)
+    s.add_job(run_agent_decide, IntervalTrigger(minutes=1), id="agent_decide", misfire_grace_time=30)
+    s.add_job(run_agent_settle, CronTrigger(day_of_week="mon-fri", hour=16, minute=50, timezone=WIB), id="agent_settle",
+              misfire_grace_time=3600)
     return s
 
 

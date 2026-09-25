@@ -79,11 +79,31 @@ class BrokerPaywall(BrokerAuthError):
 
 
 # ---------------------------------------------------------------------------------------------------------------- config
-def config(env: dict[str, str] | None = None) -> dict[str, Any]:
+def _db_access_token(conn: psycopg.Connection | None = None) -> str | None:
+    """The stored Stockbit session from idx.feed_token - where the tokens live since 2026-09-25 (operator: "token nya
+    ditaruh di db aja"). Opens its own connection when none is given; any failure reads as 'no token'."""
+    from .feed import store as feed_store
+    try:
+        if conn is not None:
+            tok = feed_store.load_token(conn)
+        else:
+            from ..shared.db import get_connection
+            with get_connection() as c:
+                tok = feed_store.load_token(c)
+    except (psycopg.Error, OSError, ValueError) as e:
+        logger.warning("idx broker: could not read the token from idx.feed_token - %s", e)
+        return None
+    return ((tok or {}).get("access_token") or "").strip() or None
+
+
+def config(env: dict[str, str] | None = None, conn: psycopg.Connection | None = None) -> dict[str, Any]:
+    """The access token comes from idx.feed_token. ``env`` given explicitly (tests, one-off calls) is read INSTEAD of the
+    database; with no ``env`` the process environment is only a fallback for a machine with no stored session."""
+    from_db = env is None
     env = os.environ if env is None else env
-    key = (env.get(TOKEN_ENV) or "").strip()
+    key = (_db_access_token(conn) if from_db else None) or (env.get(TOKEN_ENV) or "").strip()
     if not key:
-        raise BrokerAuthError(f"{TOKEN_ENV} is not set (put it in blackheart-ingest/idx-local.env)")
+        raise BrokerAuthError(f"no Stockbit token: none in idx.feed_token and {TOKEN_ENV} is not set - paste the cookie at /idx/feed/relay")
     base, params = BASE, dict(DEFAULT_PARAMS)
     url = (env.get(URL_ENV) or "").strip()
     if url:
@@ -1011,8 +1031,8 @@ def _relay_refresh_token(conn: psycopg.Connection | None) -> str | None:
 
 
 def newest_refresh_token(env: dict[str, str] | None = None, conn: psycopg.Connection | None = None) -> str | None:
-    """Between idx-local.env and the relay row, the refresh token issued last (a re-login or a rotation invalidates
-    the older one, so the newest ``iat`` is the only one worth trying)."""
+    """The refresh token issued last between the relay row (idx.feed_token, where it lives) and the env fallback (a
+    re-login or a rotation invalidates the older one, so the newest ``iat`` is the only one worth trying)."""
     env = os.environ if env is None else env
     cands = [t for t in ((env.get(REFRESH_ENV) or "").strip(), _relay_refresh_token(conn)) if t]
     return max(cands, key=lambda t: _jwt_claim(t, "iat")) if cands else None
@@ -1021,29 +1041,37 @@ def newest_refresh_token(env: dict[str, str] | None = None, conn: psycopg.Connec
 def refresh_and_persist(env: dict[str, str] | None = None, env_file: str | None = None,
                         poster: Poster | None = None, persist: bool = True,
                         conn: psycopg.Connection | None = None) -> str:
-    """Refresh the access token from the newest refresh token (env or relay row), update os.environ, the env file and
-    ``idx.feed_token`` (so the tick feed shares the session), and return the access token."""
+    """Refresh the access token from the newest refresh token (relay row, env as a fallback), store the new pair in
+    ``idx.feed_token`` - the one place the tokens live since 2026-09-25 - and return the access token.
+
+    The refresh token ROTATES: once Stockbit has issued the new pair the old refresh token is dead, so losing the new pair
+    loses the session. The env file is therefore written only as an emergency copy when the database write fails."""
     env = os.environ if env is None else env
     rt = newest_refresh_token(env, conn)
     if not rt:
-        raise BrokerAuthError(f"{REFRESH_ENV} is not set (paste the Stockbit refresh token into idx-local.env to auto-refresh)")
+        raise BrokerAuthError("no Stockbit refresh token in idx.feed_token - paste the credentialStorage cookie at /idx/feed/relay")
     access, rotated, resp = refresh_access_token(rt, poster)
-    os.environ[TOKEN_ENV] = access
-    if rotated:
-        os.environ[REFRESH_ENV] = rotated
-    path = env_file or _default_env_file(env)
-    if persist and path:
-        write_env_token(path, TOKEN_ENV, access)
-        if rotated:
-            write_env_token(path, REFRESH_ENV, rotated)
-    if persist and conn is not None:
-        from .feed import store as feed_store
-        try:
-            feed_store.save_token(conn, feed_store.parse_relay(resp if isinstance(resp, dict) else {"access_token": access,
-                                                                                                    "refresh_token": rotated}),
-                                  source="refresh")
-        except (ValueError, psycopg.Error) as e:                             # the env file already has the pair
-            logger.warning("idx broker: refreshed token not written to idx.feed_token - %s", e)
+    if not persist:
+        return access
+    from .feed import store as feed_store
+    try:
+        fields = feed_store.parse_relay(resp if isinstance(resp, dict) else {})
+    except ValueError:                                                        # an unfamiliar response shape: the pair we extracted
+        fields = feed_store.parse_relay({"access_token": access, "refresh_token": rotated})
+    try:
+        if conn is not None:
+            feed_store.save_token(conn, fields, source="refresh")
+        else:
+            from ..shared.db import get_connection
+            with get_connection() as c:
+                feed_store.save_token(c, fields, source="refresh")
+    except (ValueError, psycopg.Error, OSError) as e:
+        path = env_file or _default_env_file(env)
+        logger.error("idx broker: refreshed token NOT stored in idx.feed_token (%s) - emergency copy to %s", e, path)
+        if path:
+            write_env_token(path, TOKEN_ENV, access)
+            if rotated:
+                write_env_token(path, REFRESH_ENV, rotated)
     return access
 
 
@@ -1093,10 +1121,11 @@ def config_fresh(env: dict[str, str] | None = None, env_file: str | None = None,
                  conn: psycopg.Connection | None = None) -> dict[str, Any]:
     """``config()`` but, when a refresh token is known (env or relay row), refresh the access token first. Falls back
     to the stored access token if the refresh fails (a still-valid token keeps the run alive)."""
+    explicit = env
     env = os.environ if env is None else env
     if newest_refresh_token(env, conn):
         try:
             refresh_and_persist(env, env_file, conn=conn)
         except BrokerFetchError as e:
             logger.warning("idx broker: token refresh failed, using the stored access token - %s", e)
-    return config(env)
+    return config(explicit, conn=conn)
