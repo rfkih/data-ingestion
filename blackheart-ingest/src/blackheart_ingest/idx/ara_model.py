@@ -23,9 +23,10 @@ from __future__ import annotations
 import logging
 import os
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -55,7 +56,16 @@ MIN_CALIB_POS = 30
 # what the app says about the model - the study's out-of-sample numbers, never recomputed at run time
 FACTS = {"study": 146, "report": "research/IDX_ARA_MICRO_2026-09-24.md", "auc": "0.88-0.93", "precision_top5": "8-20 %",
          "base_rate": "0.3-0.9 %", "lift": "~20x", "recall_top20": "48-76 %", "test_years": "2022-2026",
-         "note": "nama yang paling mungkin terkunci biasanya sudah terkunci hari ini; yang masih bisa dibeli rata-rata rugi besok"}
+         "note": "nama yang paling mungkin terkunci biasanya sudah terkunci hari ini; yang masih bisa dibeli rata-rata rugi besok",
+         # the same figures as numbers, for a screen that has to print them: the model's own scorecard (study #146) and
+         # what happens after a touch (study #101, the sell-at-ARA work the evening watch was built on)
+         "scores": {"auc_lo": 0.88, "auc_hi": 0.93, "precision_top5_lo": 0.08, "precision_top5_hi": 0.20,
+                    "recall_top20_lo": 0.48, "recall_top20_hi": 0.76, "base_rate_lo": 0.003, "base_rate_hi": 0.009,
+                    "years": "2022-2026"},
+         "outcomes": {"study": 101,
+                      "lock_hold": {"bps": 431, "n": 440, "what": "closed locked, measured the next day against the ARA price"},
+                      "touch_fade": {"bps": -661, "n": 231, "what": "touched the limit and faded, measured at that day's close"},
+                      "touch_holds": {"rate": 0.59, "n": 671, "what": "share of touches that hold to the close"}}}
 CONFIDENCE = (("high", 0.10), ("medium", 0.03))
 
 
