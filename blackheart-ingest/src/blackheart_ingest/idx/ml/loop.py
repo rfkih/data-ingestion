@@ -36,6 +36,8 @@ MIN_FIT_ROWS = {"daily": 20000, "intraday": 5000}
 MIN_FIT_DAYS = {"daily": 5, "intraday": 2}      # the feed is days old; the daily history is years
 CAL_MIN_N = 400                                  # realised predictions needed before a calibration curve is fitted
 CAL_DAYS = 60                                    # ... from the last this many days of cuts
+LIQ_VALUE60 = 5e9                                # the `ret` primary is the per-cut rank IC on these names: what a book can buy
+LIQ_MIN_PRICE = 100.0
 
 
 # ---- training ----------------------------------------------------------------------------------------------------------
@@ -107,6 +109,15 @@ def train(conn: psycopg.Connection, kind: str, *, tune: bool = True, today: date
     return rep
 
 
+def _cuts(R: pd.DataFrame, kind: str) -> tuple[np.ndarray, np.ndarray | None]:
+    """Per-row cut key (the day, or the minute) and the mask the `ret` primary is scored on (daily: LIQ names; the intraday
+    feed already carries only liquid names)."""
+    if kind == "daily":
+        liq = (np.expm1(R["lvalue60"].to_numpy(dtype=float)) >= LIQ_VALUE60) & (R["close"].to_numpy(dtype=float) >= LIQ_MIN_PRICE)
+        return R["d"].to_numpy(), liq
+    return R["minute"].to_numpy(), None
+
+
 def _block_plan(R: pd.DataFrame, calendar: np.ndarray, h: Horizon, kind: str) -> list[dict[str, Any]]:
     """For each validation block: the purged fit mask and the block mask, oldest block first."""
     embargo = h.steps if kind == "daily" else 0            # intraday labels never cross a day, blocks are whole days
@@ -120,14 +131,16 @@ def _block_plan(R: pd.DataFrame, calendar: np.ndarray, h: Horizon, kind: str) ->
     return plan
 
 
-def _fit_blocks(X: np.ndarray, y: np.ndarray, plan: list[dict[str, Any]], task: str, params: dict[str, Any], feats: list[str]):
+def _fit_blocks(X: np.ndarray, y: np.ndarray, plan: list[dict[str, Any]], task: str, params: dict[str, Any], feats: list[str],
+                cuts: np.ndarray, mask: np.ndarray | None, n_seeds: int = 1):
     """Fit once per block on its purged set, score the block; -> (metrics summary, the newest block's booster)."""
     per_block, booster = [], None
     for b in plan:
         if b["fit"].sum() < 1000 or b["val"].sum() < 200:
             continue
-        bst = common.fit(X[b["fit"]], y[b["fit"]], task, params, feats)
-        m = common.metrics_for(task, y[b["val"]], np.asarray(bst.predict(X[b["val"]]), dtype=float))
+        bst = common.fit(X[b["fit"]], y[b["fit"]], task, params, feats, n_seeds=n_seeds)
+        m = common.metrics_for(task, y[b["val"]], np.asarray(bst.predict(X[b["val"]]), dtype=float), cuts[b["val"]],
+                               None if mask is None else mask[b["val"]])
         per_block.append({"from": b["from"], "to": b["to"], "cut": b["cut"], "n_fit": int(b["fit"].sum()), **m})
         booster = bst
     if not per_block:
@@ -143,7 +156,10 @@ def _summarise(task: str, per_block: list[dict[str, Any]]) -> dict[str, Any]:
            key: float(np.nanmean(prim)), "hit": float(np.nanmean([b["hit"] for b in per_block])),
            "base": float(np.nanmean([b["base"] for b in per_block])), "n": float(sum(b["n"] for b in per_block)),
            "last_primary": float(last["primary"])}
+    if task == "dir":
+        out["auc_pooled"] = float(np.nanmean([b.get("auc_pooled", float("nan")) for b in per_block]))
     if task == "ret":
+        out["ic_pooled"] = float(np.nanmean([b.get("ic_pooled", float("nan")) for b in per_block]))
         out["mae_bps"] = float(np.nanmean([b["mae_bps"] for b in per_block]))
         out["naive_mae_bps"] = float(np.nanmean([b["naive_mae_bps"] for b in per_block]))
     return out
@@ -156,6 +172,7 @@ def _train_one(conn: psycopg.Connection, P: pd.DataFrame, feats: list[str], cale
         raise RuntimeError(f"{len(R)} matured rows < {MIN_FIT_ROWS[kind]}")
     plan = _block_plan(R, calendar, h, kind)
     X = common.to_matrix(R, feats)
+    cuts, mask = _cuts(R, kind)
     if task == "dir":
         for b in plan:
             yv = y[b["val"]]
@@ -175,11 +192,13 @@ def _train_one(conn: psycopg.Connection, P: pd.DataFrame, feats: list[str], cale
                 start = int(np.searchsorted(calendar, np.datetime64(b["from"])))
                 if champ_days + (h.steps if kind == "daily" else 0) >= start:      # the champion saw this block's outcomes
                     continue
-                m = common.metrics_for(task, y[b["val"]], champ.predict(common.to_matrix(R[b["val"]], champ.features)))
+                m = common.metrics_for(task, y[b["val"]], champ.predict(common.to_matrix(R[b["val"]], champ.features)),
+                                       cuts[b["val"]], None if mask is None else mask[b["val"]])
                 per_block.append({"from": b["from"], "to": b["to"], "cut": b["cut"], "n_fit": 0, **m})
             if not per_block:
                 b = newest
-                m = common.metrics_for(task, y[b["val"]], champ.predict(common.to_matrix(R[b["val"]], champ.features)))
+                m = common.metrics_for(task, y[b["val"]], champ.predict(common.to_matrix(R[b["val"]], champ.features)),
+                                       cuts[b["val"]], None if mask is None else mask[b["val"]])
                 per_block.append({"from": b["from"], "to": b["to"], "cut": b["cut"], "n_fit": 0, **m})
             m_champ = _summarise(task, per_block)
             champ_blocks = {b["from"] for b in per_block}          # challengers are compared to the champion on THESE blocks only
@@ -190,17 +209,21 @@ def _train_one(conn: psycopg.Connection, P: pd.DataFrame, feats: list[str], cale
     else:
         champ_blocks = None
     base_params = champ.params if champ is not None else common.BASE_PARAMS[task]
+    n_seeds = common.ENSEMBLE_SEEDS.get((h.key, task), 1)
+    out["seeds"] = n_seeds
     cands: dict[str, int] = {}
     plans = [("refresh", base_params)]
     if tune:
         plans.append(("tune", common.perturb(base_params, rng)))
     for name, params in plans:
-        m, bst = _fit_blocks(X, y, plan, task, params, feats)
+        m, bst = _fit_blocks(X, y, plan, task, params, feats, cuts, mask, n_seeds)
         if name == "refresh" and placebo > 0:
-            m["placebo"] = _placebo(X, y, R, newest, task, params, feats, placebo, rng, m["last_primary"])
+            m["placebo"] = _placebo(X, y, R, newest, task, params, feats, placebo, rng, m["last_primary"], cuts, mask, n_seeds)
         mid = common.register(conn, horizon=h.key, task=task, data_to=data_to, val_from=newest["from"], val_to=newest["to"],
                               rows_fit=int(newest["fit"].sum()), rows_val=int(newest["val"].sum()), params=params, features=feats,
                               val_metrics=m, imp=common.importance(bst, feats), origin=name, artifact=bst.model_to_string())
+        if n_seeds > 1:
+            common.keep_reason(conn, mid, f"ensemble of {n_seeds} seeds")
         cands[name] = mid
         # a champion that saw an older block's outcomes is scored on fewer blocks; judge the challenger on the same ones
         common_prim = m["primary"]
@@ -224,7 +247,7 @@ def _train_one(conn: psycopg.Connection, P: pd.DataFrame, feats: list[str], cale
 
 
 def _placebo(X: np.ndarray, y: np.ndarray, R: pd.DataFrame, block: dict[str, Any], task: str, params: dict[str, Any], feats: list[str],
-             n: int, rng: np.random.Generator, real: float) -> dict[str, Any]:
+             n: int, rng: np.random.Generator, real: float, cuts: np.ndarray, mask: np.ndarray | None, n_seeds: int = 1) -> dict[str, Any]:
     """Shuffle the labels within each day of the fit set, refit, score the newest block: where does the real metric sit?"""
     fit_m, val_m = block["fit"], block["val"]
     days = R["d"].to_numpy()[fit_m]
@@ -238,8 +261,9 @@ def _placebo(X: np.ndarray, y: np.ndarray, R: pd.DataFrame, block: dict[str, Any
         for a, b in pairwise(bounds):     # permute inside each day: keeps the day's base rate, kills the name signal
             seg = order[a:b]
             ys[seg] = yf[rng.permutation(seg)]
-        bst = common.fit(X[fit_m], ys, task, params, feats)
-        scores.append(common.metrics_for(task, y[val_m], np.asarray(bst.predict(X[val_m]), dtype=float))["primary"])
+        bst = common.fit(X[fit_m], ys, task, params, feats, n_seeds=n_seeds)
+        scores.append(common.metrics_for(task, y[val_m], np.asarray(bst.predict(X[val_m]), dtype=float), cuts[val_m],
+                                         None if mask is None else mask[val_m])["primary"])
     scores_a = np.array(scores, dtype=float)
     return {"n": n, "scores": [round(float(s), 4) for s in scores], "pct": float((scores_a < real).mean() * 100),
             "mean": float(np.nanmean(scores_a)), "real": float(real)}
@@ -252,7 +276,11 @@ def render_train(rep: dict[str, Any]) -> str:
         key = "auc" if m["task"] == "dir" else "ic"
         pl = c.get("placebo") or m.get("refresh", {}).get("placebo")
         L.append(f"  {m['horizon']:>4} {m['task']} {m.get('basis', 'abs'):<6}: {m['chosen']:<8} {key} {c.get(key, float('nan')):.3f} "
-                 f"(min {c.get('primary_min', float('nan')):.3f}, {c.get('k', 0)} blok) hit {c.get('hit', float('nan')) * 100:.1f} % "
+                 f"(min {c.get('primary_min', float('nan')):.3f}, {c.get('k', 0)} blok"
+                 + (f", pooled {c['ic_pooled']:.3f}" if c.get('ic_pooled') is not None and m['task'] == 'ret' else "")
+                 + (f", pooled {c['auc_pooled']:.3f}" if c.get('auc_pooled') is not None and m['task'] == 'dir' else "")
+                 + (f", {m['seeds']} seeds" if m.get('seeds', 1) > 1 else "")
+                 + f") hit {c.get('hit', float('nan')) * 100:.1f} % "
                  f"(base {c.get('base', float('nan')) * 100:.1f} %) blok akhir {m['val_from']}..{m['val_to']} embargo<{m.get('embargo_to')} "
                  + (f"placebo pct {pl['pct']:.0f} " if pl else "") + f"- {m['reason']}")
     for e in rep.get("errors", []):
@@ -478,7 +506,7 @@ def scorecard(conn: psycopg.Connection, score_date: date | None = None, windows:
             a = common.auc((r > 0).astype(float)[r != 0], p_up[r != 0])
             m, nm = common.mae_bps(pr, r)
             rows.append({"score_date": score_date, "horizon": h.key, "window_days": w, "n": len(S), "hit_rate": hit, "base_hit": base,
-                         "auc": a, "ic": common.spearman(pr, r), "mae_bps": m, "naive_mae_bps": nm})
+                         "auc": a, "ic": _realised_ic(S["made_at"].to_numpy(), pr, r), "mae_bps": m, "naive_mae_bps": nm})
     with conn.cursor() as cur:
         for x in rows:
             cur.execute("""INSERT INTO idx.ml_scorecard (score_date, horizon, window_days, n, hit_rate, base_hit, auc, ic, mae_bps, naive_mae_bps)
@@ -490,6 +518,12 @@ def scorecard(conn: psycopg.Connection, score_date: date | None = None, windows:
     return rows
 
 
+def _realised_ic(made_at: np.ndarray, pred: np.ndarray, real: np.ndarray) -> float:
+    """The scorecard's IC: mean rank IC per cut (predictions made together), the pooled Spearman when cuts are too thin."""
+    ic, _, k = common.cut_ic(made_at, pred, real)
+    return ic if k > 0 else common.spearman(pred, real)
+
+
 def render_scorecard(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "belum ada prediksi yang jatuh tempo"
@@ -499,7 +533,7 @@ def render_scorecard(rows: list[dict[str, Any]]) -> str:
             return "-".rjust(width)
         return (fmt % (float(v) * scale)).rjust(width)
 
-    L = ["horizon  win      n   hit%  base%    auc      ic  mae_bps naive_bps   (20d+ = relatif IHSG)"]
+    L = ["horizon  win      n   hit%  base%    auc      ic  mae_bps naive_bps   (20d+ = relatif IHSG; ic = rank IC per cut, rata-rata)"]
     for r in rows:
         L.append(f"{r['horizon']:>7} {r['window_days']:>4}d {r['n']:>6} {f(r['hit_rate'], '%.1f', 6, 100)} {f(r['base_hit'], '%.1f', 6, 100)} "
                  f"{f(r['auc'], '%.3f', 6)} {f(r['ic'], '%.3f', 7)} {f(r['mae_bps'], '%.1f', 8)} {f(r['naive_mae_bps'], '%.1f', 9)}")

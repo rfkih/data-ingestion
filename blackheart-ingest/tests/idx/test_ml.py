@@ -46,7 +46,61 @@ def test_metrics_for_each_task_has_a_primary() -> None:
     assert m["primary"] == m["auc"] == 1.0 and m["hit"] == 1.0
     r = np.linspace(-0.05, 0.05, 12)
     m = common.metrics_for("ret", r, r * 0.5 + 0.001)
-    assert m["primary"] == m["ic"] and m["ic"] > 0.99 and m["mae_bps"] < m["naive_mae_bps"]
+    assert m["primary"] == m["ic"] == m["ic_pooled"] and m["ic"] > 0.99 and m["mae_bps"] < m["naive_mae_bps"]
+
+
+def test_dir_primary_is_the_per_cut_auc() -> None:
+    """Day A: all names went up, day B: all went down - the pooled AUC is high just from knowing the day; inside a day
+    there is one class only, so no cut qualifies and the primary stays pooled. Add a mixed day and the per-cut AUC counts it."""
+    rng = np.random.default_rng(2)
+    n = 40
+    y = np.r_[np.ones(n), np.zeros(n)]
+    p = np.r_[rng.uniform(0.6, 0.9, n), rng.uniform(0.1, 0.4, n)]
+    cuts = np.r_[np.zeros(n), np.ones(n)]
+    m = common.metrics_for("dir", y, p, cuts)
+    assert m["primary"] == m["auc"] == m["auc_pooled"] == 1.0 and "auc_cuts" not in m
+    y2 = np.r_[y, (np.arange(n) % 2).astype(float)]
+    p2 = np.r_[p, np.where(np.arange(n) % 2 == 1, 0.8, 0.2)]
+    cuts2 = np.r_[cuts, np.full(n, 2.0)]
+    m = common.metrics_for("dir", y2, p2, cuts2)
+    assert m["auc_cuts"] == 1 and m["primary"] == m["auc"] == 1.0 and m["auc_pooled"] < 1.0 or m["auc_pooled"] == 1.0
+    ca, _, k = common.cut_auc(np.r_[np.zeros(n), np.ones(n)], np.r_[p2[-n:], p2[-n:]], np.r_[y2[-n:], 1 - y2[-n:]])
+    assert k == 2 and abs(ca - 0.5) < 1e-9                                 # perfect on one day, inverted on the other
+
+
+def test_seed_ensemble_round_trips_through_one_artifact_string() -> None:
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(600, 3)).astype(np.float32)
+    y = (X[:, 0] * 0.02 + 0.005 * rng.normal(size=600)).astype(float)
+    params = dict(common.BASE_PARAMS["ret"], rounds=40, min_data_in_leaf=20, num_threads=2)
+    ens = common.fit(X, y, "ret", params, ["a", "b", "c"], n_seeds=3)
+    assert isinstance(ens, common.Ensemble) and len(ens.members) == 3
+    s = ens.model_to_string()
+    back = common.Ensemble.from_string(s)
+    assert len(back.members) == 3 and np.allclose(back.predict(X[:50]), ens.predict(X[:50]))
+    m = common.Model(model_id=1, horizon="5d", task="ret", params=params, features=["a", "b", "c"], val_metrics={}, data_to=None, status="champion", artifact=s)
+    assert np.allclose(m.predict(X[:50]), ens.predict(X[:50]))
+    single = common.fit(X, y, "ret", params, ["a", "b", "c"])
+    assert not isinstance(single, common.Ensemble) and common.importance(ens, ["a", "b", "c"])["a"] > 0.5
+    assert common.ENSEMBLE_SEEDS == {("5d", "ret"): 3}
+
+
+def test_ret_primary_is_the_per_cut_rank_ic_not_the_pooled_level() -> None:
+    """Two days, 30 names each. The prediction orders the names perfectly WITHIN each day but gets the days' levels
+    backwards: the pooled Spearman is poor, the per-cut IC is 1. The primary must be the per-cut one (menu ML-7)."""
+    rng = np.random.default_rng(1)
+    n = 30
+    y = np.r_[rng.normal(0.05, 0.002, n), rng.normal(-0.05, 0.002, n)]            # day A up, day B down
+    pred = np.r_[y[:n] - 0.05 - 0.10, y[n:] + 0.05 + 0.10]                       # right order inside a day, levels swapped
+    cuts = np.r_[np.zeros(n), np.ones(n)]
+    pooled = common.metrics_for("ret", y, pred)
+    m = common.metrics_for("ret", y, pred, cuts)
+    assert pooled["ic"] < 0.2
+    assert m["primary"] == m["ic"] > 0.99 and m["ic_pooled"] == pooled["ic"] and m["ic_cuts"] == 2
+    ic, t, k = common.cut_ic(cuts, pred, y, mask=np.r_[np.ones(n, bool), np.zeros(n, bool)])
+    assert k == 1 and ic > 0.99                                                   # the mask restricts the names, not the cuts
+    ic, _, k = common.cut_ic(cuts, pred, y, min_n=31)
+    assert k == 0 and np.isnan(ic)                                                # too thin: the caller falls back to pooled
 
 
 # ---- prices --------------------------------------------------------------------------------------------------------------
@@ -296,7 +350,7 @@ def test_placebo_percentile_is_high_for_a_real_signal_and_low_for_noise() -> Non
     params = dict(common.BASE_PARAMS["dir"], rounds=60, min_data_in_leaf=20, num_threads=4)
     bst = common.fit(X[block["fit"]], y[block["fit"]], "dir", params, ["a", "b", "c"])
     real = common.metrics_for("dir", y[block["val"]], np.asarray(bst.predict(X[block["val"]])))["primary"]
-    pl = loop._placebo(X, y, R, block, "dir", params, ["a", "b", "c"], 4, rng, real)
+    pl = loop._placebo(X, y, R, block, "dir", params, ["a", "b", "c"], 4, rng, real, days, None)
     assert pl["pct"] == 100.0 and pl["mean"] < 0.6 < real
 
 

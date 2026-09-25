@@ -67,18 +67,91 @@ def mae_bps(pred: np.ndarray, realized: np.ndarray) -> tuple[float, float]:
     return float(np.abs(p[ok] - r[ok]).mean() * 1e4), float(np.abs(r[ok]).mean() * 1e4)
 
 
-def metrics_for(task: str, y: np.ndarray, pred: np.ndarray) -> dict[str, float]:
-    """The validation numbers stored on every model; ``primary`` is what the promotion rule compares."""
+def cut_ic(cuts: np.ndarray, pred: np.ndarray, y: np.ndarray, mask: np.ndarray | None = None, min_n: int = 20) -> tuple[float, float, int]:
+    """Mean Spearman between pred and y WITHIN each cut (a day for the daily models, a minute for the intraday ones), over
+    the rows in ``mask``; -> (mean, t-stat, cuts counted). This is the number a name picker can monetise: how well the
+    ranking inside one cut orders the names. The pooled Spearman over a block also rewards getting each cut's LEVEL
+    right (the market's direction), which a within-day picker cannot trade on (menu ML-7, study #173)."""
+    pred = np.asarray(pred, dtype=float)
+    y = np.asarray(y, dtype=float)
+    ok = np.isfinite(pred) & np.isfinite(y)
+    if mask is not None:
+        ok &= np.asarray(mask, dtype=bool)
+    if ok.sum() < min_n:
+        return float("nan"), float("nan"), 0
+    df = pd.DataFrame({"c": np.asarray(cuts)[ok], "p": pred[ok], "y": y[ok]})
+    n = df.groupby("c")["p"].transform("size")
+    df = df[n >= min_n]
+    if df.empty:
+        return float("nan"), float("nan"), 0
+    g = df.groupby("c")
+    rp = g["p"].rank()
+    ry = g["y"].rank()
+    df["rp"] = rp - rp.groupby(df["c"]).transform("mean")
+    df["ry"] = ry - ry.groupby(df["c"]).transform("mean")
+    df["pq"], df["pp"], df["yy"] = df["rp"] * df["ry"], df["rp"] ** 2, df["ry"] ** 2
+    s = df.groupby("c")[["pq", "pp", "yy"]].sum()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ics = (s["pq"] / np.sqrt(s["pp"] * s["yy"])).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(ics) == 0:
+        return float("nan"), float("nan"), 0
+    t = float(ics.mean() / ics.std() * np.sqrt(len(ics))) if len(ics) > 1 and ics.std() > 0 else float("nan")
+    return float(ics.mean()), t, int(len(ics))
+
+
+def cut_auc(cuts: np.ndarray, pred: np.ndarray, y: np.ndarray, mask: np.ndarray | None = None, min_n: int = 20) -> tuple[float, float, int]:
+    """Mean rank AUC WITHIN each cut over the rows in ``mask``; -> (mean, t-stat, cuts counted). A cut with one class only
+    is skipped. The pooled AUC over a block also rewards knowing which days went up; this asks only whether the model
+    orders the names inside a day (the same reasoning as ``cut_ic``; menu ML-7)."""
+    pred = np.asarray(pred, dtype=float)
+    y = np.asarray(y, dtype=float)
+    ok = np.isfinite(pred) & np.isfinite(y)
+    if mask is not None:
+        ok &= np.asarray(mask, dtype=bool)
+    if ok.sum() < min_n:
+        return float("nan"), float("nan"), 0
+    df = pd.DataFrame({"c": np.asarray(cuts)[ok], "p": pred[ok], "y": (y[ok] > 0.5).astype(float)})
+    n = df.groupby("c")["p"].transform("size")
+    df = df[n >= min_n]
+    if df.empty:
+        return float("nan"), float("nan"), 0
+    g = df.groupby("c")
+    df["r"] = g["p"].rank()
+    s = df.assign(rpos=df["r"] * df["y"]).groupby("c").agg(n1=("y", "sum"), n=("y", "size"), rpos=("rpos", "sum"))
+    s["n0"] = s["n"] - s["n1"]
+    s = s[(s["n1"] > 0) & (s["n0"] > 0)]
+    if s.empty:
+        return float("nan"), float("nan"), 0
+    aucs = (s["rpos"] - s["n1"] * (s["n1"] + 1) / 2) / (s["n1"] * s["n0"])
+    t = float((aucs.mean() - 0.5) / aucs.std() * np.sqrt(len(aucs))) if len(aucs) > 1 and aucs.std() > 0 else float("nan")
+    return float(aucs.mean()), t, int(len(aucs))
+
+
+def metrics_for(task: str, y: np.ndarray, pred: np.ndarray, cuts: np.ndarray | None = None, mask: np.ndarray | None = None) -> dict[str, float]:
+    """The validation numbers stored on every model; ``primary`` is what the promotion rule compares.
+    ``ret``: with ``cuts`` given, primary = ``ic`` = the mean per-cut rank IC over ``mask`` (LIQ names for the daily models);
+    the block-pooled Spearman is kept as ``ic_pooled``. ``dir``: likewise primary = ``auc`` = the mean per-cut AUC, the pooled
+    one kept as ``auc_pooled``. Without cuts (old callers, tests) the pooled numbers are the primary."""
     y = np.asarray(y, dtype=float)
     pred = np.asarray(pred, dtype=float)
     if task == "dir":
         a = auc(y, pred)
         hit, base, n = hit_rate(pred > 0.5, np.where(y > 0.5, 1.0, -1.0))
-        return {"primary": a, "auc": a, "hit": hit, "base": base, "n": float(n)}
-    ic = spearman(pred, y)
+        out = {"primary": a, "auc": a, "auc_pooled": a, "hit": hit, "base": base, "n": float(n)}
+        if cuts is not None:
+            ca, t, k = cut_auc(cuts, pred, y, mask)
+            if np.isfinite(ca):
+                out.update({"primary": ca, "auc": ca, "auc_t": t, "auc_cuts": float(k)})
+        return out
+    pooled = spearman(pred, y)
     m, nm = mae_bps(pred, y)
     hit, base, n = hit_rate(pred > 0, y)
-    return {"primary": ic, "ic": ic, "mae_bps": m, "naive_mae_bps": nm, "hit": hit, "base": base, "n": float(n)}
+    out = {"primary": pooled, "ic": pooled, "ic_pooled": pooled, "mae_bps": m, "naive_mae_bps": nm, "hit": hit, "base": base, "n": float(n)}
+    if cuts is not None:
+        ic, t, k = cut_ic(cuts, pred, y, mask)
+        if np.isfinite(ic):
+            out.update({"primary": ic, "ic": ic, "ic_t": t, "ic_cuts": float(k)})
+    return out
 
 
 # ---- prices -----------------------------------------------------------------------------------------------------------
@@ -126,12 +199,45 @@ def perturb(params: dict[str, Any], rng: np.random.Generator, n_changes: int = 2
     return p
 
 
-def fit(X: np.ndarray, y: np.ndarray, task: str, params: dict[str, Any], features: list[str], seed: int = 20260924):
+ENSEMBLE_SEEDS: dict[tuple[str, str], int] = {("5d", "ret"): 3}     # menu ML-7 (#173): seed averaging never hurt, +0.01 IC at 5d
+ENS_SEP = "\n#=== blackheart ensemble member ===\n"
+
+
+class Ensemble:
+    """A few boosters with different seeds, predictions averaged. Serialises to one artifact string (members joined by
+    ENS_SEP) so the registry column and the loaders stay as they are."""
+
+    def __init__(self, members: list[Any]):
+        self.members = members
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return np.mean([np.asarray(m.predict(X), dtype=float) for m in self.members], axis=0)
+
+    def feature_importance(self, importance_type: str = "gain") -> np.ndarray:
+        return np.mean([np.asarray(m.feature_importance(importance_type=importance_type), dtype=float) for m in self.members], axis=0)
+
+    def model_to_string(self) -> str:
+        return ENS_SEP.join(m.model_to_string() for m in self.members)
+
+    @staticmethod
+    def from_string(s: str):
+        import lightgbm as lgb
+        return Ensemble([lgb.Booster(model_str=part) for part in s.split(ENS_SEP)])
+
+
+def fit(X: np.ndarray, y: np.ndarray, task: str, params: dict[str, Any], features: list[str], seed: int = 20260924, n_seeds: int = 1):
+    """One booster, or an Ensemble of ``n_seeds`` boosters that differ only by seed (bagging / feature-fraction draws)."""
     import lightgbm as lgb
     p = {k: v for k, v in params.items() if k != "rounds"}
-    p["seed"] = seed
-    ds = lgb.Dataset(X, y, feature_name=features, free_raw_data=True)
-    return lgb.train(p, ds, int(params.get("rounds", 300)))
+    rounds = int(params.get("rounds", 300))
+
+    def one(s: int):
+        ds = lgb.Dataset(X, y, feature_name=features, free_raw_data=False)
+        return lgb.train({**p, "seed": s}, ds, rounds)
+
+    if n_seeds <= 1:
+        return one(seed)
+    return Ensemble([one(seed + i) for i in range(n_seeds)])
 
 
 def importance(booster, features: list[str]) -> dict[str, float]:
@@ -161,7 +267,7 @@ class Model:
             import lightgbm as lgb
             if not self.artifact:
                 raise RuntimeError(f"model {self.model_id} has no artifact")
-            self.booster = lgb.Booster(model_str=self.artifact)
+            self.booster = Ensemble.from_string(self.artifact) if ENS_SEP in self.artifact else lgb.Booster(model_str=self.artifact)
         return self.booster
 
     def predict(self, X: np.ndarray) -> np.ndarray:
