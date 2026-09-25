@@ -167,6 +167,19 @@ def watch(conn: psycopg.Connection, top: int = TOP_N, notify: bool = True, run_d
     return {"run_date": run_date, **info, "rows": rows, "text": text}
 
 
+def coverage(conn: psycopg.Connection, run_date: date) -> dict[str, int | None]:
+    """How many names the model gave a number to that session, and how many it could have. The scoring mask is
+    ``Panel.last_day``: a main-board name that traded, priced at or above ``MIN_PREV`` - there is deliberately no
+    liquidity floor at scoring time, so a thin name a person holds still gets a probability. Mirrored here in SQL so a
+    reader of the list can see what the top 30 was chosen out of."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("""SELECT count(*) FILTER (WHERE substr(remarks, 5, 1) IN ('1', '2')) AS main_board,
+                              count(*) FILTER (WHERE substr(remarks, 5, 1) IN ('1', '2') AND close > 0 AND previous >= %s) AS scored
+                         FROM idx.daily_summary WHERE trade_date = %s""", (ara_model.MIN_PREV, run_date))
+        r = cur.fetchone()
+    return {"main_board": int(r["main_board"]) if r else None, "scored": int(r["scored"]) if r else None}
+
+
 def latest_watch(conn: psycopg.Connection) -> dict[str, Any]:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT max(run_date) AS d FROM idx.ara_watch")
@@ -181,7 +194,8 @@ def latest_watch(conn: psycopg.Connection) -> dict[str, Any]:
             r["p_lock"] = r["p"]
         if r.get("confidence") is None:
             r["confidence"] = ara_model.confidence(float(r["p_lock"]))
-    return {"run_date": d, "rows": rows, "facts": ara_model.FACTS}
+    cov = coverage(conn, rows[0]["bar_date"] if rows and rows[0].get("bar_date") else d)
+    return {"run_date": d, "rows": rows, "facts": ara_model.FACTS, "coverage": {**cov, "shown": len(rows)}}
 
 
 # ---- the intraday state ----------------------------------------------------------------------------------------------

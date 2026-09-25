@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from datetime import date, datetime, timedelta
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -234,7 +235,7 @@ def _placebo(X: np.ndarray, y: np.ndarray, R: pd.DataFrame, block: dict[str, Any
     scores = []
     for _ in range(n):
         ys = yf.copy()
-        for a, b in zip(bounds[:-1], bounds[1:], strict=True):     # permute inside each day: keeps the day's base rate, kills the name signal
+        for a, b in pairwise(bounds):     # permute inside each day: keeps the day's base rate, kills the name signal
             seg = order[a:b]
             ys[seg] = yf[rng.permutation(seg)]
         bst = common.fit(X[fit_m], ys, task, params, feats)
@@ -534,7 +535,13 @@ def board(conn: psycopg.Connection, horizon: str, top: int = 20) -> dict[str, An
         cur.execute("""SELECT code, basis, ref_price, p_up, pred_ret, pred_price FROM idx.ml_prediction WHERE horizon = %s AND made_at = %s
                        AND pred_ret IS NOT NULL ORDER BY pred_ret DESC""", (horizon, m))
         rows = [dict(r) for r in cur.fetchall()]
+        # an intraday horizon is cut every minute over whatever names the live feed carried, so the newest cut is much
+        # narrower than the session: report both, or the screen ends up quoting the daily figure for every horizon
+        cur.execute("""SELECT count(DISTINCT code) AS n FROM idx.ml_prediction
+                        WHERE horizon = %s AND made_at >= date_trunc('day', %s::timestamptz)""", (horizon, m))
+        day = cur.fetchone()
     return {"horizon": horizon, "label": HORIZONS[horizon].label, "basis": HORIZONS[horizon].basis, "made_at": m, "n": len(rows),
+            "codes_today": int(day["n"]) if day else len(rows), "cadence": HORIZONS[horizon].kind,
             "up": rows[:top], "down": rows[-top:][::-1]}
 
 
