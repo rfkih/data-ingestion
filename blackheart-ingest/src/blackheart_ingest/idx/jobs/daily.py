@@ -88,9 +88,40 @@ def _ensure_listings(conn: psycopg.Connection, summaries: list[dict[str, Any]], 
         return cur.rowcount
 
 
+def _one(conn: psycopg.Connection, sql: str, params: tuple) -> tuple:
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+    return tuple(row.values()) if isinstance(row, dict) else tuple(row)
+
+
+def _last_sessions(conn: psycopg.Connection, d: date) -> tuple[date | None, date | None]:
+    """(latest daily_summary date, latest bar date) strictly before d - they differ when a session has only fallback bars."""
+    return _one(conn, "SELECT (SELECT max(trade_date) FROM idx.daily_summary WHERE trade_date < %s AND trade_date >= %s - 30),"
+                      "       (SELECT max(trade_date) FROM idx.bar WHERE trade_date < %s AND trade_date >= %s - 30)", (d, d, d, d))
+
+
+def _redetect_next_session(conn: psycopg.Connection, d: date, r: runlog.RunResult) -> None:
+    """A backfilled day d: its new bars take the adj_factor of the actions already known after d, and the next stored
+    session is detected again, now against d's close (it was skipped, or compared with a stale prior, when it ran first)."""
+    (nxt,) = _one(conn, "SELECT min(trade_date) FROM idx.daily_summary WHERE trade_date > %s", (d,))
+    if nxt is None:
+        return
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE idx.bar b SET adj_factor = round(a.f, 10), updated_at = now()
+                         FROM (SELECT code, exp(sum(ln(factor))) AS f FROM idx.corporate_action
+                                WHERE ex_date > %s AND factor > 0 GROUP BY code) a
+                        WHERE b.code = a.code AND b.trade_date = %s AND b.adj_factor = 1 AND round(a.f, 10) <> 1""", (d, d))
+        cur.execute("SELECT code, previous, listed_shares FROM idx.daily_summary WHERE trade_date = %s", (nxt,))
+        rows = [x if isinstance(x, dict) else dict(zip(["code", "previous", "listed_shares"], x, strict=True)) for x in cur.fetchall()]
+    conn.commit()
+    r.detail["next_session_actions_n"] = _detect_actions(conn, nxt, rows, r)
+
+
 def _detect_actions(conn: psycopg.Connection, d: date, summaries: list[dict[str, Any]], r: runlog.RunResult) -> int:
     prior = _prior_rows(conn, d, [s["code"] for s in summaries])
     n = 0
+    resets: list[tuple[dict[str, Any], dict[str, Any], Decimal]] = []
     with conn.cursor() as cur:
         for s in summaries:
             p = prior.get(s["code"])
@@ -104,6 +135,13 @@ def _detect_actions(conn: psycopg.Connection, d: date, summaries: list[dict[str,
                         "WHERE code = %s AND trade_date = %s AND NOT ('previous_mismatch_small' = ANY(quality_flags))",
                         (s["code"], d))
                 continue
+            resets.append((s, p, factor))
+        why = etl.detection_blocked(*_last_sessions(conn, d), len(resets), len(prior))
+        if why:
+            resets = []
+            r.warn(f"corporate-action detection skipped for {d}: {why}")
+            runlog.alert_once(conn, "warning", JOB, f"corporate-action detection skipped for {d}: {why}")
+        for s, p, factor in resets:
             kind, f = etl.classify_action(factor, p["listed_shares"], s["listed_shares"])
             cur.execute(
                 """
@@ -146,6 +184,7 @@ def process(conn: psycopg.Connection, d: date, rows: list[dict[str, Any]], fetch
     r.detail["no_close"] = len(summaries) - len(bars)
     r.detail["open_missing"] = sum(1 for b in bars if b["open_missing"])
     r.detail["actions_n"] = _detect_actions(conn, d, summaries, r)
+    _redetect_next_session(conn, d, r)
 
 
 def run(conn: psycopg.Connection, client: IdxClient, d: date) -> runlog.RunResult:

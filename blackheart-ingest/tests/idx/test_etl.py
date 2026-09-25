@@ -92,3 +92,16 @@ def test_listing_and_index_rows() -> None:
                           "Highest": 6552.792, "Lowest": 6462.96, "Close": 6541.377, "Volume": 28617128161.0,
                           "Value": 14712675309883.0}], NOW, 3)
     assert ix[0]["index_code"] == "COMPOSITE" and ix[0]["open"] is None and ix[0]["high"] == Decimal("6552.792")
+
+
+def test_detection_blocked_when_prior_session_missing() -> None:
+    from datetime import date
+    # 2026-09-21: 09-18 had only Yahoo fallback bars, the latest summary was 09-17 -> no detection
+    assert etl.detection_blocked(date(2026, 9, 17), date(2026, 9, 18), 641, 963) is not None
+    assert etl.detection_blocked(date(2026, 9, 17), date(2026, 9, 18), 0, 963) is not None
+    # no bars either: the mass reset gives it away
+    assert "missing prior session" in etl.detection_blocked(date(2026, 9, 17), date(2026, 9, 17), 641, 963)
+    # a normal ex-date day (max seen: 5 names) and a thin early universe still detect
+    assert etl.detection_blocked(date(2026, 9, 18), date(2026, 9, 18), 5, 963) is None
+    assert etl.detection_blocked(date(2026, 9, 18), date(2026, 9, 18), 19, 100) is None
+    assert etl.detection_blocked(None, None, 0, 0) is None

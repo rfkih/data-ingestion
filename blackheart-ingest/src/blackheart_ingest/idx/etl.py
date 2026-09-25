@@ -140,6 +140,25 @@ def classify_action(price_factor: Decimal, shares_before: int | None, shares_aft
     return "previous_reset", price_factor
 
 
+MASS_RESET_MIN = 20       # a real ex-date carries a handful of resets (max 5 on one day 2020-2026)
+MASS_RESET_SHARE = 0.10   # ... and a missing prior session makes most of the market look reset (641 of 963 on 2026-09-21)
+
+
+def detection_blocked(last_summary: date | None, last_bar: date | None, n_resets: int, n_compared: int) -> str | None:
+    """Why a day's Previous-vs-prior-close comparison cannot be trusted, else None.
+
+    ``Previous`` is the close of the PREVIOUS SESSION. When that session's Ringkasan Saham is not loaded yet (IDX refused
+    it, or a backfill runs out of order) the prior close is one session older and every name that moved that day reads
+    as a corporate action: 2026-09-21 was detected before 2026-09-18 was backfilled and wrote 641 false actions that
+    shifted adj_factor on all earlier bars. ``last_bar`` newer than ``last_summary`` means a session exists (Yahoo
+    fallback bars) without a summary; the mass-reset test covers a gap with no bars at all."""
+    if last_summary and last_bar and last_bar > last_summary:
+        return f"session {last_bar} has bars but no Ringkasan Saham (latest summary {last_summary}): backfill it first"
+    if n_resets >= MASS_RESET_MIN and n_resets > MASS_RESET_SHARE * n_compared:
+        return f"{n_resets} of {n_compared} names show a Previous reset: a missing prior session, not corporate actions"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Daftar Saham (GetSecuritiesStock rows)
 # ---------------------------------------------------------------------------
