@@ -203,7 +203,8 @@ def build_panel(conn: psycopg.Connection, days: list[date], codes: list[str] | N
         return M
     M["d"] = M["minute"].dt.date
     parts = [_one_day(X.drop(columns=["d"]), d) for d, X in M.groupby("d", sort=True) if d in set(days)]
-    P = pd.concat([p for p in parts if not p.empty], ignore_index=True) if parts else pd.DataFrame()
+    parts = [p for p in parts if not p.empty]                       # a day where no name reached MIN_MINUTES_FOR_ROW -> nothing
+    P = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if P.empty:
         return P
     P["d"] = P["minute"].dt.date
