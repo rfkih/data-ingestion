@@ -3,7 +3,7 @@
 Blackridge desk status in one command.
 
     python scripts/status.py            # the whole digest, one screen
-    python scripts/status.py books      # only that block (books|strategies|health|feed|chain|tickets)
+    python scripts/status.py books      # only that block (books|risk|strategies|health|feed|chain|tickets)
     python scripts/status.py --json     # the same facts as JSON, for a script
 
 Written for cheap answers: one run, one screen, no JSON to wade through and no guessing at endpoint
@@ -152,6 +152,13 @@ def collect() -> dict:
         if t and t.get("id"):
             tickets[b["book"]] = t
 
+    # risk only for real books that hold something: a flat book has nothing at risk and the report costs a second or two
+    risk = {}
+    for b in live:
+        if b.get("positions"):
+            r = get(f"/idx/book/{b['book']}/risk", timeout=30.0)
+            risk[b["book"]] = r
+
     return {
         "at": datetime.now(WIB).strftime("%Y-%m-%d %H:%M WIB"),
         "ports": {name: port_up(p) for name, p in PORTS},
@@ -164,6 +171,7 @@ def collect() -> dict:
         "composite": composite,
         "feed": feed,
         "tickets": tickets,
+        "risk": risk,
     }
 
 
@@ -381,10 +389,33 @@ def block_feed(s: dict) -> list[str]:
     return out
 
 
+def block_risk(s: dict) -> list[str]:
+    out = [bold("RISK") + dim("  real books holding names (idx risk --book B for the full report)")]
+    if not s["risk"]:
+        out.append("  " + dim("no real book holds a position"))
+        return out
+    for book, r in s["risk"].items():
+        if not r:
+            out.append(f"  {book:<14} " + amber("no report - the worker has no /risk route yet (restart it) or it failed"))
+            continue
+        v = ((r.get("var") or {}).get("99") or {}).get("hist_1d")
+        es = ((r.get("var") or {}).get("99") or {}).get("hist_es_10d")
+        covid = next((x.get("pnl_pct") for x in r.get("stress") or [] if str(x.get("name", "")).startswith("COVID")), None)
+        mn = r.get("max_name") or {}
+        out.append(
+            f"  {book:<14} VaR99 1d {pc(v).lstrip('+')}  ES99 10d {pc(es).lstrip('+')}  beta {float(r.get('beta') or 0):.2f}  "
+            f"top {mn.get('code', '-')} {pc(mn.get('weight')).lstrip('+')}  COVID replay {pc(covid)}"
+        )
+        for x in r.get("breaches") or []:
+            out.append("      " + amber("BREACH " + x))
+    return out
+
+
 BLOCKS = {
     "health": block_health,
     "chain": block_chain,
     "books": block_books,
+    "risk": block_risk,
     "strategies": block_strategies,
     "tickets": block_tickets,
     "feed": block_feed,

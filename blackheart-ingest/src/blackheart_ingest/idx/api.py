@@ -670,6 +670,19 @@ def make_router(require_token) -> APIRouter:
         return {"book": s["book"], "positions": s["positions"], "closed": s["closed"], "nav": s["nav"], "positions_value": s["positions_value"],
                 "nav_now": s["nav_now"], "fills": fills, "alerts": alerts}
 
+    @router.get("/book/{book}/risk")
+    def book_risk(book: str, as_of: date | None = None, c: Caller = _CALLER) -> dict[str, Any]:
+        """Read-only risk report (idx/risk.py): VaR/ES, beta, concentration, liquidity, stress replays."""
+        from . import risk
+        with get_connection() as conn:
+            own_book(conn, book, c)
+            try:
+                return risk.report(conn, book, as_of)
+            except ValueError as e:
+                raise HTTPException(status_code=404, detail=str(e)) from None
+            finally:
+                conn.rollback()
+
     @router.post("/book/{book}/fills", dependencies=[Depends(require_token)])
     def book_fill(book: str, body: dict[str, Any] = _BODY, c: Caller = _CALLER) -> dict[str, Any]:
         """{trade_date, code, side, lots, price, fee?, note?} -> records the fill, moves cash, rebuilds positions, marks.

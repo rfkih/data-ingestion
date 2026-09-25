@@ -974,6 +974,21 @@ def cmd_logos(a: argparse.Namespace) -> int:
     return 1 if r["stopped"] else 0
 
 
+def cmd_risk(a: argparse.Namespace) -> int:
+    from . import risk
+    as_of = date.fromisoformat(a.as_of) if a.as_of else None
+    with get_connection() as conn:
+        conn.read_only = True   # the report never writes
+        books = [a.book] if a.book else risk.active_books(conn)
+        reps = [risk.report(conn, b, as_of) for b in books]
+        conn.rollback()
+    if a.json:
+        print(json.dumps(reps[0] if a.book else reps, indent=1, default=str))
+    else:
+        print("\n\n".join(risk.render(r) + "".join(f"\n  BREACH  {x}" for x in r["breaches"]) for r in reps))
+    return 0
+
+
 def cmd_agent(a: argparse.Namespace) -> int:
     import json as _json
 
@@ -1642,6 +1657,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--codes")
     p.add_argument("--refresh", action="store_true", help="download again even when a logo (or a known miss) is on disk")
     p.set_defaults(fn=cmd_logos)
+    p = sub.add_parser("risk", help="book risk report (read-only): VaR/ES, beta, concentration, liquidity, stress: [--book B] [--as-of D] [--json]")
+    p.add_argument("--book", help="one book; default every non-archived book, real ones first")
+    p.add_argument("--as-of")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_risk)
     p = sub.add_parser("agent", help="online learning agent, PAPER only: warmstart | settle [--date D] | decide | report")
     p.add_argument("sub", choices=["warmstart", "settle", "decide", "report"])
     p.add_argument("--date")
