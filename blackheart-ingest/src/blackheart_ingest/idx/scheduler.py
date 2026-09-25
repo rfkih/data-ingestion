@@ -11,8 +11,18 @@ Schedule (WIB):
   09:00, 09:05    gapfade_entry       intraday gap-fade books: the opening auction printed at ~08:58 -> scan, sweep, entry ticket
   15:50 Mon-Fri   gapfade_exit        intraday gap-fade books: sell everything into the closing auction
   every 10 min    token_guard         the Stockbit session must outlive today's close; renews, else nags the phone every run
-  20:05 Mon-Fri   ara_watch           next session's likely ARA touches (model on today's bars, ML-3) + every held name's ARA price
+  20:05 Mon-Fri   ara_watch           next session's likely ARA locks: study #146 model (bar + closing book, LightGBM + GRU, calibrated P)
+                                      + every held name's ARA price; runs `idx ara watch` in a subprocess
   every 2 min     ara_touch           in-session: held/watched names at the ARA limit - locked / sellers queued / faded (study #101)
+  20:40 Mon-Fri   ml_daily            self-learning prediction desk (idx/ml): realise, retrain the daily horizons, predict, score
+  16:30 Mon-Fri   ml_intraday_train   retrain the 1/10/30/60-minute horizons on every feed day
+  every 1 min     ml_intraday_predict in-session: score every live name for the minute horizons
+  every 10 min    ml_evaluate         fill in what happened for every forecast whose horizon has passed
+  21:10 Mon-Fri   combo_plan          the combined book: tomorrow's plan (sells, trend buys, ML watches) + push (retry 21:40)
+  08:30 Mon-Fri   combo_preopen       the plan and the ML levels on the phone before the open
+  09:00, 09:05    combo_gap_entry     gap-fade sleeve of the combined book; 15:50 combo_gap_exit
+  every 2 min     combo_confirm       in-session: ML watches whose price confirmed -> buy ticket
+  16:30, 19:30    combo_nudge         lines still open on today's live tickets; 20:30 combo_expire = unexecuted lines marked missed + scorecard
   18:00 Mon-Fri   alert if today's bar has still not landed (holiday, or IDX late)
   20:30 Mon-Fri   announce_recent     all-emiten disclosures for the last 3 days -> idx.announcement / idx.event
   21:00 Mon-Fri   fundamentals        discover current fiscal year -> download pending workbooks (universe) -> parse
@@ -122,8 +132,11 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
                     logger.info("idx paper fill %s ticket #%s at %s: %s lines", bk, rep["ticket"], rep["fill_date"], len(rep["fills"]))
             except Exception as e:                                      # the chain must go on to the marks
                 runlog.alert(conn, "warning", f"ticket:{bk}", f"paper fill failed: {type(e).__name__}: {e}")
-        from . import gapfade  # the intraday book settles at the official close
-        for bk in gapfade.gapfade_books(conn):
+        from . import (  # the intraday books settle at the official close (combo: its gap sleeve)
+            combo_book,
+            gapfade,
+        )
+        for bk in gapfade.gapfade_books(conn) + combo_book.combo_books(conn):
             try:
                 rep = gapfade.settle(conn, bk)
                 logger.info("idx gapfade settle %s: %s", bk, rep)
@@ -388,19 +401,30 @@ def run_token_guard() -> None:
 
 
 def run_ara_watch() -> None:
-    """20:05 WIB: the ARA watch list for the next session - model P(touch) on today's bars (research ML-3), the top-10 plus
-    every name a book holds, each with its ARA price. Information for a holder or a watcher; never a ticket (menu 16)."""
-    from . import ara
+    """20:05 WIB: the ARA watch list for the next session - study #146's model (LightGBM + GRU on today's bar and closing
+    book, calibrated P(lock) / P(touch) + a confidence word), the top-10 plus every name a book holds, each with its ARA
+    price. Runs in a SUBPROCESS: the fit holds ~1 GB and imports torch, neither belongs in the scheduler's own process.
+    Information for a holder or a watcher; never a ticket (menu 16)."""
+    import subprocess
+    import sys
     d = today_wib()
     if d.weekday() >= 5:
         return
-    with get_connection() as conn:
-        try:
-            rep = ara.watch(conn)
-            logger.info("idx ara watch: bar %s, %d rows", rep["bar_date"], len(rep["rows"]))
-        except Exception as e:
-            runlog.alert(conn, "warning", "ara", f"ARA watch failed: {type(e).__name__}: {e}")
-            logger.exception("ara watch failed")
+    cmd = [sys.executable, "-m", "blackheart_ingest.idx.cli", "ara", "watch"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        with get_connection() as conn:
+            runlog.alert(conn, "warning", "ara", "ARA watch failed: the model did not finish in 30 minutes")
+        logger.error("ara watch timed out")
+        return
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["no output"]
+        with get_connection() as conn:
+            runlog.alert(conn, "warning", "ara", f"ARA watch failed (exit {r.returncode}): {tail[0][:300]}")
+        logger.error("ara watch failed: %s", (r.stderr or "")[-2000:])
+        return
+    logger.info("idx ara watch: %s", (r.stdout or "").strip().splitlines()[:1])
 
 
 def run_ara_touch() -> None:
@@ -788,6 +812,148 @@ def run_crosscheck(sample: int = 60) -> None:
                          f"{r.detail['mismatch_codes']} of {r.rows_in} sampled codes disagree with the per-stock endpoint (> 0.5 %)")
 
 
+# ---- self-learning prediction desk (idx/ml) -------------------------------------------------------------------------
+def run_ml_daily() -> None:
+    """20:40 WIB Mon-Fri, after the bar, broker flow and features have landed: realise yesterday's forecasts, retrain the
+    daily horizons (champion vs refresh vs tune on the same 40-day window), predict from tonight's close, score."""
+    from .ml import common as mlc
+    from .ml import loop as ml
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        try:
+            ev = ml.evaluate(conn)
+            cal = ml.fit_calibration(conn)
+            rep = ml.train(conn, "daily")
+            logger.info("idx ml daily train: %s promoted, %d errors, %s s; calibrated %s", rep["promoted"], len(rep["errors"]), rep.get("seconds"),
+                        [c["horizon"] for c in cal])
+            pr = ml.predict_daily(conn)
+            sc = ml.scorecard(conn)
+            mlc.purge_artifacts(conn)
+            conn.commit()
+            logger.info("idx ml daily: realised %s, predicted %s rows, scorecard %d rows", ev, pr.get("rows"), len(sc))
+        except Exception as e:
+            conn.rollback()
+            runlog.alert(conn, "warning", "ml", f"ML daily loop failed: {type(e).__name__}: {e}"[:400], kind="ml")
+            conn.commit()
+            logger.exception("ml daily failed")
+
+
+def run_ml_intraday_train() -> None:
+    """16:30 WIB Mon-Fri: retrain the minute horizons on every feed day (the last day is the validation window)."""
+    from .ml import loop as ml
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        try:
+            ml.evaluate(conn)
+            ml.fit_calibration(conn)
+            rep = ml.train(conn, "intraday")
+            logger.info("idx ml intraday train: %s promoted, %d errors, %s s", rep["promoted"], len(rep["errors"]), rep.get("seconds"))
+        except Exception as e:
+            conn.rollback()
+            runlog.alert(conn, "warning", "ml", f"ML intraday training failed: {type(e).__name__}: {e}"[:400], kind="ml")
+            conn.commit()
+            logger.exception("ml intraday train failed")
+
+
+def run_ml_intraday_predict() -> None:
+    """Every minute in the session: score every live name at the last grid minute for 1 / 10 / 30 / 60 minutes ahead."""
+    from .ml import intraday as mli
+    from .ml import loop as ml
+    now = datetime.now(WIB)
+    if mli.grid_position(now) is None:
+        return
+    with get_connection() as conn:
+        try:
+            rep = ml.predict_intraday(conn, now)
+            if rep.get("rows"):
+                logger.info("idx ml intraday predict: %s names, %s rows at %s", rep["names"], rep["rows"], rep["minute"])
+        except Exception as e:
+            conn.rollback()
+            runlog.alert_once(conn, "warning", "ml", f"ML intraday predict failed: {type(e).__name__}: {e}"[:400], kind="ml")
+            conn.commit()
+            logger.exception("ml intraday predict failed")
+
+
+def run_ml_evaluate() -> None:
+    """Every 10 min: fill in what happened for every forecast whose horizon has passed (intraday and daily)."""
+    from .ml import loop as ml
+    with get_connection() as conn:
+        try:
+            ev = ml.evaluate(conn)
+            if ev["intraday"] or ev["daily"]:
+                logger.info("idx ml evaluate: %s", ev)
+        except Exception:
+            conn.rollback()
+            logger.exception("ml evaluate failed")
+
+
+# ---- the combined book (idx/combo_book.py) --------------------------------------------------------------------------
+def _combo_each(fn_name: str, **kw) -> None:
+    from . import combo_book
+    with get_connection() as conn:
+        for bk in combo_book.combo_books(conn):
+            try:
+                rep = getattr(combo_book, fn_name)(conn, bk, **kw)
+                logger.info("idx combo %s %s: %s", fn_name, bk, rep if not isinstance(rep, str) else rep.splitlines()[0])
+            except Exception as e:
+                conn.rollback()
+                runlog.alert(conn, "warning", f"combo:{bk}", f"combo {fn_name} failed: {type(e).__name__}: {e}"[:400], kind="ticket", book=bk)
+                conn.commit()
+                logger.exception("combo %s failed for %s", fn_name, bk)
+
+
+def run_combo_plan() -> None:
+    """21:10 WIB Mon-Fri, after the ML desk has scored the close: tomorrow's plan per combo book (sells, trend buys, ML watches) + push."""
+    if today_wib().weekday() >= 5:
+        return
+    _combo_each("plan")
+
+
+def run_combo_preopen() -> None:
+    """08:30 WIB Mon-Fri: the day's plan and the ML levels on the phone before the open."""
+    if today_wib().weekday() >= 5:
+        return
+    _combo_each("preopen")
+
+
+def run_combo_gap_entry() -> None:
+    if today_wib().weekday() >= 5:
+        return
+    _combo_each("gap_entry")
+
+
+def run_combo_gap_exit() -> None:
+    if today_wib().weekday() >= 5:
+        return
+    _combo_each("gap_exit")
+
+
+def run_combo_confirm() -> None:
+    """Every 2 min in the session: ML watches whose price confirmed -> a buy ticket (live: draft + push; paper: filled)."""
+    from . import combo_book
+    if not combo_book.in_session(datetime.now(WIB)):
+        return
+    _combo_each("confirm")
+
+
+def run_combo_nudge() -> None:
+    if today_wib().weekday() >= 5:
+        return
+    _combo_each("nudge")
+
+
+def run_combo_expire() -> None:
+    """20:30 WIB: lines not executed on their day are marked missed; the scorecard is recomputed."""
+    if today_wib().weekday() >= 5:
+        return
+    _combo_each("expire")
+    _combo_each("scorecard")
+
+
 def build() -> BlockingScheduler:  # noqa: F821
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -832,10 +998,43 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_dividends, CronTrigger(day=1, hour=9, minute=30, timezone=WIB), id="dividends")
     s.add_job(check_rebalance_due, CronTrigger(month=5, day="1-10", hour=16, minute=45, timezone=WIB), id="rebalance_due")
     s.add_job(run_crosscheck, CronTrigger(day_of_week="sun", hour=10, minute=0, timezone=WIB), id="crosscheck")
+    # the self-learning prediction desk (idx/ml): retrain daily, predict every minute, realise every 10 min
+    s.add_job(run_ml_daily, CronTrigger(day_of_week="mon-fri", hour=20, minute=40, timezone=WIB), id="ml_daily", misfire_grace_time=7200)
+    s.add_job(run_ml_intraday_train, CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone=WIB), id="ml_intraday_train",
+              misfire_grace_time=3600)
+    s.add_job(run_ml_intraday_predict, IntervalTrigger(minutes=1), id="ml_intraday_predict", misfire_grace_time=30)
+    s.add_job(run_ml_evaluate, IntervalTrigger(minutes=10), id="ml_evaluate")
+    # the combined book (idx/combo_book.py): plan after the ML desk scored the close, pre-open push, gap sleeve, ML confirmation, expiry
+    s.add_job(run_combo_plan, CronTrigger(day_of_week="mon-fri", hour=21, minute="10,40", timezone=WIB), id="combo_plan", misfire_grace_time=3600)
+    s.add_job(run_combo_preopen, CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone=WIB), id="combo_preopen")
+    s.add_job(run_combo_gap_entry, CronTrigger(day_of_week="mon-fri", hour=9, minute="0,5", timezone=WIB), id="combo_gap_entry")
+    s.add_job(run_combo_gap_exit, CronTrigger(day_of_week="mon-fri", hour=15, minute=50, timezone=WIB), id="combo_gap_exit")
+    s.add_job(run_combo_confirm, IntervalTrigger(minutes=2), id="combo_confirm", misfire_grace_time=60)
+    s.add_job(run_combo_nudge, CronTrigger(day_of_week="mon-fri", hour="16,19", minute=30, timezone=WIB), id="combo_nudge")
+    s.add_job(run_combo_expire, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="combo_expire")
     return s
 
 
 LOCK_KEY = "idx-scheduler"
+
+
+def holds_lock(conn, key: str = LOCK_KEY) -> bool:
+    """Does THIS session still hold the advisory lock? Asked of Postgres, not inferred from the socket.
+
+    `pg_try_advisory_lock` is re-entrant, so calling it again on a session that already holds the lock
+    would stack it forever; this reads `pg_locks` for the backend instead. The 1-argument form splits the
+    bigint key into classid (high 32 bits) and objid (low 32). Both halves are compared as bigint against
+    the oid columns: `hashtext` is signed, so a negative key (idx-scheduler hashes to -1524784123) shifts
+    to -1 and will not fit the int4 the oid would otherwise be cast to."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT EXISTS (
+                         SELECT 1 FROM pg_locks
+                          WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted
+                            AND classid::bigint = ((hashtext(%s)::bigint >> 32) & 4294967295)
+                            AND objid::bigint   = (hashtext(%s)::bigint & 4294967295)) AS held""", (key, key))
+        r = cur.fetchone()
+    conn.commit()
+    return bool(r["held"] if isinstance(r, dict) else r[0])
 
 
 def try_singleton_lock(conn, key: str = LOCK_KEY) -> bool:
@@ -867,16 +1066,24 @@ def main() -> int:
     s = build()
 
     def keep_lock() -> None:
-        """If the lock connection died (Postgres restart) the lock is gone and another instance may have started:
-        stop this one and let the service manager restart it, which re-acquires the lock cleanly."""
+        """Still the only scheduler?
+
+        This used to run `SELECT 1` and treat a working connection as proof the lock was held. It is not:
+        a lock lives on the session, and on 2026-09-25 the Postgres container was recreated, every client
+        reconnected, `pg_locks` came back holding nothing - and this check kept passing because the socket
+        was fine. The scheduler ran unlocked for the rest of the morning, which is the one state the lock
+        exists to prevent. Ask Postgres who holds it, and take it again on a session that does not."""
         nonlocal lock
         try:
-            with lock.cursor() as cur:
-                cur.execute("SELECT 1")
-            lock.commit()
+            if holds_lock(lock):
+                return
+            if try_singleton_lock(lock):                        # a reconnected session: the lock is ours again
+                logger.warning("idx scheduler re-took the advisory lock after its session was replaced")
+                return
+            logger.critical("idx scheduler no longer holds %r - shutting down for a clean restart", LOCK_KEY)
         except Exception as e:
             logger.critical("idx scheduler lost its lock connection (%s) - shutting down for a clean restart", e)
-            s.shutdown(wait=False)
+        s.shutdown(wait=False)
 
     from apscheduler.triggers.interval import IntervalTrigger
     s.add_job(keep_lock, IntervalTrigger(minutes=5), id="singleton_lock")
