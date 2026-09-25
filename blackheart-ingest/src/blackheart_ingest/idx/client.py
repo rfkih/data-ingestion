@@ -17,7 +17,9 @@ client therefore:
   the pinned older ``chrome124`` and ``edge101`` were still challenged, so the profile
   tracks "current browser" and is worth re-checking when challenges come back.
   ``INGEST_IDX_TRANSPORT`` = ``impersonate`` | ``curl`` | ``urllib`` | ``auto`` (default)
-  picks the transport, ``INGEST_IDX_IMPERSONATE`` the profile (default ``chrome``),
+  picks the transport, ``INGEST_IDX_IMPERSONATE`` the profile (default ``safari`` since 2026-09-25, when ``chrome``
+  was challenged in turn); the profile's own User-Agent is sent, and the fetch-context headers (Sec-Fetch-*) say
+  what the site's page would: an XHR for the JSON endpoints, a link click for attachments,
 * paces requests (``idx_rps``) and enforces a per-day request budget,
 * retries challenges / 5xx / non-JSON bodies with exponential backoff,
 * opens a circuit after N consecutive failures (one long pause, then raise),
@@ -56,6 +58,15 @@ BASE = "https://www.idx.co.id"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 BACKOFF_S = (5, 10, 20, 40, 80)
+# What the site's own page sends (captured from Chrome 153 on 2026-09-25): the JSON endpoints are same-origin XHRs,
+# the attachments are link clicks. Without these the request claims to be a top-level navigation typed into the
+# address bar (Sec-Fetch-Site none / Mode navigate), which no page on idx.co.id would ever send for an API call.
+LANG = "en-US,en;q=0.9,id;q=0.8"
+API_HEADERS = {"Accept": "application/json, text/plain, */*", "Accept-Language": LANG,
+               "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}
+DOWNLOAD_HEADERS = {"Accept": "*/*", "Accept-Language": LANG,
+                    "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-User": "?1"}
 
 # endpoint name -> (path template, referer path, key for the row list in the payload)
 ENDPOINTS: dict[str, tuple[str, str, str | None]] = {
@@ -194,7 +205,10 @@ def _curl_fetcher(timeout: float = 60.0) -> FetchFn | None:
 
 
 IMPERSONATE_ENV = "INGEST_IDX_IMPERSONATE"
-IMPERSONATE_DEFAULT = "chrome"                  # the moving "current Chrome" profile, not a pinned one - see the module docstring
+# 2026-09-25: curl_cffi 0.16.3's "chrome" (Chrome 150) and "edge" were challenged whatever the headers - even a consistent
+# macOS UA + sec-ch-ua - while "safari", "firefox" and "chrome136" passed. Cloudflare scores the TLS/HTTP2 fingerprint, so
+# the profile is the lever; re-probe the profiles one request each when challenges come back.
+IMPERSONATE_DEFAULT = "safari"
 
 
 def _impersonate_fetcher(timeout: float = 60.0) -> FetchFn | None:
@@ -212,10 +226,12 @@ def _impersonate_fetcher(timeout: float = 60.0) -> FetchFn | None:
     logger.info("idx client: impersonating %s%s", profile, f" via proxy {proxy}" if proxy else "")
 
     def fetch(url: str, headers: dict[str, str]) -> tuple[int, bytes]:
-        r = session.get(url, headers=headers)
+        # the profile brings its own User-Agent (and sec-ch-ua for Chromium profiles) matching its TLS handshake; the
+        # client's fixed Chrome-on-Windows UA on a Safari handshake is a contradiction a fingerprinting proxy can see
+        r = session.get(url, headers={k: v for k, v in headers.items() if k.lower() != "user-agent"})
         return r.status_code, r.content
 
-    fetch.session = session                                              # type: ignore[attr-defined]  # closed by close()
+    fetch.session = session                                             # type: ignore[attr-defined]  # closed by close()
     return fetch
 
 
@@ -304,8 +320,7 @@ class IdxClient:
             self._pace()
             url = BASE + path
             try:
-                status, body = self._fetch(url, {"User-Agent": UA, "Referer": referer,
-                                                 "Accept": "application/json, text/plain, */*"})
+                status, body = self._fetch(url, {"User-Agent": UA, "Referer": referer, **API_HEADERS})
             except OSError as e:
                 last_err = f"{type(e).__name__}: {str(e)[:80]}"
                 self._failure()
@@ -343,7 +358,7 @@ class IdxClient:
                 self._sleep(wait)
             self._pace()
             try:
-                status, body = self._fetch(url, {"User-Agent": UA, "Referer": BASE + referer_path, "Accept": "*/*"})
+                status, body = self._fetch(url, {"User-Agent": UA, "Referer": BASE + referer_path, **DOWNLOAD_HEADERS})
             except OSError as e:
                 last_err = f"{type(e).__name__}: {str(e)[:80]}"
                 self._failure()
