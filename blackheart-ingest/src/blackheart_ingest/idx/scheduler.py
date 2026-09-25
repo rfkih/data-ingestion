@@ -14,6 +14,7 @@ Schedule (WIB):
   20:05 Mon-Fri   ara_watch           next session's likely ARA locks: study #146 model (bar + closing book, LightGBM + GRU, calibrated P)
                                       + every held name's ARA price; runs `idx ara watch` in a subprocess
   every 2 min     ara_touch           in-session: held/watched names at the ARA limit - locked / sellers queued / faded (study #101)
+  20:25 Mon-Fri   risk_check          risk report of each real book holding names (idx/risk.py); one warning a day per book past risk.LIMITS
   20:40 Mon-Fri   ml_daily            self-learning prediction desk (idx/ml): realise, retrain the daily horizons, predict, score
   16:30 Mon-Fri   ml_intraday_train   retrain the 1/10/30/60-minute horizons on every feed day
   every 1 min     ml_intraday_predict in-session: score every live name for the minute horizons
@@ -720,6 +721,30 @@ def run_signal_board() -> None:
     logger.info("idx signal board %s: %s", res["as_of"], done or "nothing")
 
 
+def run_risk_check() -> None:
+    """Nightly risk report of every real (live) book that holds names; a book past risk.LIMITS gets one warning a day
+    listing its breaches. Read-only on the books; runs after the daily chain has marked them."""
+    from . import risk, ticket
+    with get_connection() as conn:
+        d = job_daily.latest_bar_date(conn)
+        if d is None:
+            return
+        for book in risk.active_books(conn):
+            if not ticket.is_live(book):
+                continue
+            try:
+                r = risk.report(conn, book, d)
+            except Exception:
+                conn.rollback()
+                logger.exception("idx risk check %s failed", book)
+                continue
+            if not r["breaches"]:
+                continue
+            runlog.alert(conn, "warning", f"risk:{book}", f"{book} risk {d}: " + "; ".join(r["breaches"]), kind="risk", book=book,
+                         payload={"date": str(d), "breaches": r["breaches"]}, dedupe_key=f"risk:{book}:{d}")
+    logger.info("idx risk check %s done", d)
+
+
 def run_registry_refresh() -> None:
     """Keep the strategies page's numbers in step with research: re-import every record from the newest ROI scorecard
     study into idx.strategy_state. Cheap and idempotent; a page shows `refreshed_at` so a stale import is visible."""
@@ -1034,6 +1059,7 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_broker_snapshot, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="broker_snapshot")
     s.add_job(run_registry_refresh, CronTrigger(hour=20, minute=5, timezone=WIB), id="registry_refresh")
     s.add_job(run_signal_board, CronTrigger(day_of_week="mon-fri", hour=20, minute=15, timezone=WIB), id="signal_board")
+    s.add_job(run_risk_check, CronTrigger(day_of_week="mon-fri", hour=20, minute=25, timezone=WIB), id="risk_check")
     s.add_job(run_regime_watch, CronTrigger(day_of_week="mon-fri", hour=17, minute=10, timezone=WIB), id="regime_watch")
     s.add_job(run_open_window_subscribe, CronTrigger(day_of_week="mon-fri", hour=8, minute=55, timezone=WIB), id="open_window_subscribe")
     s.add_job(run_open_window, CronTrigger(day_of_week="mon-fri", hour=9, minute=0, timezone=WIB), id="open_window",
