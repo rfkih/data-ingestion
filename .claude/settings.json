@@ -8,35 +8,38 @@
             "command": "C:\\Project\\.claude\\hooks\\superpowers-session-start.cmd"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\Project\\.claude\\hooks\\memory-session-start.cmd"
+          }
+        ]
       }
     ]
   },
   "permissions": {
     "allow": [
       "Bash(git:*)",
-
       "Bash(./gradlew compileJava *)",
       "Bash(./gradlew compileTestJava *)",
       "Bash(./gradlew researchBootJar *)",
       "Bash(./gradlew tradingBootJar *)",
       "Bash(./gradlew test*)",
       "Bash(./gradlew check*)",
-
       "Bash(python -m pytest *)",
       "Bash(python3 -m pytest *)",
       "Bash(PYTHONPATH=src python -m pytest *)",
       "Bash(PYTHONPATH=src python3 -m pytest *)",
       "Bash(python -m py_compile *)",
       "Bash(python3 -m py_compile *)",
-
       "Bash(python3 research/scripts/fetch-run.py *)",
       "Bash(python3 research/scripts/analyze-run.py *)",
-
       "Bash(jar tf *)",
       "Bash(unzip -l *)",
       "Bash(unzip -p *)",
       "Bash(tasklist *)",
-
       "Bash(./scripts/queue-status.sh:*)",
       "Bash(research-orchestrator/scripts/queue-status.sh:*)",
       "Bash(scripts/queue-status.sh:*)",
@@ -60,7 +63,6 @@
       "Bash(LOGIN_RESP=$\\(curl *http://127.0.0.1:8081/*)",
       "Bash(JVM_TOKEN=$\\(curl *http://127.0.0.1:8081/*)",
       "Bash(JVM_TOKEN=$\\(echo *)",
-
       "Bash(TOKEN=$\\(grep *)",
       "Bash(ORCH_BASE=http://*)",
       "Bash(PLAN_REQUEST=$\\(curl *)",
@@ -88,7 +90,6 @@
       "Bash(PGPASSWORD=blackheart psql:*)",
       "Bash(PGPASSWORD=trading_app psql:*)",
       "Bash(PGPASSWORD=research_app psql:*)",
-
       "Edit(**/research-orchestrator/src/**)",
       "Edit(**/research-orchestrator/tests/**)",
       "Edit(**/research-orchestrator/pyproject.toml)",
@@ -97,19 +98,16 @@
       "Write(**/research-orchestrator/tests/**)",
       "MultiEdit(**/research-orchestrator/src/**)",
       "MultiEdit(**/research-orchestrator/tests/**)",
-
       "Edit(**/research/specs/*.yml)",
       "Edit(**/research/specs/*.yaml)",
       "Write(**/research/specs/*.yml)",
       "Write(**/research/specs/*.yaml)",
-
       "Read(C:/Users/rifki/.claude/projects/C--Project/memory/**)",
       "Glob(C:/Users/rifki/.claude/projects/C--Project/memory/**)",
       "Edit(C:/Users/rifki/.claude/projects/C--Project/memory/**)",
       "Write(C:/Users/rifki/.claude/projects/C--Project/memory/**)",
       "Bash(ls /c/Users/rifki/.claude/projects/C--Project/memory*)",
       "Bash(ls C:/Users/rifki/.claude/projects/C--Project/memory*)",
-
       "Read(/tmp/**)",
       "Read(\\tmp\\**)",
       "Glob(/tmp/**)",
@@ -119,14 +117,12 @@
       "Bash(ls -la /tmp/*)",
       "Bash(cat /tmp/*)",
       "Bash(rm /tmp/*)",
-
       "Write(C:/Users/rifki/AppData/Local/Temp/**)",
       "Write(/c/Users/rifki/AppData/Local/Temp/**)",
       "Edit(C:/Users/rifki/AppData/Local/Temp/**)",
       "Edit(/c/Users/rifki/AppData/Local/Temp/**)",
       "Read(C:/Users/rifki/AppData/Local/Temp/**)",
       "Read(/c/Users/rifki/AppData/Local/Temp/**)",
-
       "Write(/tmp/queue-*.json)",
       "Write(/tmp/tick-*.json)",
       "Write(/tmp/journal-*.json)",
@@ -140,7 +136,6 @@
       "Write(/tmp/*.txt)",
       "Edit(/tmp/*.json)",
       "Edit(/tmp/*.py)",
-
       "Edit(**/blackheart-trading-engine/src/**)",
       "Write(**/blackheart-trading-engine/src/**)",
       "MultiEdit(**/blackheart-trading-engine/src/**)",
