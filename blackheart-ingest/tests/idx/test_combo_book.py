@@ -80,7 +80,41 @@ def test_compose_sells_exits_buys_trend_and_watches_ml_within_slots() -> None:
     w = res["watches"][0]
     assert w["level_price"] == Decimal(316) and w["ref_price"] == Decimal(300)  # 300 x 1.05 = 315 -> snapped up on the Rp 2 tick
     assert w["until_date"] > date(2026, 9, 25) and abs(w["e_bps"] - 500) < 1e-6
+    assert w["rule"] == "+5/10" and w["size_frac"] == 1.0 and res["floor_held"] == []
     assert set(res["targets"]) >= {"AAAA", "BBBB", "NNNN"} and "TTTT" not in res["targets"]
+
+
+def test_confirm_rules_make_one_watch_per_rule_with_a_share_of_the_slot() -> None:
+    S = cb.settings({"params": {"ml": {"confirm_rules": [[0.05, 10], [0.08, 10], [0.10, 10], [0.08, 5]]}}})
+    assert S["ml"]["rule_names"] == ["+5/10", "+8/10", "+10/10", "+8/5"] and abs(S["ml"]["size_frac"] - 0.25) < 1e-9
+    pos = {"gap": {}, "trend": {}, "ml": {}, "manual": {}}
+    ml = _ml([("CCCC", 0.05, 0.01, 300, 6e9)])
+    res = cb.compose(BOOK, S, Decimal(20_000_000), Decimal(20_000_000), pos, {"CCCC": Decimal(300)}, [], [], ml, {}, set(), set(), date(2026, 9, 25))
+    ws = res["watches"]
+    assert [w["rule"] for w in ws] == ["+5/10", "+8/10", "+10/10", "+8/5"] and all(w["code"] == "CCCC" for w in ws)
+    assert [w["level_price"] for w in ws] == [Decimal(316), Decimal(324), Decimal(330), Decimal(324)]
+    assert ws[3]["until_date"] < ws[1]["until_date"] and res["free_slots"] == S["slots"] - 1        # four rules, one slot
+    with pytest.raises(ValueError):
+        cb.settings({"params": {"ml": {"confirm_rules": [[0.05, 10], [0.05, 10]]}}})               # duplicates
+    with pytest.raises(ValueError):
+        cb.settings({"params": {"cash_floor": 0.95}})
+
+
+def test_cash_floor_holds_back_new_buys() -> None:
+    assert cb.invested_ok(Decimal(20_000_000), Decimal(20_000_000), Decimal(1_000_000), 0.30)
+    assert cb.invested_ok(Decimal(20_000_000), Decimal(7_000_000), Decimal(1_000_000), 0.30)          # 65 % + 5 % = 70 %: at the line
+    assert not cb.invested_ok(Decimal(20_000_000), Decimal(6_500_000), Decimal(1_000_000), 0.30)      # 67.5 % + 5 % > 70 %
+    assert cb.invested_ok(Decimal(20_000_000), Decimal(0), Decimal(1_000_000), 0.0)                   # floor off
+    S = cb.settings({"params": {"cash_floor": 0.30}})
+    pos = {"gap": {}, "trend": {}, "ml": {}, "manual": {}}
+    ml = _ml([])
+    # NAV 20 M, cash 6.5 M (67.5 % invested): a 5 % trend buy would breach 70 % -> held back, reported
+    res = cb.compose(BOOK, S, Decimal(20_000_000), Decimal(6_500_000), pos, {"AAAA": Decimal(500)}, [{"code": "AAAA", "vol_ratio": 2.0}], [], ml, {}, set(), set(),
+                     date(2026, 9, 25))
+    assert res["lines"] == [] and res["floor_held"] == ["AAAA"]
+    res = cb.compose(BOOK, S, Decimal(20_000_000), Decimal(8_000_000), pos, {"AAAA": Decimal(500)}, [{"code": "AAAA", "vol_ratio": 2.0}], [], ml, {}, set(), set(),
+                     date(2026, 9, 25))
+    assert [ln["code"] for ln in res["lines"]] == ["AAAA"] and res["floor_held"] == []
 
 
 def test_compose_skips_names_already_held_open_or_watched() -> None:

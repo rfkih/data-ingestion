@@ -50,7 +50,11 @@ DEFAULTS: dict[str, Any] = {
     "sleeves": {"trend": 0.05, "ml": 0.05, "gap": 0.10},
     "slots": 20,
     "gap_max_per_day": 5,
-    "ml": {"margin": 2.0, "ema": 3, "confirm": 0.05, "confirm_days": 10, "max_hold": 60, "min_v60": 5e9, "min_price": 100.0},
+    "cash_floor": 0.0,          # share of NAV kept in cash: no NEW trade that would take the invested share above 1 - floor (menu 34: 0.30)
+    "ml": {"margin": 2.0, "ema": 3, "confirm": 0.05, "confirm_days": 10, "max_hold": 60, "min_v60": 5e9, "min_price": 100.0,
+           # confirmation rules [threshold, trading days]; None = the single rule (confirm, confirm_days). ML-8 (#175) ens4 =
+           # [[0.05, 10], [0.08, 10], [0.10, 10], [0.08, 5]]: each rule watches its own level with an equal share of the ML slot.
+           "confirm_rules": None},
 }
 # the strategy catalog the app shows (name, one-liner, rhythm line) - the same three sleeves the runner knows
 CATALOG: dict[str, dict[str, str]] = {
@@ -58,7 +62,7 @@ CATALOG: dict[str, dict[str, str]] = {
             "line": "Morning 09:00 · max 5 tickets/day · holds 1 day"},
     "trend": {"name": "Trend", "one": "Buys a close at the 60-day high above the 200-day average on 1.5x volume; trails 10 % from the peak; no new entry while the index is under its MA200.",
               "line": "Nightly plan · entry at the next close · holds ~25 days"},
-    "ml": {"name": "ML ranking", "one": "The 5-day score, cost-aware: signalled when the expected excess pays twice the round trip, bought only after a +5 % price confirmation within 10 days.",
+    "ml": {"name": "ML ranking", "one": "The 5-day score, cost-aware: signalled when the expected excess pays twice the round trip, bought only after the price confirms (one or several +x % within n days rules, each with a share of the slot).",
            "line": "Nightly plan + intraday confirmation · holds ~25 days"},
 }
 # what the backtest says each sleeve does (the scorecard's yardstick; studies #160/#162 ML, #157 trend, #166 gap)
@@ -74,6 +78,17 @@ def combo_books(conn: psycopg.Connection) -> list[str]:
                                      (), ["book"])]
 
 
+def rule_name(thr: float, days: int) -> str:
+    return f"+{thr * 100:g}/{days}"
+
+
+def invested_ok(nav: Decimal, cash_after: Decimal, notional: Decimal, floor: float) -> bool:
+    """The cash floor: a new buy of ``notional`` (fees included) is allowed when the invested share stays at or below 1 - floor."""
+    if floor <= 0 or nav <= 0:
+        return True
+    return (nav - cash_after + notional) / nav <= Decimal(str(1 - floor)) + Decimal("0.000001")
+
+
 def settings(b: dict[str, Any]) -> dict[str, Any]:
     """DEFAULTS overlaid with the book's params (one level deep for the dicts). Pure."""
     p = b.get("params") or {}
@@ -83,7 +98,18 @@ def settings(b: dict[str, Any]) -> dict[str, Any]:
     off = [str(x) for x in (p.get("off") or [])]
     sizes = {**DEFAULTS["sleeves"], **(p.get("sleeves") or {})}
     out = {"sleeves": dict(sizes), "sizes": dict(sizes), "off": off, "slots": int(p.get("slots") or DEFAULTS["slots"]),
-           "gap_max_per_day": int(p.get("gap_max_per_day") or DEFAULTS["gap_max_per_day"]), "ml": {**DEFAULTS["ml"], **(p.get("ml") or {})}}
+           "gap_max_per_day": int(p.get("gap_max_per_day") or DEFAULTS["gap_max_per_day"]), "ml": {**DEFAULTS["ml"], **(p.get("ml") or {})},
+           "cash_floor": float(p.get("cash_floor") if p.get("cash_floor") is not None else DEFAULTS["cash_floor"])}
+    if not 0 <= out["cash_floor"] <= 0.9:
+        raise ValueError(f"cash_floor {out['cash_floor']} must be within [0, 0.9]")
+    m = out["ml"]
+    rules = m.get("confirm_rules") or [[m["confirm"], m["confirm_days"]]]
+    rules = [(float(thr), int(days)) for thr, days in rules]
+    if not rules or any(not (0 < thr <= 0.5) or not (1 <= days <= 60) for thr, days in rules) or len({r for r in rules}) != len(rules):
+        raise ValueError(f"confirm_rules {rules} must be distinct [threshold in (0, 0.5], days in 1..60]")
+    m["rules"] = rules
+    m["rule_names"] = [rule_name(thr, days) for thr, days in rules]
+    m["size_frac"] = 1.0 / len(rules)
     for k, v in out["sleeves"].items():
         v = float(v)
         if not 0 <= v <= 0.5:
@@ -294,6 +320,7 @@ def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, p
     n_held_after = len(held - exiting)
     free = max(S["slots"] - n_held_after - len(pending_watch), 0)
     # ---- trend buys
+    floor_held: list[str] = []
     slot_t = Decimal(str(S["sleeves"]["trend"])) * nav
     for e in trend_entries:
         if free <= 0 or slot_t <= 0:
@@ -304,6 +331,9 @@ def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, p
         ln = size_line(c, "buy", closes_raw[c], None, slot_t, cash_after, fee_b, nav,
                        f"trend: 60-day high di atas MA200, volume {e['vol_ratio']}x", ["sleeve:trend", "trend:entry", f"vol:{e['vol_ratio']}x"])
         if ln is None:
+            continue
+        if not invested_ok(nav, cash_after, ln["notional"] * (1 + fee_b), S["cash_floor"]):
+            floor_held.append(c)
             continue
         lines.append(ln)
         cash_after -= ln["notional"] * (1 + fee_b)
@@ -318,13 +348,14 @@ def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, p
         if c in held or c in exiting or c in open_codes or c in pending_watch or any(w["code"] == c for w in watches):
             continue
         ref = Decimal(str(r.close))
-        level = ticket.snap(ref * (1 + Decimal(str(m["confirm"]))), "buy")
-        watches.append({"code": c, "signal_date": d, "ref_price": ref, "level_price": level, "until_date": d + timedelta(days=int(m["confirm_days"]) * 7 // 5 + 2),
-                        "e_bps": float(r.e) * 1e4, "cost_bps": float(r.rt) * 1e4})
+        for (thr, days), rname in zip(m["rules"], m["rule_names"], strict=True):
+            level = ticket.snap(ref * (1 + Decimal(str(thr))), "buy")
+            watches.append({"code": c, "signal_date": d, "ref_price": ref, "level_price": level, "until_date": d + timedelta(days=days * 7 // 5 + 2),
+                            "e_bps": float(r.e) * 1e4, "cost_bps": float(r.rt) * 1e4, "rule": rname, "size_frac": m["size_frac"]})
         free -= 1
     targets = [ln["code"] for ln in lines if ln["side"] == "buy"] + sorted(held - exiting)
     return {"lines": lines, "watches": watches, "nav": nav, "cash": cash, "cash_after": cash_after, "n_targets": len(targets), "targets": targets,
-            "free_slots": free, "ml_candidates": len(cands), "best_e_bps": (best * 1e4 if np.isfinite(best) else None)}
+            "free_slots": free, "ml_candidates": len(cands), "best_e_bps": (best * 1e4 if np.isfinite(best) else None), "floor_held": floor_held}
 
 
 # ---------------------------------------------------------------------------------------------------------------- the plan (shell)
@@ -334,9 +365,16 @@ def _open_lines(conn: psycopg.Connection, book: str) -> set[str]:
 
 
 def pending_watches(conn: psycopg.Connection, book: str, d: date | None = None) -> list[dict[str, Any]]:
-    return _rows(conn, """SELECT id, code, signal_date, ref_price, level_price, until_date, e_bps, cost_bps FROM idx.combo_watch
-                          WHERE book = %s AND status = 'pending' AND (%s::date IS NULL OR until_date >= %s) ORDER BY e_bps DESC""", (book, d, d),
-                 ["id", "code", "signal_date", "ref_price", "level_price", "until_date", "e_bps", "cost_bps"])
+    return _rows(conn, """SELECT id, code, signal_date, ref_price, level_price, until_date, e_bps, cost_bps, rule, size_frac FROM idx.combo_watch
+                          WHERE book = %s AND status = 'pending' AND (%s::date IS NULL OR until_date >= %s) ORDER BY e_bps DESC, level_price""", (book, d, d),
+                 ["id", "code", "signal_date", "ref_price", "level_price", "until_date", "e_bps", "cost_bps", "rule", "size_frac"])
+
+
+def triggered_share(conn: psycopg.Connection, book: str, code: str, signal_date: date) -> float:
+    """The share of the ML slot already triggered for (code, signal) - the rules that fired before this one."""
+    r = _rows(conn, "SELECT COALESCE(sum(size_frac), 0) AS s FROM idx.combo_watch WHERE book = %s AND code = %s AND signal_date = %s AND status = 'triggered'",
+              (book, code, signal_date), ["s"])
+    return float(r[0]["s"]) if r else 0.0
 
 
 def build(conn: psycopg.Connection, book: str, d: date | None = None) -> dict[str, Any]:
@@ -438,9 +476,10 @@ def plan(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date 
         # watches: new ones tonight; the pending ones stay until they expire
         with conn.cursor() as cur:
             for w in res["watches"]:
-                cur.execute("""INSERT INTO idx.combo_watch (book, code, sleeve, signal_date, ref_price, level_price, until_date, e_bps, cost_bps)
-                               VALUES (%s, %s, 'ml', %s, %s, %s, %s, %s, %s) ON CONFLICT (book, code, signal_date) DO NOTHING""",
-                            (book, w["code"], w["signal_date"], w["ref_price"], w["level_price"], w["until_date"], w["e_bps"], w["cost_bps"]))
+                cur.execute("""INSERT INTO idx.combo_watch (book, code, sleeve, signal_date, ref_price, level_price, until_date, e_bps, cost_bps, rule, size_frac)
+                               VALUES (%s, %s, 'ml', %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (book, code, signal_date, rule) DO NOTHING""",
+                            (book, w["code"], w["signal_date"], w["ref_price"], w["level_price"], w["until_date"], w["e_bps"], w["cost_bps"],
+                             w.get("rule", "+5/10"), w.get("size_frac", 1.0)))
         conn.commit()
         watches = pending_watches(conn, book, d)
         text = render_plan(res, watches, b.get("label"))
@@ -504,19 +543,38 @@ def confirm(conn: psycopg.Connection, book: str, actor: str = "scheduler", now: 
         fee_b = Decimal(b["fee_buy_pct"]) / 100
         slot = Decimal(str(S["sleeves"]["ml"])) * nav
         for w in hits:
-            if n_open >= S["slots"]:
-                out["skipped"].append((w["code"], "no free slot"))
-                continue
-            if w["code"] in held_codes(pos):
+            frac = Decimal(str(w.get("size_frac") or 1))
+            held_ml = pos["ml"].get(w["code"])
+            same_signal = held_ml is not None and held_ml.get("entry_date") is not None and held_ml["entry_date"] >= w["signal_date"]
+            if w["code"] in held_codes(pos) and not (frac < 1 and same_signal):
                 _set_watch(conn, w["id"], "cancelled", note="already held")
                 continue
+            if w["code"] not in held_codes(pos) and n_open >= S["slots"]:
+                out["skipped"].append((w["code"], "no free slot"))
+                continue
             last = px[w["code"]]
-            ln = size_line(w["code"], "buy", last, None, slot, cash, fee_b, nav,
-                           f"ML konfirmasi: harga {float(last):,.0f} >= level {float(w['level_price']):,.0f} (sinyal {w['signal_date']:%d %b}, "
-                           f"ekspektasi {float(w['e_bps']):+.0f} bps)", ["sleeve:ml", "ml:entry", f"level:{float(w['level_price']):.0f}"])
+            # the ensemble: this rule tops the name up to the cumulative share of the rules that fired (a dust fraction rolls forward)
+            budget = slot
+            if frac < 1:
+                done = Decimal(str(triggered_share(conn, book, w["code"], w["signal_date"])))
+                bought = (held_ml["lots"] * ticket.LOT * held_ml["entry_price"]) if same_signal else Decimal(0)
+                budget = slot * min(done + frac, Decimal(1)) - bought
+                if budget <= 0:
+                    _set_watch(conn, w["id"], "triggered", trigger_price=last, note="share already filled by an earlier rule")
+                    continue
+            ln = size_line(w["code"], "buy", last, None, budget, cash, fee_b, nav,
+                           f"ML konfirmasi {w.get('rule') or ''}: harga {float(last):,.0f} >= level {float(w['level_price']):,.0f} (sinyal {w['signal_date']:%d %b}, "
+                           f"ekspektasi {float(w['e_bps']):+.0f} bps)", ["sleeve:ml", "ml:entry", f"level:{float(w['level_price']):.0f}", f"rule:{w.get('rule') or '+5/10'}"])
+            if ln is None and frac < 1 and cash >= budget:
+                _set_watch(conn, w["id"], "triggered", trigger_price=last, note="dust: share carried to the next rule")
+                out["skipped"].append((w["code"], f"dust, carried ({w.get('rule')})"))
+                continue
             if ln is None:
                 out["skipped"].append((w["code"], "cash or dust"))
                 _set_watch(conn, w["id"], "cancelled", note="no cash for a slot")
+                continue
+            if not invested_ok(nav, cash, ln["notional"] * (1 + fee_b), S["cash_floor"]):
+                out["skipped"].append((w["code"], "cash floor"))            # stays pending: the floor may free up before the window ends
                 continue
             res = gapfade._ticket_res(book, d, MODE, [ln], b, conn, targets=[w["code"]] + sorted(held_codes(pos)))
             res["strategy"] = "combo"
@@ -541,7 +599,10 @@ def confirm(conn: psycopg.Connection, book: str, actor: str = "scheduler", now: 
                 ticket.set_status(conn, tid, "closed", actor=actor, rationale="combo: paper confirmation filled at the trigger price")
                 cash -= ln["notional"] * (1 + fee_b)
                 out["triggered"].append((w["code"], tid, "filled"))
-            n_open += 1
+                pos["ml"][w["code"]] = {"lots": (held_ml["lots"] if same_signal else Decimal(0)) + ln["lots"], "entry_date": w["signal_date"] if not same_signal else held_ml["entry_date"],
+                                        "entry_price": ln["limit_price"]}
+            if w["code"] not in held_codes(pos):
+                n_open += 1
     return out
 
 
@@ -580,6 +641,15 @@ def gap_entry(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: 
         picked = gapfade.pick(s["candidates"], room, held_codes(pos) | _open_lines(conn, book))
         k_size = max(int(round(1 / S["sleeves"]["gap"])), 1)              # plan_entries sizes a slot as NAV / k
         lines = gapfade.plan_entries(picked, nav, cash, k_size, Decimal(b["fee_buy_pct"]) / 100, ticket.min_trade_for(nav))
+        if S["cash_floor"] > 0:                                             # the floor: keep the lines that fit under 1 - floor, in order
+            kept, cash_after = [], cash
+            fee_b = Decimal(b["fee_buy_pct"]) / 100
+            for ln in lines:
+                if invested_ok(nav, cash_after, ln["notional"] * (1 + fee_b), S["cash_floor"]):
+                    kept.append(ln)
+                    cash_after -= ln["notional"] * (1 + fee_b)
+            out["floor_held"] = [ln["code"] for ln in lines if ln not in kept]
+            lines = kept
         for ln in lines:
             ln["flags"] = ["sleeve:gap", *ln["flags"]]
         out["lines"] = len(lines)
