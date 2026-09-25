@@ -229,6 +229,26 @@ def make_router(require_token) -> APIRouter:
             rows = q.latest(conn, codes.split(","))
         return [{k: (v.isoformat() if isinstance(v, date | datetime) else v) for k, v in r.items()} for r in rows]
 
+    @router.get("/search")
+    def stock_search(q: str = "", codes: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
+        """The search box: active listings by code prefix (first) or name substring, with the last close and the day's change
+        ``{code, name, sector, close, chg_pct}``. An empty ``q`` with ``codes=A,B`` returns those names in that order (the recent list)."""
+        from . import stock
+        with get_connection() as conn:
+            return _plain(stock.search(conn, q, codes.split(",") if codes else None, limit))
+
+    @router.get("/stock/{code}")
+    def stock_profile(code: str) -> dict[str, Any]:
+        """One stock for the app's Stock screen: the day's facts, valuation on the latest audited report, 52-week range, liquidity,
+        reported periods (``quarterly`` = the YTD reports TW1..TW3, ``annual``), dividends, foreign flow, press. ``profile`` and
+        ``holders`` are null / empty: the data plane holds no company text and no shareholder register."""
+        from . import stock
+        with get_connection() as conn:
+            out = stock.profile(conn, code)
+        if out is None:
+            raise HTTPException(status_code=404, detail=f"unknown code {code.upper()}")
+        return _plain(out)
+
     @router.get("/market")
     def market_overview() -> dict[str, Any]:
         """The top of the desk in one call: the index, breadth (advancers/decliners against each name's own
@@ -449,6 +469,19 @@ def make_router(require_token) -> APIRouter:
         with get_connection() as conn:
             return registry.refresh_scorecard(conn)
 
+    @router.get("/board")
+    def board(as_of: str | None = None) -> dict[str, Any]:
+        """What each of the desk's five best strategies says on a day, without a book: entries only, the
+        regime gate's refusals kept visible, and a plain reason on any card that has nothing. Computed live
+        (about a second) so it matches the bars as they stand rather than the last nightly run. Defaults to
+        the newest bar date - a strategy cannot read a day the desk has no prices for."""
+        from . import signalboard
+        with get_connection() as conn:
+            d = date.fromisoformat(as_of) if as_of else job_daily.latest_bar_date(conn)
+            if d is None:
+                return {"as_of": None, "strategies": [], "why": "the desk has no bars yet"}
+            return _plain(signalboard.build(conn, d))
+
     @router.get("/card/{code}")
     def card_get(code: str, as_of: str | None = None) -> dict[str, Any]:
         from . import card
@@ -536,8 +569,15 @@ def make_router(require_token) -> APIRouter:
                                      FROM idx.ticket t WHERE t.book = %s AND t.status IN ('draft', 'issued') ORDER BY t.id DESC LIMIT 1""", (name,))
                     r = cur.fetchone()
                 open_ticket = (r if isinstance(r, dict) else dict(zip(["id", "status", "mode", "n_lines"], r, strict=True))) if r else None
+                sleeves_on = None
+                if b.get("rule") == "combo":
+                    from . import combo_book as cb
+                    S = cb.settings(b)
+                    sleeves_on = sum(1 for k, v in S["sizes"].items() if v > 0 and k not in S["off"])
                 out.append({"book": name, "label": b.get("label") or name, "kind": "live" if tk.is_live(name) else "paper",
-                            "rule": "trend" if trend_book.variant_of(b) else "annual", "trend_variant": b.get("trend_variant"),
+                            "capital": bk.capital(conn, name), "halted_at": b.get("halted_at"), "halt_reason": b.get("halt_reason"),
+                            "strategies": sleeves_on,
+                            "rule": (b.get("rule") if b.get("rule") in ("gapfade", "combo") else ("trend" if trend_book.variant_of(b) else "annual")), "trend_variant": b.get("trend_variant"),
                             "note": b.get("note"), "broker": b.get("broker"), "strategy": b.get("strategy"), "max_names": b.get("max_names"),
                             "status": b.get("status"), "halted": bool(b.get("halted_at")), "archived": bool(b.get("archived_at")),
                             "cash": b["cash"], "nav_now": s["nav_now"], "positions": len(s["positions"]), "open_ticket": open_ticket,
@@ -1208,5 +1248,91 @@ status();
                 out["disabled"] = fs.disable_symbols(conn, list(body["disable"]))
             out["enabled"] = sum(1 for r in fs.list_symbols(conn) if r["enabled"])
         return out
+
+    # ---- the combined book + the v3 screens (idx/combo_book.py) ------------------------------------------------------
+    @router.get("/tickets")
+    def tickets_recent(book: str, days: int = 1, c: Caller = _CALLER) -> list[dict[str, Any]]:
+        """Every ticket of a book from the last ``days`` days plus any older one still open, newest first, with lines - the
+        Tickets screen (a book can have several a day: the nightly plan, the morning gap, confirmations, the close)."""
+        from datetime import timedelta
+
+        from . import ticket as tk
+        with get_connection() as conn:
+            own_book(conn, book, c)
+            rows = tk.list_recent(conn, book, date.today() - timedelta(days=max(0, min(days, 30))))
+        return [_plain(t) for t in rows]
+
+    @router.get("/combo/catalog")
+    def combo_catalog() -> dict[str, Any]:
+        """Every strategy a portfolio can run, with its default size and what the backtest says - the "Add strategy" sheet
+        and the "New portfolio" modal, neither of which has a book to ask yet."""
+        from . import combo_book as cb
+        return {"slots": cb.DEFAULTS["slots"],
+                "catalog": [{"k": k, **v, "backtest": cb.BACKTEST.get(k), "default_size": cb.DEFAULTS["sleeves"].get(k, 0.05)}
+                            for k, v in cb.CATALOG.items()]}
+
+    @router.get("/combo/watch")
+    def combo_watch(book: str, c: Caller = _CALLER) -> list[dict[str, Any]]:
+        """The ML sleeve's pending watches with the last feed price: level, distance, expiry, expected bps vs cost."""
+        from . import combo_book as cb
+        from . import gapfade
+        with get_connection() as conn:
+            own_book(conn, book, c)
+            ws = cb.pending_watches(conn, book, date.today())
+            px = gapfade.last_feed_prices(conn, date.today(), [w["code"] for w in ws]) if ws else {}
+        out = []
+        for w in ws:
+            last = px.get(w["code"])
+            out.append(_plain({**w, "last": last, "dist": (float(last) / float(w["level_price"]) - 1) if last else None}))
+        return out
+
+    @router.get("/combo/scorecard")
+    def combo_scorecard(book: str, c: Caller = _CALLER) -> dict[str, Any]:
+        from . import combo_book as cb
+        with get_connection() as conn:
+            own_book(conn, book, c)
+            return _plain(cb.scorecard(conn, book, store=False))
+
+    @router.get("/combo/positions")
+    def combo_positions(book: str, c: Caller = _CALLER) -> list[dict[str, Any]]:
+        from . import combo_book as cb
+        with get_connection() as conn:
+            own_book(conn, book, c)
+            return _plain(cb.positions_view(conn, book))
+
+    @router.get("/combo/strategies")
+    def combo_strategies(book: str, c: Caller = _CALLER) -> dict[str, Any]:
+        """The book's sleeves (size, on/off, open names) and the catalog; sizes are changed with PUT /idx/book/{book} {params}."""
+        from . import combo_book as cb
+        with get_connection() as conn:
+            own_book(conn, book, c)
+            return _plain(cb.strategies_view(conn, book))
+
+    # ---- the self-learning prediction desk (idx/ml) ------------------------------------------------------------------
+    @router.get("/ml/predictions/{code}")
+    def ml_predictions(code: str) -> dict[str, Any]:
+        """The newest forecast per horizon for one name (direction probability, predicted price on the tick), what
+        happened where the horizon has passed, and the 20-day live track record of that horizon. Forecasts, not advice."""
+        from .ml import loop as ml
+        with get_connection() as conn:
+            rows = ml.latest_for(conn, code.upper())
+        return {"code": code.upper(), "rows": [_plain(r) for r in rows]}
+
+    @router.get("/ml/board")
+    def ml_board(horizon: str = "1d", top: int = 20) -> dict[str, Any]:
+        """The newest cut of one horizon ranked by predicted return: top and bottom names."""
+        from .ml import loop as ml
+        from .ml.spec import HORIZONS
+        if horizon not in HORIZONS:
+            raise HTTPException(400, f"unknown horizon {horizon}; one of {', '.join(HORIZONS)}")
+        with get_connection() as conn:
+            return _plain(ml.board(conn, horizon, min(max(top, 1), 100)))
+
+    @router.get("/ml/scorecard")
+    def ml_scorecard() -> dict[str, Any]:
+        """Champions, prediction volume and the realised scorecard per horizon (hit rate vs base, AUC, IC, price error vs naive)."""
+        from .ml import loop as ml
+        with get_connection() as conn:
+            return _plain(ml.status(conn))
 
     return router

@@ -23,6 +23,7 @@ Commands (build plan 2026-09-12, phase 0):
   watch list | add CODE [--note ..] | rm CODE          watchlist (held / followed names included in every pack)
   book show|fills|fill|cash|set|import|mark|check|paper-seed [--book live|paper]   position book (see `book -h`)
   ticket build|show|issue|close|fill|skip [--book] [--mode rebalance|exits]         rebalance ticket + fill capture
+  board [--as-of D] [--record]                 what the five best strategies say today (entries only)
   run-scheduler                                foreground APScheduler (Asia/Jakarta), see scheduler.py
 
 DB comes from the INGEST_* settings (INGEST_DB_DSN or INGEST_DB_HOST/...).
@@ -417,6 +418,24 @@ def cmd_levels(a: argparse.Namespace) -> int:
         else:
             rows = levels.levels(conn, a.book if a.book != "all" else None, a.code)
             print(levels.render(rows, levels._closes(conn, sorted({x["code"] for x in rows}))))
+    return 0
+
+
+def cmd_board(a: argparse.Namespace) -> int:
+    """The daily board: what each of the five best strategies wants, before any book's cash."""
+    from . import signalboard
+    from .jobs import daily as job_daily
+    with get_connection() as conn:
+        d = _d(a.as_of) if a.as_of else job_daily.latest_bar_date(conn)
+        if d is None:
+            print("the desk has no bars yet")
+            return 1
+        if a.record:
+            res = signalboard.record(conn, d)
+            for r in res["recorded"]:
+                print(f"  {r['strategy']:<15} rows={r.get('rows', 0)}" + (f" error={r['error']}" if r.get("error") else ""))
+            return 0
+        print(signalboard.render(signalboard.build(conn, d)))
     return 0
 
 
@@ -1009,8 +1028,9 @@ def cmd_ara(a: argparse.Namespace) -> int:
     from . import ara
     with get_connection() as conn:
         if a.sub == "watch":
-            rep = ara.watch(conn, top=a.top, notify=not a.no_notify)
+            rep = ara.watch(conn, top=a.top, notify=not a.no_notify, use_dl=False if a.no_dl else None)
             print(rep["text"])
+            print(_json.dumps({k: v for k, v in rep.items() if k not in ("rows", "text")}, default=str))
             return 0
         if a.sub == "show":
             print(_json.dumps(ara.latest_watch(conn), indent=1, default=str))
@@ -1172,6 +1192,131 @@ def cmd_feed(a: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_ml(a: argparse.Namespace) -> int:
+    """The self-learning prediction desk (idx/ml): train | predict | eval | scorecard | status | show CODE | board | models."""
+    import json as _json
+
+    from .ml import common as mlc
+    from .ml import loop as ml
+    with get_connection() as conn:
+        if a.sub == "train":
+            for kind in (["daily", "intraday"] if a.kind == "all" else [a.kind]):
+                rep = ml.train(conn, kind, tune=not a.no_tune, horizons=a.horizons.split(",") if a.horizons else None, placebo=a.placebo)
+                print(rep["text"])
+            return 0
+        if a.sub == "calibrate":
+            for c in ml.fit_calibration(conn):
+                print(f"{c['horizon']:>4}: n {c['n']:,} knots {c['knots']} curve {c['lo']:.2f}..{c['hi']:.2f} hit@0.5 raw {c['raw_hit'] * 100:.1f} % -> cal {c['cal_hit'] * 100:.1f} %")
+            return 0
+        if a.sub == "predict":
+            if a.kind in ("daily", "all"):
+                print(_json.dumps(ml.predict_daily(conn), default=str))
+            if a.kind in ("intraday", "all"):
+                print(_json.dumps(ml.predict_intraday(conn), default=str))
+            return 0
+        if a.sub == "eval":
+            print(_json.dumps(ml.evaluate(conn), default=str))
+            return 0
+        if a.sub == "scorecard":
+            print(ml.render_scorecard(ml.scorecard(conn, _d(a.as_of) if a.as_of else None)))
+            return 0
+        if a.sub == "status":
+            print(ml.render_status(ml.status(conn)))
+            return 0
+        if a.sub == "show":
+            if not a.code:
+                print("usage: idx ml show CODE")
+                return 2
+            for r in ml.latest_for(conn, a.code.upper()):
+                px = "-" if r["pred_price"] is None else f"{r['pred_price']:,.0f}"
+                pu = "-" if r["p_up"] is None else f"{r['p_up']:.2f}"
+                rel = " vs IHSG" if r.get("basis") == "excess" else ""
+                line = (f"{r['horizon']:>4} {r['label']:<26} cut {r['made_at']:%Y-%m-%d %H:%M} ref {r['ref_price']:,.0f} -> {px} "
+                        f"({(r['pred_ret'] or 0) * 1e4:+.0f} bps{rel}) P(naik{rel}) {pu}")
+                if r.get("realized_ret") is not None:
+                    line += f" | terjadi {r['realized_price']:,.0f} ({r['realized_ret'] * 1e4:+.0f} bps) hit={r['hit']}"
+                t = r.get("track") or {}
+                if t.get("hit_rate") is not None:
+                    line += f" | rekam 20d: hit {t['hit_rate'] * 100:.1f} % vs base {t['base_hit'] * 100:.1f} %, IC {t['ic'] if t['ic'] is None else '%.3f' % t['ic']}"
+                print(line)
+            return 0
+        if a.sub == "board":
+            print(_json.dumps(ml.board(conn, a.horizon, a.top), default=str, indent=1))
+            return 0
+        for m in mlc.models(conn, a.top):
+            v = m["val_metrics"] or {}
+            prim = "-" if v.get("primary") is None else f"{v['primary']:.3f}"
+            print(f"#{m['model_id']} {m['horizon']:>4} {m['task']} {m['status']:<9} {m['origin']:<7} {m['trained_at']:%m-%d %H:%M} "
+                  f"val {m['val_from']}..{m['val_to']} primary {prim} - {m['reason']}")
+        return 0
+
+
+def cmd_combo(a: argparse.Namespace) -> int:
+    """The combined book (idx/combo_book.py): create | set | plan | preopen | confirm | gap-entry | gap-exit | expire | nudge | scorecard | status."""
+    import json as _json
+
+    from . import combo_book as cb
+    with get_connection() as conn:
+        if a.sub == "create":
+            owner = None
+            if a.owner:
+                from . import accounts
+                u = accounts.get_user(conn, a.owner)
+                if not u:
+                    print(f"no account {a.owner}")
+                    return 2
+                owner = str(u["id"])
+            sleeves = {k: float(v) for k, v in (("trend", a.trend), ("ml", a.ml), ("gap", a.gap)) if v is not None}
+            bid = cb.create(conn, owner, a.kind, a.label or f"combo {a.kind}", a.cash, broker=a.broker, sleeves=sleeves or None, slots=a.slots)
+            print(bid)
+            return 0
+        books = [a.book] if a.book else cb.combo_books(conn)
+        if a.sub == "set":
+            from . import book as bkm
+            for bkid in books:
+                b = bkm.get_book(conn, bkid)
+                p = dict(b.get("params") or {})
+                p.setdefault("sleeves", {})
+                for k, v in (("trend", a.trend), ("ml", a.ml), ("gap", a.gap)):
+                    if v is not None:
+                        p["sleeves"][k] = float(v)
+                if a.slots:
+                    p["slots"] = int(a.slots)
+                cb.settings({"params": p})
+                bkm.ensure_book(conn, bkid, params=p)
+                print(bkid, _json.dumps(p))
+            return 0
+        for bkid in books:
+            if a.sub == "plan":
+                rep = cb.plan(conn, bkid, actor="operator", d=_d(a.as_of) if a.as_of else None)
+                print(rep.get("text") or rep)
+            elif a.sub == "preopen":
+                print(cb.preopen(conn, bkid, _d(a.as_of) if a.as_of else None))
+            elif a.sub == "confirm":
+                print(_json.dumps(cb.confirm(conn, bkid, actor="operator"), default=str))
+            elif a.sub == "gap-entry":
+                print(_json.dumps(cb.gap_entry(conn, bkid, actor="operator", d=_d(a.as_of) if a.as_of else None), default=str))
+            elif a.sub == "gap-exit":
+                print(_json.dumps(cb.gap_exit(conn, bkid, actor="operator", d=_d(a.as_of) if a.as_of else None), default=str))
+            elif a.sub == "expire":
+                print(_json.dumps(cb.expire(conn, bkid, actor="operator"), default=str))
+            elif a.sub == "nudge":
+                print(cb.nudge(conn, bkid) or "nothing open")
+            elif a.sub == "scorecard":
+                print(cb.render_scorecard(cb.scorecard(conn, bkid)))
+            else:
+                from . import book as bkm
+                b = bkm.get_book(conn, bkid)
+                pos = cb.sleeve_positions(conn, bkid)
+                print(f"{bkid} [{b.get('label')}] rule {b.get('rule')} cash Rp {float(b['cash']):,.0f} settings {_json.dumps(cb.settings(b))}")
+                for s_, d in pos.items():
+                    if d:
+                        print(f"  {s_}: " + ", ".join(f"{c} {int(p['lots'])} lot @ {float(p['entry_price'] or 0):,.0f} since {p['entry_date']}" for c, p in d.items()))
+                for w in cb.pending_watches(conn, bkid):
+                    print(f"  watch {w['code']} level {float(w['level_price']):,.0f} until {w['until_date']} (e {float(w['e_bps']):+.0f} bps)")
+        return 0
+
+
 def cmd_run_scheduler(_: argparse.Namespace) -> int:
     import os
     from logging.handlers import RotatingFileHandler
@@ -1301,6 +1446,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--kind", choices=["stop", "take_profit", "warn"])
     p.add_argument("--note")
     p.set_defaults(fn=cmd_levels)
+    p = sub.add_parser("board", help="what the five best strategies say on a day (entries only, no book)")
+    p.add_argument("--as-of", help="default: the newest bar date")
+    p.add_argument("--record", action="store_true", help="also store the rows in idx.strategy_signal and raise the alerts")
+    p.set_defaults(fn=cmd_board)
     p = sub.add_parser("study", help="research results in the DB: list [--name N] | show [--id I | --name N] | name CODE")
     p.add_argument("sub", choices=["list", "show", "name"])
     p.add_argument("--name")
@@ -1444,9 +1593,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["watch", "show", "touch", "today"])
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--no-notify", dest="no_notify", action="store_true")
+    p.add_argument("--no-dl", dest="no_dl", action="store_true", help="watch: LightGBM only, skip the GRU (faster, tree rank)")
     p.add_argument("--force", action="store_true", help="touch: run even outside the session")
     p.add_argument("--as-of")
     p.set_defaults(fn=cmd_ara)
+    p = sub.add_parser("ml", help="self-learning prediction desk: train [--kind daily|intraday|all] [--no-tune] [--horizons 1d,20d] [--placebo N] | predict [--kind] | eval | calibrate | scorecard [--as-of D] | status | show CODE | board [--horizon H] [--top N] | models [--top N]")
+    p.add_argument("sub", choices=["train", "predict", "eval", "calibrate", "scorecard", "status", "show", "board", "models"])
+    p.add_argument("--placebo", type=int, default=0, help="train: N label-shuffled refits per (horizon, task) on the newest block (slow)")
+    p.add_argument("code", nargs="?")
+    p.add_argument("--kind", choices=["daily", "intraday", "all"], default="all")
+    p.add_argument("--no-tune", dest="no_tune", action="store_true", help="train: skip the perturbed-params challenger")
+    p.add_argument("--horizons", help="train: comma-separated subset, e.g. 1d,20d")
+    p.add_argument("--horizon", default="1d")
+    p.add_argument("--top", type=int, default=20)
+    p.add_argument("--as-of")
+    p.set_defaults(fn=cmd_ml)
+    p = sub.add_parser("combo", help="combined book: create --kind paper|live --label L --cash RP [--owner EMAIL] [--trend 0.05 --ml 0.05 --gap 0.10 --slots 20] | set [--book B] [--trend|--ml|--gap|--slots] | plan | preopen | confirm | gap-entry | gap-exit | expire | nudge | scorecard | status [--book B] [--as-of D]")
+    p.add_argument("sub", choices=["create", "set", "plan", "preopen", "confirm", "gap-entry", "gap-exit", "expire", "nudge", "scorecard", "status"])
+    p.add_argument("--book")
+    p.add_argument("--kind", choices=["paper", "live"], default="paper")
+    p.add_argument("--label")
+    p.add_argument("--cash", type=float, default=20_000_000)
+    p.add_argument("--owner", help="email of the owning account")
+    p.add_argument("--broker")
+    p.add_argument("--trend", type=float)
+    p.add_argument("--ml", type=float)
+    p.add_argument("--gap", type=float)
+    p.add_argument("--slots", type=int)
+    p.add_argument("--as-of")
+    p.set_defaults(fn=cmd_combo)
     p = sub.add_parser("scores", help="public factor scores (spec §04): build [--as-of D] | show [--code X] [--as-of D] | stats [--refresh] [--criteria C]")
     p.add_argument("sub", choices=["build", "show", "stats"])
     p.add_argument("--as-of")

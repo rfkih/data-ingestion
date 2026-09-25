@@ -1,18 +1,22 @@
-"""ARA watch: which names are likely to touch the upper auto-rejection price tomorrow, and what a holder's name is doing
-when it gets there today (operator, 2026-09-23: "kasih alert supaya kita finding saham potensial untuk ARA" and "menyentuh
-ARA jadi kita jual di harga paling atas").
+"""ARA watch: which names are likely to lock at the upper auto-rejection price next session, how sure the model is, and
+what a holder's name is doing when it gets there today (operator, 2026-09-23: "kasih alert supaya kita finding saham
+potensial untuk ARA" and "menyentuh ARA jadi kita jual di harga paling atas"; 2026-09-24: "terapkan di page ARA untuk
+prediksi dan keyakinannya").
 
-What the research settled (research/IDX_ARA_2026-09-21.md, IDX_ML_ARA_2026-09-22.md, IDX_ARA_SELL_2026-09-23.md):
-  * tomorrow's touch is predictable from today's bars: walk-forward 2022-26, AUC 0.86-0.92, the top-5 names a day touch
-    7-18 % of the time against a 0.3-0.9 % base rate (17-27x). The nightly list here is that model, bar-only features.
-  * it is NOT a trade: the names that keep going open locked (no offer), the ones that can be bought lose (menu 16, 0/24;
-    menu 29f: buying any gap-up loses). Nothing here writes a ticket.
+What the research settled (research/IDX_ARA_2026-09-21.md, IDX_ML_ARA_2026-09-22.md, IDX_ARA_SELL_2026-09-23.md,
+IDX_ARA_MICRO_2026-09-24.md = study #146):
+  * tomorrow's lock is predictable from today's bar + closing book: walk-forward 2022-26 AUC 0.88-0.93, the top-5 names a
+    day lock 8-20 % of the time against a 0.3-0.9 % base rate (~20x); 48-76 % of a year's locks sit in the daily top-20.
+    The evening list here is that model (ara_model.py: LightGBM + GRU, Platt-calibrated, ENS rank).
+  * it is NOT a trade: the names that keep going open locked (no offer), the ones that can be bought lose (menu 16;
+    ML-3; #146 buyable precision 2-4 %). Nothing here writes a ticket.
   * for a HOLDER the fact that matters is whether the touch holds to the close: a LOCKED close is followed by +431 bps the
     next day against the ARA price (liquid names, n 440, t 8); a FADED touch closes 661 bps under it (n 231, t 15). The
     intraday check reads that state off the tick feed and tells the phone, with those numbers, nothing more.
 
-Two entry points, both scheduled (scheduler.py): ``watch`` in the evening after the bar lands, ``touch_check`` every two
-minutes during the session. Read-only on the market tables; writes idx.ara_watch / idx.ara_touch / idx.alert.
+Two entry points, both scheduled (scheduler.py): ``watch`` in the evening after the bar lands (run in a subprocess: the
+model holds ~1 GB while it fits), ``touch_check`` every two minutes during the session. Read-only on the market tables;
+writes idx.ara_watch / idx.ara_touch / idx.alert.
 """
 from __future__ import annotations
 
@@ -28,23 +32,20 @@ import pandas as pd
 import psycopg
 from psycopg.rows import dict_row, tuple_row
 
-from . import runlog
+from . import ara_model, runlog
 
 logger = logging.getLogger(__name__)
 WIB = ZoneInfo("Asia/Jakarta")
 SESSION_FROM, SESSION_TO = time(8, 58), time(16, 1)
 TOP_N = 10
-MIN_VALUE20 = 1e9                       # Rp 1 bn mean daily value: below this the bars are too thin to score
-MIN_PREV = 50.0
-ROUNDS = 300
-PARAMS = {"objective": "binary", "learning_rate": 0.05, "num_leaves": 31, "min_data_in_leaf": 500, "bagging_fraction": 0.8,
-          "bagging_freq": 1, "feature_fraction": 0.8, "lambda_l2": 10.0, "seed": 20260923, "verbose": -1, "num_threads": 8}
-FEATS = ["ret1", "ret5", "ret20", "streak", "lock_yday", "touch_yday", "days_since_touch", "vol_ratio", "value20", "band", "clv",
-         "hl_range", "up_days", "dist_hi20", "age_days", "dow"]
+FEATS = ara_model.FEATS
+CONF_WORD = {"high": "keyakinan tinggi", "medium": "keyakinan sedang", "low": "keyakinan rendah"}
 # the two numbers a holder gets, from menu 34 (study #101), liquid names 2020-2026
 FACT_LOCKED = "kunci yang bertahan sampai tutup: hari berikutnya rata-rata +431 bps vs harga ARA (likuid, n 440, studi #101)"
 FACT_FADED = "sentuhan yang memudar: tutup hari itu rata-rata -661 bps vs harga ARA (likuid, n 231, studi #101)"
 FACT_AT_ARA = "harga di ARA dengan penjual masih antre: belum terkunci; 59 % sentuhan bertahan sampai tutup (studi #101)"
+FACT_MODEL = ("model studi #146: dari 5 nama teratas per hari, 8-20 % tutup di ARA besoknya (dasar 0,3-0,9 %, AUC 0,88-0,93, "
+              "2022-2026); P sudah dikalibrasi")
 
 
 # ---- the limit -------------------------------------------------------------------------------------------------------
@@ -64,75 +65,17 @@ def ara_price(prev: float) -> float:
     return math.floor(raw / t + 1e-9) * t
 
 
-# ---- features from daily bars ----------------------------------------------------------------------------------------
-def features(B: pd.DataFrame) -> pd.DataFrame:
-    """One row per bar, columns FEATS + touch/lock/touch_next, from a frame with code, d, high, close, volume, value sorted
-    by (code, d). Pure pandas/numpy so the tests can feed it a synthetic tape."""
-    B = B.sort_values(["code", "d"]).reset_index(drop=True).copy()
-    g = B.groupby("code", sort=False)
-    B["prev"] = g["close"].shift(1)
-    prev = B["prev"].to_numpy(float)
-    B["ara_px"] = [ara_price(p) if np.isfinite(p) and p > 0 else np.nan for p in prev]
-    B["touch"] = (B["high"] >= B["ara_px"] - 1e-9) & (B["prev"] >= MIN_PREV)
-    B["lock"] = B["touch"] & (B["close"] >= B["ara_px"] - 1e-9)
-    B["ret1"] = B["close"] / B["prev"] - 1
-    B["ret5"] = B["close"] / g["close"].shift(5) - 1
-    B["ret20"] = B["close"] / g["close"].shift(20) - 1
-    B["lock_yday"] = g["lock"].shift(1).astype(float)
-    B["touch_yday"] = g["touch"].shift(1).astype(float)
-    codes = B["code"].to_numpy()
-    lk, tc = B["lock"].to_numpy(), B["touch"].to_numpy()
-    up = (B["ret1"] > 0).to_numpy()
-    streak, updays, since = np.zeros(len(B)), np.zeros(len(B)), np.full(len(B), 60.0)
-    for i in range(len(B)):
-        same = i > 0 and codes[i] == codes[i - 1]
-        streak[i] = streak[i - 1] + 1 if (same and lk[i]) else float(lk[i])
-        updays[i] = updays[i - 1] + 1 if (same and up[i]) else float(up[i])
-        since[i] = 0.0 if tc[i] else (min(60.0, since[i - 1] + 1) if same else 60.0)
-    B["streak"], B["up_days"], B["days_since_touch"] = streak, updays, since
-    v20 = g["volume"].transform(lambda x: x.rolling(20, min_periods=5).mean())
-    B["vol_ratio"] = B["volume"] / v20.replace(0, np.nan)
-    B["value20_rp"] = g["value"].transform(lambda x: x.rolling(20, min_periods=5).mean())
-    B["value20"] = np.log1p(B["value20_rp"])
-    B["band"] = np.select([B["close"] <= 200, B["close"] <= 5000], [0, 1], 2)
-    rng = (B["high"] - B["low"]).replace(0, np.nan) if "low" in B else pd.Series(np.nan, index=B.index)
-    B["clv"] = ((B["close"] - B["low"]) / rng) if "low" in B else 0.5
-    B["hl_range"] = ((B["high"] - B["low"]) / B["prev"]) if "low" in B else (B["high"] / B["prev"] - 1)
-    B["dist_hi20"] = B["close"] / g["high"].transform(lambda x: x.rolling(20, min_periods=5).max()) - 1
-    B["age_days"] = g.cumcount().astype(float)
-    B["dow"] = pd.to_datetime(B["d"]).dt.dayofweek.astype(float)
-    B["touch_next"] = g["touch"].shift(-1).astype(float)
-    return B
-
-
-def load_bars(conn: psycopg.Connection, since: date | None = None) -> pd.DataFrame:
-    with conn.cursor(row_factory=tuple_row) as cur:                      # the desk's connections default to dict rows
-        cur.execute("""SELECT code, trade_date, high, low, close, volume, value FROM idx.bar
-                       WHERE source IN ('idx', 'yahoo') AND close > 0 AND (%s::date IS NULL OR trade_date >= %s) ORDER BY code, trade_date""", (since, since))
-        B = pd.DataFrame(cur.fetchall(), columns=["code", "d", "high", "low", "close", "volume", "value"])
-    for c in ("high", "low", "close", "volume", "value"):
-        B[c] = pd.to_numeric(B[c], errors="coerce").astype(float)
-    B["d"] = pd.to_datetime(B["d"])
-    return B
-
-
-def train_and_score(B: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Fit on every labelled row (label = touch on the next bar), score the last bar of every name."""
-    import lightgbm as lgb
-    F = features(B)
-    F = F[(F["prev"] >= MIN_PREV) & (F["value20_rp"] >= MIN_VALUE20)]
-    last_d = F["d"].max()
-    tr = F.dropna(subset=[*FEATS, "touch_next"])
-    tr = tr[tr["d"] < last_d]
-    if len(tr) < 5000 or tr["touch_next"].sum() < 100:
-        raise RuntimeError(f"ara: not enough history to fit ({len(tr)} rows, {int(tr['touch_next'].sum())} touches)")
-    m = lgb.train(PARAMS, lgb.Dataset(tr[FEATS].to_numpy(float), tr["touch_next"].to_numpy(), feature_name=FEATS), ROUNDS)
-    te = F[F["d"] == last_d].dropna(subset=FEATS).copy()
-    te["p"] = np.asarray(m.predict(te[FEATS].to_numpy(float)))
-    te["ara_next"] = [ara_price(c) for c in te["close"].to_numpy(float)]
-    info = {"bar_date": last_d.date(), "rows_fit": len(tr), "touches_fit": int(tr["touch_next"].sum()), "scored": len(te),
-            "base_rate": float(tr["touch_next"].mean())}
-    return te.sort_values("p", ascending=False), info
+# ---- the evening model -----------------------------------------------------------------------------------------------
+def train_and_score(conn: psycopg.Connection, use_dl: bool | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Fit study #146's model on every labelled day in idx.daily_summary and score the last bar of every main-board name.
+    Returns rows sorted by the ENS score with calibrated p_lock / p_touch / p_dl, flags and the features."""
+    P = ara_model.Panel(ara_model.load_summary(conn))
+    fitted = ara_model.train(P, use_dl=use_dl)
+    scored = ara_model.score_last(P, fitted)
+    if scored.empty:
+        raise RuntimeError("ara: nothing to score on the last bar")
+    info = {"bar_date": P.dates[-1].date(), "scored": len(scored), "model": "ens" if fitted.gru is not None else "tree", **fitted.info}
+    return scored, info
 
 
 # ---- the nightly list ------------------------------------------------------------------------------------------------
@@ -143,58 +86,84 @@ def held_names(conn: psycopg.Connection) -> dict[str, list[str]]:
         return {r["code"]: list(r["books"]) for r in cur.fetchall()}
 
 
+def _f(v: Any) -> float | None:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if np.isfinite(x) else None
+
+
+def _row(r: Any, rank: int | None, held: dict[str, list[str]]) -> dict[str, Any]:
+    p_lock = float(r.p_lock)
+    return {"code": r.code, "rank": rank, "p": p_lock, "p_lock": p_lock, "p_touch": _f(getattr(r, "p_touch", None)), "p_dl": _f(getattr(r, "p_dl", None)),
+            "score": _f(getattr(r, "score", p_lock)), "prev_close": float(r.close), "ara_px": float(r.ara_px_next),
+            "locked_today": bool(getattr(r, "locked_today", False)), "buyable": bool(getattr(r, "buyable", True)),
+            "confidence": ara_model.confidence(p_lock), "held": r.code in held, "books": held.get(r.code, []),
+            "features": {k: _f(getattr(r, k, None)) for k in FEATS}}
+
+
 def select_rows(scored: pd.DataFrame, held: dict[str, list[str]], top: int = TOP_N) -> list[dict[str, Any]]:
-    """The top-N by score, then every held name not already in it (rank NULL). Pure, for the tests."""
+    """The top-N by score, then every held name not already in it (rank NULL). Pure, for the tests. ``scored`` needs
+    code, close, ara_px_next, p_lock and is read in its given order (score_last sorts by the ENS score)."""
     out, seen = [], set()
     for rank, r in enumerate(scored.head(top).itertuples(), start=1):
-        out.append({"code": r.code, "rank": rank, "p": float(r.p), "prev_close": float(r.close), "ara_px": float(r.ara_next),
-                    "held": r.code in held, "books": held.get(r.code, []), "features": {k: float(getattr(r, k)) for k in FEATS}})
+        out.append(_row(r, rank, held))
         seen.add(r.code)
     by_code = {r.code: r for r in scored.itertuples()}
     for code in sorted(held):
         if code in seen or code not in by_code:
             continue
-        r = by_code[code]
-        out.append({"code": code, "rank": None, "p": float(r.p), "prev_close": float(r.close), "ara_px": float(r.ara_next),
-                    "held": True, "books": held[code], "features": {k: float(getattr(r, k)) for k in FEATS}})
+        out.append(_row(by_code[code], None, held))
     return out
 
 
 def render_watch(rows: list[dict[str, Any]], bar_date: date, base_rate: float) -> str:
     top = [r for r in rows if r["rank"]]
     hold = [r for r in rows if r["held"]]
-    L = [f"ARA watch untuk sesi setelah {bar_date:%d %b}: skor model dari bar harian (studi ML-3: top-5/hari menyentuh ARA 7-18 % vs dasar {base_rate * 100:.1f} %).",
+
+    def line(r: dict[str, Any]) -> str:
+        touch = f", sentuh {r['p_touch'] * 100:.0f} %" if r.get("p_touch") is not None else ""
+        state = " · sudah terkunci hari ini" if r.get("locked_today") else ""
+        who = " · dipegang " + ",".join(r["books"]) if r["held"] else ""
+        return f"- {r['code']} P kunci {r['p'] * 100:.0f} %{touch} ({CONF_WORD[r.get('confidence', 'low')]}), ARA Rp {r['ara_px']:,.0f} (tutup {r['prev_close']:,.0f}){state}{who}"
+
+    L = [f"ARA watch untuk sesi setelah {bar_date:%d %b}: P kunci = peluang tutup di ARA besok, dari bar + book penutupan hari ini "
+         f"(dasar {base_rate * 100:.1f} %). {FACT_MODEL}.",
          "Bukan tiket: yang benar-benar lanjut membuka terkunci, yang bisa dibeli rugi (menu 16).", "Daftar:"]
-    L += [f"- {r['code']} P {r['p'] * 100:.0f} %, ARA Rp {r['ara_px']:,.0f} (tutup {r['prev_close']:,.0f}){' · dipegang ' + ','.join(r['books']) if r['held'] else ''}" for r in top]
+    L += [line(r) for r in top]
     if hold:
         L.append("Nama yang dipegang:")
-        L += [f"- {r['code']} P {r['p'] * 100:.1f} %, ARA Rp {r['ara_px']:,.0f} ({','.join(r['books'])})" for r in hold]
+        L += [f"- {r['code']} P kunci {r['p'] * 100:.1f} % ({CONF_WORD[r.get('confidence', 'low')]}), ARA Rp {r['ara_px']:,.0f} ({','.join(r['books'])})" for r in hold]
     L.append(f"Kalau menyentuh: {FACT_LOCKED}; {FACT_FADED}.")
     return "\n".join(L)
 
 
-def watch(conn: psycopg.Connection, top: int = TOP_N, notify: bool = True, run_date: date | None = None) -> dict[str, Any]:
+def watch(conn: psycopg.Connection, top: int = TOP_N, notify: bool = True, run_date: date | None = None, use_dl: bool | None = None) -> dict[str, Any]:
     run_date = run_date or datetime.now(WIB).date()
-    scored, info = train_and_score(load_bars(conn))
+    scored, info = train_and_score(conn, use_dl=use_dl)
     held = held_names(conn)
     rows = select_rows(scored, held, top)
     with conn.cursor() as cur:
         cur.execute("DELETE FROM idx.ara_watch WHERE run_date = %s", (run_date,))
         for r in rows:
-            cur.execute("""INSERT INTO idx.ara_watch (run_date, bar_date, code, rank, p, prev_close, ara_px, held, books, features)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)""",
-                        (run_date, info["bar_date"], r["code"], r["rank"], round(r["p"], 5), r["prev_close"], r["ara_px"], r["held"], r["books"],
-                         pd.Series(r["features"]).to_json()))
+            cur.execute("""INSERT INTO idx.ara_watch (run_date, bar_date, code, rank, p, p_lock, p_touch, p_dl, score, prev_close, ara_px, held, books,
+                                                      locked_today, buyable, confidence, model, features)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)""",
+                        (run_date, info["bar_date"], r["code"], r["rank"], round(r["p"], 5), round(r["p_lock"], 5),
+                         None if r["p_touch"] is None else round(r["p_touch"], 5), None if r["p_dl"] is None else round(r["p_dl"], 5),
+                         None if r["score"] is None else round(r["score"], 6), r["prev_close"], r["ara_px"], r["held"], r["books"],
+                         r["locked_today"], r["buyable"], r["confidence"], info["model"], pd.Series(r["features"], dtype=object).to_json()))
     conn.commit()
-    text = render_watch(rows, info["bar_date"], info["base_rate"])
+    text = render_watch(rows, info["bar_date"], info.get("base_rate", 0.0055))
     if notify:
         runlog.alert_once(conn, "info", "ara", f"ARA watch {run_date}: " + ", ".join(f"{r['code']} {r['p'] * 100:.0f} %" for r in rows if r["rank"]))
         try:
             from . import notify as nf
-            nf.send(text, title=f"ARA watch {run_date:%d %b}", data={"route": "/m/more", "kind": "ara"})
+            nf.send(text, title=f"ARA watch {run_date:%d %b}", data={"route": "/m/ara", "kind": "ara"})
         except Exception:                                                  # a notification never fails the job
             logger.exception("ara watch notify failed")
-    logger.info("idx ara watch %s: %s", run_date, info)
+    logger.info("idx ara watch %s: %s", run_date, {k: v for k, v in info.items() if k != "rows"})
     return {"run_date": run_date, **info, "rows": rows, "text": text}
 
 
@@ -203,10 +172,16 @@ def latest_watch(conn: psycopg.Connection) -> dict[str, Any]:
         cur.execute("SELECT max(run_date) AS d FROM idx.ara_watch")
         d = cur.fetchone()["d"]
         if d is None:
-            return {"run_date": None, "rows": []}
-        cur.execute("""SELECT run_date, bar_date, code, rank, p, prev_close, ara_px, held, books, features FROM idx.ara_watch
-                       WHERE run_date = %s ORDER BY rank NULLS LAST, p DESC""", (d,))
-        return {"run_date": d, "rows": [dict(r) for r in cur.fetchall()]}
+            return {"run_date": None, "rows": [], "facts": ara_model.FACTS}
+        cur.execute("""SELECT run_date, bar_date, code, rank, p, p_lock, p_touch, p_dl, score, prev_close, ara_px, held, books, locked_today, buyable,
+                              confidence, model, features FROM idx.ara_watch WHERE run_date = %s ORDER BY rank NULLS LAST, score DESC NULLS LAST, p DESC""", (d,))
+        rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:                                                          # rows written before 0036 carry only p
+        if r.get("p_lock") is None:
+            r["p_lock"] = r["p"]
+        if r.get("confidence") is None:
+            r["confidence"] = ara_model.confidence(float(r["p_lock"]))
+    return {"run_date": d, "rows": rows, "facts": ara_model.FACTS}
 
 
 # ---- the intraday state ----------------------------------------------------------------------------------------------

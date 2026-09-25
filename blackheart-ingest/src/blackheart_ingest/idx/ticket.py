@@ -439,6 +439,14 @@ def load(conn: psycopg.Connection, ticket_id: int | None = None, book: str | Non
     return t
 
 
+
+def list_recent(conn: psycopg.Connection, book: str, since: date, limit: int = 40) -> list[dict[str, Any]]:
+    """Every ticket of a book dated on/after ``since`` plus any older one still open (draft/issued), newest first, with lines."""
+    ids = [r["id"] for r in _rows(conn, """SELECT id FROM idx.ticket WHERE book = %s AND (ticket_date >= %s OR status IN ('draft', 'issued'))
+                                            ORDER BY id DESC LIMIT %s""", (book, since, limit), ["id"])]
+    return [t for t in (load(conn, i) for i in ids) if t]
+
+
 def set_status(conn: psycopg.Connection, ticket_id: int, status: str, actor: str = "operator", rationale: str | None = None) -> dict[str, Any]:
     """Move a ticket between draft | issued | closed | cancelled. Guardrails (all server-side, so no client can skip them):
     two-key - on a live book only the operator issues or closes (``PermissionError``); a halted book issues nothing;

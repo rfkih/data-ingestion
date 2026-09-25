@@ -71,5 +71,5 @@ def test_books_list(client) -> None:
     assert r.status_code == 200, r.text
     rows = r.json()
     assert rows and {"book", "kind", "rule", "nav_now", "cash", "positions", "open_ticket", "halted"} <= set(rows[0])
-    assert all(x["kind"] in ("live", "paper") and x["rule"] in ("annual", "trend") and not x["book"].startswith("test") for x in rows)
+    assert all(x["kind"] in ("live", "paper") and x["rule"] in ("annual", "trend", "gapfade", "combo") and not x["book"].startswith("test") for x in rows)
     assert [x["kind"] for x in rows] == sorted((x["kind"] for x in rows), key=lambda k: k != "live")    # live first

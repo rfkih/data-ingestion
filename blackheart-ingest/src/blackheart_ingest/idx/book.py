@@ -7,6 +7,7 @@ material disclosures, a new report breaking the book rule, a drawdown past the t
 from __future__ import annotations
 
 import csv
+import json
 import logging
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -85,9 +86,11 @@ def default_fee(gross: Decimal, side: str, book: dict[str, Any]) -> Decimal:
 # ---------------------------------------------------------------------------
 LIMIT_FIELDS = ("max_weight_pct", "max_sector_pct", "max_turnover_pct", "min_v60")
 SETTABLE_FIELDS = ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
-                   "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule", "label", "rule", "trend_variant", *LIMIT_FIELDS)
-RULES = ("annual", "trend", "gapfade")      # annual = the value list rebalanced in May; trend = breakout + trailing stop, daily;
+                   "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule", "label", "rule", "trend_variant", "params",
+                   *LIMIT_FIELDS)
+RULES = ("annual", "trend", "gapfade", "combo")   # annual = the value list rebalanced in May; trend = breakout + trailing stop, daily;
                                            # gapfade = buy the opening gap-down, sell into the same close (intraday, paper only)
+                                           # combo = one cash pool, three sleeves (gap-fade, trend, ML) sized from book.params (combo_book.py)
 KINDS = ("paper", "live")
 AGENT_SETTABLE_FIELDS = ("note",)          # everything else on a book is the operator's (strategy, size, cash, fees, overlays, limits)
 
@@ -95,12 +98,12 @@ AGENT_SETTABLE_FIELDS = ("note",)          # everything else on a book is the op
 def get_book(conn: psycopg.Connection, book: str) -> dict[str, Any]:
     rows = _rows(conn, "SELECT book, cash, fee_buy_pct, fee_sell_pct, div_tax_pct, broker, note, strategy, max_names, regime_filter, entry_gate, "
                        "take_profit_pct, trend_exit, cash_floor_pct, stress_cash_pct, stress_rule, status, halted_at, halt_reason, "
-                       "max_weight_pct, max_sector_pct, max_turnover_pct, min_v60, owner_id, label, rule, trend_variant, archived_at, created_at "
+                       "max_weight_pct, max_sector_pct, max_turnover_pct, min_v60, owner_id, label, rule, trend_variant, archived_at, created_at, params "
                        "FROM idx.book WHERE book = %s",
                  (book,), ["book", "cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "strategy", "max_names", "regime_filter", "entry_gate",
                            "take_profit_pct", "trend_exit", "cash_floor_pct", "stress_cash_pct", "stress_rule", "status", "halted_at", "halt_reason",
                            "max_weight_pct", "max_sector_pct", "max_turnover_pct", "min_v60", "owner_id", "label", "rule", "trend_variant", "archived_at",
-                           "created_at"])
+                           "created_at", "params"])
     if rows and rows[0].get("owner_id") is not None:
         rows[0]["owner_id"] = str(rows[0]["owner_id"])
     if not rows:
@@ -145,6 +148,12 @@ def ensure_book(conn: psycopg.Connection, book: str, **fields: Any) -> None:
                         raise ValueError("trend_variant must be 'small' or 'all'")
                 if k == "label":
                     v = (str(v).strip()[:60] or None) if v is not None else None
+                if k == "params":
+                    if isinstance(v, str):
+                        v = json.loads(v) if v.strip() else {}
+                    if not isinstance(v, dict):
+                        raise ValueError("params must be a JSON object")
+                    v = psycopg.types.json.Jsonb(v)
                 cur.execute(f"UPDATE idx.book SET {k} = %s, updated_at = now() WHERE book = %s", (v, book))
     conn.commit()
 
@@ -426,6 +435,20 @@ def mark(conn: psycopg.Connection, book: str, as_of: date | None = None, rebuild
         logger.exception("idx book mark failed")
     runlog.finish(conn, run_id, r)
     return r
+
+
+def capital(conn: psycopg.Connection, book: str) -> Decimal:
+    """What was put into the book, reconstructed from the cash it holds now. Cash only ever moves by a fill
+    (buy -(gross+fee), sell +(gross-fee)) and by a credited dividend, so undoing both gives the starting cash.
+    The first NAV point is NOT the capital: it is already after the first day's fills and marks."""
+    row = _rows(conn, """
+        SELECT b.cash
+             + coalesce((SELECT sum(CASE WHEN f.side = 'buy' THEN f.lots * 100 * f.price + f.fee
+                                         WHEN f.side = 'sell' THEN -(f.lots * 100 * f.price - f.fee) ELSE 0 END)
+                           FROM idx.fill f WHERE f.book = b.book), 0)
+             - coalesce((SELECT sum(n.dividends) FROM idx.book_nav n WHERE n.book = b.book), 0) AS capital
+          FROM idx.book b WHERE b.book = %s""", (book,), ["capital"])
+    return Decimal(row[0]["capital"]) if row and row[0]["capital"] is not None else Decimal(0)
 
 
 def snapshot(conn: psycopg.Connection, book: str) -> dict[str, Any]:

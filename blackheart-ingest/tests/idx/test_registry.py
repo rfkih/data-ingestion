@@ -115,3 +115,19 @@ def test_refresh_import_and_read_round_trip(conn) -> None:
     assert all(s.get("name") for s in det["studies"])
     assert R.detail(conn, "value_strict").get("catalog_history")        # the annual families keep their per-size record
     assert R.detail(conn, "no_such_strategy") is None
+
+
+def test_years_pointer_only_reads_paths_that_exist(conn) -> None:
+    """A per-year row is read from the entry's own study by a declared path - or the entry simply has none."""
+    assert R._dig({"a": {"b": [{"c": 1}]}}, ["a", "b", 0, "c"]) == 1
+    assert R._dig({"a": 1}, ["a", "b"]) is None and R._dig([], [0]) is None and R._dig({}, ["x"]) is None
+    for e in R.REGISTRY:                                    # every declared pointer resolves, or it should not be declared
+        y = R.years_for(conn, e)
+        if e.get("years"):
+            assert y and y["years"], f"{e['key']} declares a years pointer that reads nothing"
+            assert all(1990 < int(k) < 2100 for k in y["years"]), e["key"]
+        else:
+            assert y is None, e["key"]
+    trend = R.years_for(conn, R.BY_KEY["trend_small"])
+    assert trend["source"] == "study #23" and round(trend["years"]["2025"]) == 137     # percent, not a fraction
+    assert R.years_for(conn, R.BY_KEY["value_strict"])["source"] == "research record"
