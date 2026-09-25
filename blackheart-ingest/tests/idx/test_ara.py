@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -119,15 +120,27 @@ def _scored() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_select_rows_top_n_then_every_held_name() -> None:
+def test_select_rows_keeps_every_score_and_marks_the_list() -> None:
+    """Every scored name comes back ranked, so any of them can be looked up later; `listed` is the part the evening
+    list and the push are built from - the top N plus anything a book holds."""
     rows = ara.select_rows(_scored(), {"BBB": ["trend_live"], "DDD": ["live", "paper"]}, top=2)
-    assert [r["code"] for r in rows] == ["AAA", "BBB", "DDD"]
+    assert [r["code"] for r in rows] == ["AAA", "BBB", "CCC", "DDD"]         # the whole ranking, in order
+    assert [r["rank"] for r in rows] == [1, 2, 3, 4]
+    assert [r["listed"] for r in rows] == [True, True, False, True]          # CCC scored but out of the list; DDD held
     assert rows[0]["rank"] == 1 and not rows[0]["held"] and rows[0]["locked_today"] and not rows[0]["buyable"]
     assert rows[0]["p"] == rows[0]["p_lock"] == pytest.approx(0.4) and rows[0]["confidence"] == "high" and rows[0]["p_touch"] == pytest.approx(0.5)
     assert rows[1]["rank"] == 2 and rows[1]["held"] and rows[1]["books"] == ["trend_live"] and rows[1]["confidence"] == "high"
-    assert rows[2]["rank"] is None and rows[2]["held"] and rows[2]["p"] == pytest.approx(0.1)
-    assert rows[2]["confidence"] == "medium"                                 # 0.4 - 3 x 0.1 lands a hair under the 10 % band
-    assert rows[2]["ara_px"] == ara.ara_price(1003.0) and set(rows[0]["features"]) == set(ara.FEATS)
+    assert rows[3]["held"] and rows[3]["p"] == pytest.approx(0.1)
+    assert rows[3]["confidence"] == "medium"                                 # 0.4 - 3 x 0.1 lands a hair under the 10 % band
+    assert rows[3]["ara_px"] == ara.ara_price(1003.0) and set(rows[0]["features"]) == set(ara.FEATS)
+
+
+def test_render_watch_shows_only_the_listed_part() -> None:
+    """A scored name that missed the list must not appear in the evening text, however many are kept behind it."""
+    rows = ara.select_rows(_scored(), {"DDD": ["live"]}, top=2)
+    text = ara.render_watch(rows, date(2026, 9, 24), 0.0055)
+    assert "AAA" in text and "BBB" in text and "DDD" in text
+    assert "CCC" not in text
 
 
 def test_watch_and_touch_texts_carry_the_facts_and_no_directive_words() -> None:

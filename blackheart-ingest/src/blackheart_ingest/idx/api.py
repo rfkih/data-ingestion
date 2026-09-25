@@ -975,6 +975,17 @@ def make_router(require_token) -> APIRouter:
         with get_connection() as conn:
             return ara.latest_watch(conn)
 
+    @router.get("/ara/name/{code}")
+    def ara_name(code: str) -> dict[str, Any]:
+        """One name's newest ARA score, whether or not it made the evening list: {code, run_date, bar_date, rank, of,
+        listed, p_lock, p_touch, p_dl, confidence, prev_close, ara_px, locked_today, buyable, held, books, model}."""
+        from . import ara
+        with get_connection() as conn:
+            row = ara.name_watch(conn, code)
+        if not row:
+            raise HTTPException(status_code=404, detail=f"no ARA score on file for {code.upper()}")
+        return _plain(row)
+
     @router.get("/ara/touch")
     def ara_touch(as_of: str | None = None, c: Caller = _CALLER) -> dict[str, Any]:
         """Today's touches of the ARA limit among held/watched names, with the state the feed last saw (locked / sellers

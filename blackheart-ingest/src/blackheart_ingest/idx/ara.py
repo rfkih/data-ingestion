@@ -94,9 +94,9 @@ def _f(v: Any) -> float | None:
     return x if np.isfinite(x) else None
 
 
-def _row(r: Any, rank: int | None, held: dict[str, list[str]]) -> dict[str, Any]:
+def _row(r: Any, rank: int | None, held: dict[str, list[str]], listed: bool = True) -> dict[str, Any]:
     p_lock = float(r.p_lock)
-    return {"code": r.code, "rank": rank, "p": p_lock, "p_lock": p_lock, "p_touch": _f(getattr(r, "p_touch", None)), "p_dl": _f(getattr(r, "p_dl", None)),
+    return {"code": r.code, "rank": rank, "listed": listed, "p": p_lock, "p_lock": p_lock, "p_touch": _f(getattr(r, "p_touch", None)), "p_dl": _f(getattr(r, "p_dl", None)),
             "score": _f(getattr(r, "score", p_lock)), "prev_close": float(r.close), "ara_px": float(r.ara_px_next),
             "locked_today": bool(getattr(r, "locked_today", False)), "buyable": bool(getattr(r, "buyable", True)),
             "confidence": ara_model.confidence(p_lock), "held": r.code in held, "books": held.get(r.code, []),
@@ -104,23 +104,19 @@ def _row(r: Any, rank: int | None, held: dict[str, list[str]]) -> dict[str, Any]
 
 
 def select_rows(scored: pd.DataFrame, held: dict[str, list[str]], top: int = TOP_N) -> list[dict[str, Any]]:
-    """The top-N by score, then every held name not already in it (rank NULL). Pure, for the tests. ``scored`` needs
-    code, close, ara_px_next, p_lock and is read in its given order (score_last sorts by the ENS score)."""
-    out, seen = [], set()
-    for rank, r in enumerate(scored.head(top).itertuples(), start=1):
-        out.append(_row(r, rank, held))
-        seen.add(r.code)
-    by_code = {r.code: r for r in scored.itertuples()}
-    for code in sorted(held):
-        if code in seen or code not in by_code:
-            continue
-        out.append(_row(by_code[code], None, held))
+    """Every scored name in ranking order, with ``listed`` true for the top-N and for anything a book holds. The list,
+    the push and the screens read the listed part; the rest is kept so a person can ask about any name. Pure, for the
+    tests. ``scored`` needs code, close, ara_px_next, p_lock and is read in its given order (score_last sorts by ENS)."""
+    out = []
+    for rank, r in enumerate(scored.itertuples(), start=1):
+        out.append(_row(r, rank, held, listed=rank <= top or r.code in held))
     return out
 
 
 def render_watch(rows: list[dict[str, Any]], bar_date: date, base_rate: float) -> str:
-    top = [r for r in rows if r["rank"]]
-    hold = [r for r in rows if r["held"]]
+    listed = [r for r in rows if r.get("listed", True)]
+    top = [r for r in listed if r["rank"] and not r["held"]]
+    hold = [r for r in listed if r["held"]]
 
     def line(r: dict[str, Any]) -> str:
         touch = f", sentuh {r['p_touch'] * 100:.0f} %" if r.get("p_touch") is not None else ""
@@ -147,17 +143,18 @@ def watch(conn: psycopg.Connection, top: int = TOP_N, notify: bool = True, run_d
     with conn.cursor() as cur:
         cur.execute("DELETE FROM idx.ara_watch WHERE run_date = %s", (run_date,))
         for r in rows:
-            cur.execute("""INSERT INTO idx.ara_watch (run_date, bar_date, code, rank, p, p_lock, p_touch, p_dl, score, prev_close, ara_px, held, books,
+            cur.execute("""INSERT INTO idx.ara_watch (run_date, bar_date, code, rank, listed, p, p_lock, p_touch, p_dl, score, prev_close, ara_px, held, books,
                                                       locked_today, buyable, confidence, model, features)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)""",
-                        (run_date, info["bar_date"], r["code"], r["rank"], round(r["p"], 5), round(r["p_lock"], 5),
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)""",
+                        (run_date, info["bar_date"], r["code"], r["rank"], r.get("listed", True), round(r["p"], 5), round(r["p_lock"], 5),
                          None if r["p_touch"] is None else round(r["p_touch"], 5), None if r["p_dl"] is None else round(r["p_dl"], 5),
                          None if r["score"] is None else round(r["score"], 6), r["prev_close"], r["ara_px"], r["held"], r["books"],
                          r["locked_today"], r["buyable"], r["confidence"], info["model"], pd.Series(r["features"], dtype=object).to_json()))
     conn.commit()
     text = render_watch(rows, info["bar_date"], info.get("base_rate", 0.0055))
     if notify:
-        runlog.alert_once(conn, "info", "ara", f"ARA watch {run_date}: " + ", ".join(f"{r['code']} {r['p'] * 100:.0f} %" for r in rows if r["rank"]))
+        runlog.alert_once(conn, "info", "ara", f"ARA watch {run_date}: "
+                          + ", ".join(f"{r['code']} {r['p'] * 100:.0f} %" for r in rows if r.get("listed", True) and r["rank"] and not r["held"]))
         try:
             from . import notify as nf
             nf.send(text, title=f"ARA watch {run_date:%d %b}", data={"route": "/m/ara", "kind": "ara"})
@@ -187,7 +184,8 @@ def latest_watch(conn: psycopg.Connection) -> dict[str, Any]:
         if d is None:
             return {"run_date": None, "rows": [], "facts": ara_model.FACTS}
         cur.execute("""SELECT run_date, bar_date, code, rank, p, p_lock, p_touch, p_dl, score, prev_close, ara_px, held, books, locked_today, buyable,
-                              confidence, model, features FROM idx.ara_watch WHERE run_date = %s ORDER BY rank NULLS LAST, score DESC NULLS LAST, p DESC""", (d,))
+                              confidence, model, features FROM idx.ara_watch WHERE run_date = %s AND (listed OR held)
+                        ORDER BY rank NULLS LAST, score DESC NULLS LAST, p DESC""", (d,))
         rows = [dict(r) for r in cur.fetchall()]
     for r in rows:                                                          # rows written before 0036 carry only p
         if r.get("p_lock") is None:
@@ -196,6 +194,27 @@ def latest_watch(conn: psycopg.Connection) -> dict[str, Any]:
             r["confidence"] = ara_model.confidence(float(r["p_lock"]))
     cov = coverage(conn, rows[0]["bar_date"] if rows and rows[0].get("bar_date") else d)
     return {"run_date": d, "rows": rows, "facts": ara_model.FACTS, "coverage": {**cov, "shown": len(rows)}}
+
+
+def name_watch(conn: psycopg.Connection, code: str) -> dict[str, Any] | None:
+    """The newest ARA score for one name, listed or not: what the model thought of it and where it sat in the ranking."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("""SELECT run_date, bar_date, code, rank, listed, p, p_lock, p_touch, p_dl, score, prev_close, ara_px, held, books,
+                              locked_today, buyable, confidence, model, features
+                         FROM idx.ara_watch WHERE code = %s ORDER BY run_date DESC LIMIT 1""", (code.upper(),))
+        r = cur.fetchone()
+    if not r:
+        return None
+    row = dict(r)
+    if row.get("p_lock") is None:
+        row["p_lock"] = row["p"]
+    if row.get("confidence") is None:
+        row["confidence"] = ara_model.confidence(float(row["p_lock"]))
+    with conn.cursor(row_factory=dict_row) as cur:                          # how many names it was ranked against
+        cur.execute("SELECT count(*) AS n FROM idx.ara_watch WHERE run_date = %s", (row["run_date"],))
+        n = cur.fetchone()
+    row["of"] = int(n["n"]) if n else None
+    return row
 
 
 # ---- the intraday state ----------------------------------------------------------------------------------------------
