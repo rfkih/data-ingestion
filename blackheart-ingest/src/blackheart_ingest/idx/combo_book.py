@@ -55,7 +55,12 @@ DEFAULTS: dict[str, Any] = {
            # confirmation rules [threshold, trading days]; None = the single rule (confirm, confirm_days). ML-8 (#175) ens4 =
            # [[0.05, 10], [0.08, 10], [0.10, 10], [0.08, 5]]: each rule watches its own level with an equal share of the ML slot.
            "confirm_rules": None},
+    # participation cap: a new buy may not exceed this share of the name's 20-day mean traded value (FE-2 #198: square-root impact
+    # makes the trend sleeve lose 25 % of its return near Rp 10 B without it). None = uncapped (ML: a cap cost more in skipped
+    # signals than it saved). The gap sleeve keeps its own, tighter cap: 1 % of the 60-day median value (gapfade.PARTICIPATION).
+    "adv_cap": {"trend": 0.05, "ml": None},
 }
+ADV_DAYS = 20
 # the strategy catalog the app shows (name, one-liner, rhythm line) - the same three sleeves the runner knows
 CATALOG: dict[str, dict[str, str]] = {
     "gap": {"name": "Gap fade", "one": "Buys main-board names that open 7 % or more under the previous close and sells into the same close.",
@@ -102,6 +107,10 @@ def settings(b: dict[str, Any]) -> dict[str, Any]:
            "cash_floor": float(p.get("cash_floor") if p.get("cash_floor") is not None else DEFAULTS["cash_floor"])}
     if not 0 <= out["cash_floor"] <= 0.9:
         raise ValueError(f"cash_floor {out['cash_floor']} must be within [0, 0.9]")
+    out["adv_cap"] = {**DEFAULTS["adv_cap"], **(p.get("adv_cap") or {})}
+    for k, v in out["adv_cap"].items():
+        if v is not None and not 0 < float(v) <= 1:
+            raise ValueError(f"adv_cap {k}={v} must be None or within (0, 1]")
     m = out["ml"]
     rules = m.get("confirm_rules") or [[m["confirm"], m["confirm_days"]]]
     rules = [(float(thr), int(days)) for thr, days in rules]
@@ -257,6 +266,24 @@ def trading_days_between(conn: psycopg.Connection, a: date, b_: date) -> int:
 
 
 # ---------------------------------------------------------------------------------------------------------------- the plan (pure core)
+def adv_capped(budget: Decimal, adv: Decimal | None, cap: float | None) -> Decimal:
+    """Pure. The budget, or cap x ADV20 when that is smaller. No ADV (a name with no traded value yet) leaves it alone."""
+    if cap is None or adv is None or adv <= 0:
+        return budget
+    return min(budget, Decimal(str(cap)) * adv)
+
+
+def adv20(conn: psycopg.Connection, codes: list[str], upto: date) -> dict[str, Decimal]:
+    """Mean traded value (Rp) of each name's last ADV_DAYS sessions up to and including ``upto``."""
+    if not codes:
+        return {}
+    rows = _rows(conn, """SELECT code, avg(value) AS adv FROM (
+                            SELECT code, value, row_number() OVER (PARTITION BY code ORDER BY trade_date DESC) AS k
+                              FROM idx.daily_summary WHERE code = ANY(%s) AND trade_date <= %s AND trade_date > %s::date - 60) x
+                          WHERE k <= %s GROUP BY code""", (sorted(codes), upto, upto, ADV_DAYS), ["code", "adv"])
+    return {r["code"]: Decimal(str(r["adv"])) for r in rows if r["adv"] is not None}
+
+
 def size_line(code: str, side: str, ref: Decimal, lots: Decimal | None, slot: Decimal, cash_left: Decimal, fee: Decimal, nav: Decimal,
               reason: str, flags: list[str]) -> dict[str, Any] | None:
     lp = ticket.limit_price(ref, side)
@@ -276,9 +303,10 @@ def size_line(code: str, side: str, ref: Decimal, lots: Decimal | None, slot: De
 
 def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, pos: dict[str, dict[str, dict[str, Any]]], closes_raw: dict[str, Decimal],
             trend_entries: list[dict[str, Any]], trend_exits: list[dict[str, Any]], ml: pd.DataFrame, ml_age: dict[str, int], open_codes: set[str],
-            pending_watch: set[str], d: date) -> dict[str, Any]:
+            pending_watch: set[str], d: date, adv: dict[str, Decimal] | None = None) -> dict[str, Any]:
     """Pure. Tomorrow's lines and tonight's new ML watches from what the sleeves say.
-    Sells: trend exits (trail-10 / no bar) and ML exits (swap / expiry / no score). Buys: trend entries at trend_pct x NAV.
+    Sells: trend exits (trail-10 / no bar) and ML exits (swap / expiry / no score). Buys: trend entries at trend_pct x NAV,
+    never above adv_cap['trend'] x the name's ADV20 (``adv``).
     Watches: ML candidates (e > margin x rt) up to the free slots, to be bought on confirmation."""
     fee_b, fee_s = Decimal(b["fee_buy_pct"]) / 100, Decimal(b["fee_sell_pct"]) / 100
     m = S["ml"]
@@ -328,8 +356,10 @@ def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, p
         c = e["code"]
         if c in held or c in exiting or c in open_codes or c in pending_watch or c not in closes_raw:
             continue
-        ln = size_line(c, "buy", closes_raw[c], None, slot_t, cash_after, fee_b, nav,
-                       f"trend: 60-day high di atas MA200, volume {e['vol_ratio']}x", ["sleeve:trend", "trend:entry", f"vol:{e['vol_ratio']}x"])
+        budget = adv_capped(slot_t, (adv or {}).get(c), S["adv_cap"].get("trend"))
+        ln = size_line(c, "buy", closes_raw[c], None, budget, cash_after, fee_b, nav,
+                       f"trend: 60-day high di atas MA200, volume {e['vol_ratio']}x",
+                       ["sleeve:trend", "trend:entry", f"vol:{e['vol_ratio']}x"] + (["capped:adv20"] if budget < slot_t else []))
         if ln is None:
             continue
         if not invested_ok(nav, cash_after, ln["notional"] * (1 + fee_b), S["cash_floor"]):
@@ -410,7 +440,8 @@ def build(conn: psycopg.Connection, book: str, d: date | None = None) -> dict[st
     # ML sleeve
     ml = ml_scores(conn, b, d, S)
     ml_age = {c: trading_days_between(conn, p["entry_date"], d) for c, p in pos["ml"].items() if p.get("entry_date")}
-    res = compose(b, S, nav, cash, pos, raw, entries, trend_exits, ml, ml_age, open_codes, watching, d)
+    adv = adv20(conn, [e["code"] for e in entries], d) if S["adv_cap"].get("trend") is not None else None
+    res = compose(b, S, nav, cash, pos, raw, entries, trend_exits, ml, ml_age, open_codes, watching, d, adv)
     res.update({"book": book, "mode": MODE, "run_date": d, "ticket_date": d, "strategy": "combo", "size": S["slots"], "weights": {},
                 "held_back": held_back, "regime": {"index": regime["index_code"], "on": bool(regime["on"]), "close": str(regime["close"]),
                                                    "sma": str(regime["sma"]) if regime.get("sma") is not None else None},
@@ -542,6 +573,8 @@ def confirm(conn: psycopg.Connection, book: str, actor: str = "scheduler", now: 
         n_open = len(held_codes(pos)) + len(_open_lines(conn, book))
         fee_b = Decimal(b["fee_buy_pct"]) / 100
         slot = Decimal(str(S["sleeves"]["ml"])) * nav
+        ml_cap = S["adv_cap"].get("ml")
+        adv = adv20(conn, [w["code"] for w in hits], d - timedelta(days=1)) if ml_cap is not None else {}
         for w in hits:
             frac = Decimal(str(w.get("size_frac") or 1))
             held_ml = pos["ml"].get(w["code"])
@@ -562,6 +595,7 @@ def confirm(conn: psycopg.Connection, book: str, actor: str = "scheduler", now: 
                 if budget <= 0:
                     _set_watch(conn, w["id"], "triggered", trigger_price=last, note="share already filled by an earlier rule")
                     continue
+            budget = adv_capped(budget, adv.get(w["code"]), ml_cap)
             ln = size_line(w["code"], "buy", last, None, budget, cash, fee_b, nav,
                            f"ML konfirmasi {w.get('rule') or ''}: harga {float(last):,.0f} >= level {float(w['level_price']):,.0f} (sinyal {w['signal_date']:%d %b}, "
                            f"ekspektasi {float(w['e_bps']):+.0f} bps)", ["sleeve:ml", "ml:entry", f"level:{float(w['level_price']):.0f}", f"rule:{w.get('rule') or '+5/10'}"])

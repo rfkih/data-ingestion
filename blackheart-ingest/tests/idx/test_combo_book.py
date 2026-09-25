@@ -117,6 +117,30 @@ def test_cash_floor_holds_back_new_buys() -> None:
     assert [ln["code"] for ln in res["lines"]] == ["AAAA"] and res["floor_held"] == []
 
 
+def test_adv_cap_limits_trend_buys_to_a_share_of_adv20() -> None:
+    assert cb.adv_capped(Decimal(100), Decimal(1000), 0.05) == Decimal(50)
+    assert cb.adv_capped(Decimal(100), Decimal(10_000), 0.05) == Decimal(100)          # the slot binds first
+    assert cb.adv_capped(Decimal(100), None, 0.05) == Decimal(100)                     # no ADV: leave the slot alone
+    assert cb.adv_capped(Decimal(100), Decimal(1000), None) == Decimal(100)            # cap off (the ML default)
+    S = cb.settings({"params": {}})
+    assert S["adv_cap"] == {"trend": 0.05, "ml": None}
+    with pytest.raises(ValueError):
+        cb.settings({"params": {"adv_cap": {"trend": 1.5}}})
+    pos = {"gap": {}, "trend": {}, "ml": {}, "manual": {}}
+    ml = _ml([])
+    entry = [{"code": "AAAA", "vol_ratio": 2.0}]
+    # NAV 2 B -> trend slot 100 M; AAAA trades 1 B a day -> 5 % = 50 M: the line is cut to the cap and flagged
+    res = cb.compose(BOOK, S, Decimal(2_000_000_000), Decimal(2_000_000_000), pos, {"AAAA": Decimal(500)}, entry, [], ml, {}, set(), set(),
+                     date(2026, 9, 25), {"AAAA": Decimal(1_000_000_000)})
+    (ln,) = res["lines"]
+    assert ln["notional"] <= Decimal(50_000_000) and ln["notional"] > Decimal(49_000_000) and "capped:adv20" in ln["flags"]
+    # Rp 20 M book, same name: the 1 M slot is far under the cap -> sized by the slot, no flag
+    res = cb.compose(BOOK, S, Decimal(20_000_000), Decimal(20_000_000), pos, {"AAAA": Decimal(500)}, entry, [], ml, {}, set(), set(),
+                     date(2026, 9, 25), {"AAAA": Decimal(1_000_000_000)})
+    (ln,) = res["lines"]
+    assert ln["notional"] <= Decimal(1_000_000) and "capped:adv20" not in ln["flags"]
+
+
 def test_compose_skips_names_already_held_open_or_watched() -> None:
     S = cb.settings({"params": {}})
     pos = {"gap": {}, "trend": {}, "ml": {"CCCC": {"lots": Decimal(1), "entry_date": date(2026, 9, 20), "entry_price": Decimal(300)}}, "manual": {}}
