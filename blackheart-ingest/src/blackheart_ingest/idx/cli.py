@@ -477,6 +477,12 @@ def cmd_evidence(a: argparse.Namespace) -> int:
 
 def cmd_macro(a: argparse.Namespace) -> int:
     from . import macro
+    if a.sub == "bps-find":
+        rows = macro.bps_find(a.keys or "inflasi")
+        for r in rows:
+            print(f"  var {r['var_id']!s:>6}  {r['title']}  [{r.get('unit') or ''}] {r.get('subject') or ''}")
+        print(f"{len(rows)} variable(s); put the national monthly y-on-y one into macro.BPS_INFLATION_VAR")
+        return 0
     with get_connection() as conn:
         if a.sub == "pull":
             r = macro.pull(conn, keys=a.keys.split(",") if a.keys else None, full=a.full)
@@ -1282,6 +1288,14 @@ def cmd_combo(a: argparse.Namespace) -> int:
                         p["sleeves"][k] = float(v)
                 if a.slots:
                     p["slots"] = int(a.slots)
+                if a.cash_floor is not None:
+                    p["cash_floor"] = float(a.cash_floor)
+                if a.ml_confirm is not None:                                  # "5/10,8/10,10/10,8/5" -> [[0.05, 10], ...]; "single" -> the one rule
+                    p.setdefault("ml", {})
+                    if a.ml_confirm.strip().lower() in ("single", "none", "off"):
+                        p["ml"]["confirm_rules"] = None
+                    else:
+                        p["ml"]["confirm_rules"] = [[float(x.split("/")[0]) / 100, int(x.split("/")[1])] for x in a.ml_confirm.split(",") if x.strip()]
                 cb.settings({"params": p})
                 bkm.ensure_book(conn, bkid, params=p)
                 print(bkid, _json.dumps(p))
@@ -1470,9 +1484,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--study", type=int, help="study id to attach the evidence to")
     p.add_argument("--limit", type=int)
     p.set_defaults(fn=cmd_evidence)
-    p = sub.add_parser("macro", help="macro series: pull [--keys a,b] [--full] | show")
-    p.add_argument("sub", choices=["pull", "show"])
-    p.add_argument("--keys", help="comma list of series keys (default all)")
+    p = sub.add_parser("macro", help="macro series: pull [--keys a,b] [--full] | show | bps-find [--keys KEYWORD]")
+    p.add_argument("sub", choices=["pull", "show", "bps-find"])
+    p.add_argument("--keys", help="comma list of series keys (default all); for bps-find: the keyword (default 'inflasi')")
     p.add_argument("--full", action="store_true", help="reload from 2005")
     p.set_defaults(fn=cmd_macro)
     p = sub.add_parser("overlay", help="book overlays: status | check [--as-of D] [--dry-run] (regime filter, entry gate)")
@@ -1620,6 +1634,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ml", type=float)
     p.add_argument("--gap", type=float)
     p.add_argument("--slots", type=int)
+    p.add_argument("--cash-floor", type=float, help="set: share of NAV kept in cash, e.g. 0.30 (menu 34); 0 = off")
+    p.add_argument("--ml-confirm", help="set: confirmation rules 'pct/days,...' e.g. '5/10,8/10,10/10,8/5' (ML-8 ens4), or 'single'")
     p.add_argument("--as-of")
     p.set_defaults(fn=cmd_combo)
     p = sub.add_parser("scores", help="public factor scores (spec §04): build [--as-of D] | show [--code X] [--as-of D] | stats [--refresh] [--criteria C]")
