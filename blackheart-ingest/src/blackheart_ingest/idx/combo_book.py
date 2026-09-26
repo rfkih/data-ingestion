@@ -140,9 +140,20 @@ def settings(b: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def strategy_pages() -> dict[str, str]:
+    """Sleeve -> the Strategies page that documents it (the page content names its sleeve), so a portfolio links to it."""
+    from .strategy_page_content import PAGES
+    return {p["sleeve"]: key for key, p in PAGES.items() if p.get("sleeve")}
+
+
+BOOK_PAGE = "combo_live"                                                # the page for the combined book as a whole
+
+
 def strategies_view(conn: psycopg.Connection, book: str) -> dict[str, Any]:
-    """What the app's Strategies panel and catalog need for one book: each sleeve with size, on/off, open positions."""
+    """What the app's Strategies panel and catalog need for one book: each sleeve with size, on/off, open positions, and
+    the Strategies page that documents it."""
     b = bk.get_book(conn, book)
+    pages = strategy_pages()
     S = settings(b)
     pos = sleeve_positions(conn, book)
     sleeves = []
@@ -150,9 +161,11 @@ def strategies_view(conn: psycopg.Connection, book: str) -> dict[str, Any]:
         if k not in S["sizes"] or (k not in (b.get("params") or {}).get("sleeves", {}) and b.get("rule") != "combo"):
             continue
         sleeves.append({"k": k, **CATALOG.get(k, {"name": k, "one": "", "line": ""}), "size": S["sizes"][k], "on": k not in S["off"],
-                        "open": sorted(pos.get(k, {})), "backtest": BACKTEST.get(k)})
+                        "open": sorted(pos.get(k, {})), "backtest": BACKTEST.get(k), "page": pages.get(k)})
     return {"book": book, "rule": b.get("rule"), "slots": S["slots"], "params": b.get("params") or {}, "sleeves": sleeves,
-            "catalog": [{"k": k, **v, "backtest": BACKTEST.get(k), "default_size": DEFAULTS["sleeves"].get(k, 0.05)} for k, v in CATALOG.items()],
+            "page": BOOK_PAGE if b.get("rule") == "combo" else None,
+            "catalog": [{"k": k, **v, "backtest": BACKTEST.get(k), "default_size": DEFAULTS["sleeves"].get(k, 0.05), "page": pages.get(k)}
+                        for k, v in CATALOG.items()],
             "positions": len(held_codes(pos))}
 
 
