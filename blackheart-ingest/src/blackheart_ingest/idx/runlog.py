@@ -87,17 +87,19 @@ def alert(conn: psycopg.Connection, severity: str, job: str | None, message: str
                                kind = EXCLUDED.kind, strategy = EXCLUDED.strategy, code = EXCLUDED.code,
                                book = EXCLUDED.book, user_id = EXCLUDED.user_id, valid_until = EXCLUDED.valid_until,
                                payload = EXCLUDED.payload, ts = now()
-                           RETURNING id""", tuple(cols[n] for n in names))
+                           RETURNING id, (xmax = 0) AS inserted""", tuple(cols[n] for n in names))
         else:
             cur.execute(f"""INSERT INTO idx.alert ({', '.join(names)}) VALUES ({', '.join(['%s'] * len(names))})
-                            RETURNING id""", tuple(cols[n] for n in names))
+                            RETURNING id, true AS inserted""", tuple(cols[n] for n in names))
         row = cur.fetchone()
-        alert_id = int(next(iter(row.values())) if isinstance(row, dict) else row[0])
+        vals = list(row.values()) if isinstance(row, dict) else list(row)
+        alert_id, inserted = int(vals[0]), bool(vals[1])
     conn.commit()
     level = {"critical": logging.CRITICAL, "warning": logging.WARNING}.get(severity, logging.INFO)
     logger.log(level, "idx alert [%s] %s: %s", severity, job, message)      # an info row is a diary line, not a warning
-    if notify_channels:
-        try:                                                               # warning/critical also go out (Telegram), best effort
+    # a dedupe_key UPDATE is the same incident still true: it refreshes what the screens show, it does not buzz again
+    if notify_channels and inserted:
+        try:                                                               # idx/alert_policy decides what reaches a phone
             from . import notify
             notify.on_alert(severity, job, message, kind=kind, strategy=strategy, book=book, user_id=user_id)
         except Exception:                                                  # a notification must never fail the job
@@ -189,7 +191,8 @@ def open_alerts(conn: psycopg.Connection, limit: int = 50, *, kind: str | None =
         cur.execute(f"SELECT {', '.join(ALERT_COLS)} FROM idx.alert WHERE {' AND '.join(where)} "
                     f"ORDER BY ts DESC LIMIT %s", params)
         rows = cur.fetchall()
-    return [r if isinstance(r, dict) else dict(zip(ALERT_COLS, r, strict=True)) for r in rows]
+    from .alert_policy import tag
+    return [tag(dict(r) if isinstance(r, dict) else dict(zip(ALERT_COLS, r, strict=True))) for r in rows]
 
 
 def acknowledge(conn: psycopg.Connection, alert_id: int) -> bool:

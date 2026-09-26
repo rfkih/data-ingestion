@@ -84,8 +84,11 @@ def make_router(require_token) -> APIRouter:
                 active = dict(cur.fetchone())["n"]
                 cur.execute("SELECT count(*) AS n FROM idx.bronze_index")
                 bronze_n = dict(cur.fetchone())["n"]
-            alerts = [a for a in runlog.open_alerts(conn) if mine is None or _alert_book(a) is None or _alert_book(a) in mine]
+            everything = [a for a in runlog.open_alerts(conn, 200) if mine is None or _alert_book(a) is None or _alert_book(a) in mine]
+            # the panel shows only what needs a person (idx/alert_policy); the rest stays on /idx/alerts
+            alerts = [a for a in everything if a.get("actionable")][:50]
         return {
+            "quiet_alerts": len(everything) - len([a for a in everything if a.get("actionable")]),
             "now": datetime.now(UTC).isoformat(),
             "last_bar_date": last_bar.isoformat() if last_bar else None,
             "daily_summary": {"rows": ds["n"], "last": ds["last"].isoformat() if ds["last"] else None},

@@ -148,9 +148,11 @@ def on_alert(severity: str, job: str | None, message: str, *, sender: Sender | N
     An execution read is never pushed - it is true for fifteen seconds, which is useless as a notification and would
     buzz a pocket every five seconds through the open - and the person's own mutes and quiet hours are honoured here,
     at the channel, never by dropping the row from the bus."""
-    if severity not in PUSH_SEVERITIES or not configured():
+    if not configured():
         return False
-    if kind == "exec":                                                     # by design: the stream carries these, not a phone
+    from .alert_policy import push_now  # stock actions + system errors that need a person
+    if not push_now({"severity": severity, "job": job, "message": message, "kind": kind, "strategy": strategy}):
+        logger.info("idx notify: not actionable, not pushed: [%s] %s", severity, job)
         return False
     if book is None and job and job.split(":", 1)[0] in ("book", "ticket") and ":" in job:
         book = job.split(":", 1)[1]

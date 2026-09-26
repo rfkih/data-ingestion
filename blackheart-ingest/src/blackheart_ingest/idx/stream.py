@@ -53,7 +53,9 @@ def _jsonable(v: Any) -> Any:
 
 
 def row_json(row: dict[str, Any]) -> str:
-    return json.dumps({k: _jsonable(v) for k, v in row.items()}, default=str)
+    """One alert row for the browser, with ``actionable`` (idx/alert_policy) so a page shows only what needs a person."""
+    from .alert_policy import tag
+    return json.dumps({k: _jsonable(v) for k, v in tag(dict(row)).items()}, default=str)
 
 
 def sse(event: str, data: str, *, event_id: int | None = None) -> str:

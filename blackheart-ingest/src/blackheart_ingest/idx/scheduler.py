@@ -303,7 +303,9 @@ def run_feed_watch() -> None:
         if h.ok:
             runlog.resolve(conn, "feed", like="%: DOWN -%")                 # back up: close the incident, do not wait for a human
         else:
-            runlog.alert_once(conn, "warning", "feed", f"{h.summary} - check the 'Blackheart IDX feed' task or Blackridge > More > Brokers")
+            # one row per outage (dedupe_key): the summary's "last frame Ns ago" changes every check and pushed 12 times in an hour
+            runlog.alert_once(conn, "warning", "feed", f"{h.summary} - check the 'Blackheart IDX feed' task or Blackridge > More > Brokers",
+                              dedupe_key="feed:down")
         problem = registry.provenance_problem(registry.streaming_provider(conn), pinned)
         if problem:                                                         # the tables are being filled by the OTHER provider
             runlog.alert_once(conn, "critical", "feed", problem)             # every 5 min: once per incident, not per check
@@ -506,6 +508,25 @@ def run_ticket_nudge() -> None:
         notify.send(text, title="Tiket terbuka" if new else "Tiket masih terbuka", data={"screen": "ticket"})
 
 
+def run_ops_digest() -> None:
+    """20:20: one push listing the background jobs that FAILED and are still open after the scheduler's own retries (the
+    daily chain retries to 20:00). A failure that healed itself was resolved and never reaches a phone
+    (idx/alert_policy.deferred); one that did not is a system error a person has to fix."""
+    from . import alert_policy, notify
+    d = today_wib()
+    if d.weekday() >= 5:
+        return
+    with get_connection() as conn:
+        rows = [a for a in runlog.open_alerts(conn, 200) if alert_policy.deferred(a)]
+    if not rows:
+        return
+    lines = [f"- {a['job']}: {str(a['message'])[:140]}" for a in rows[:8]]
+    more = [f"(+{len(rows) - 8} lagi di Blackridge)"] if len(rows) > 8 else []
+    notify.send("\n".join([f"{len(rows)} job gagal dan belum pulih - perlu dicek:", *lines, *more]),
+                title="Error sistem", data={"route": "/m/notifications", "kind": "ops"})
+    logger.info("idx ops digest: %d open failure(s) pushed", len(rows))
+
+
 def run_track_report() -> None:
     """The evening "is it proven yet?" scorecard for every book that has a research profile (trend, gapfade).
 
@@ -513,7 +534,6 @@ def run_track_report() -> None:
     progress towards that bar once a day so the decision is made on a number, not on the memory of the last few trades.
     Read-only, and silent when nothing has a profile yet."""
     from . import book as bk
-    from . import notify
     from . import track as tk
     d = today_wib()
     if d.weekday() >= 5:
@@ -524,9 +544,9 @@ def run_track_report() -> None:
         if not books:
             return
         blocks = [tk.render(tk.scorecard(conn, b)) for b in books]
-    text = "\n\n".join(blocks)
-    logger.info("idx track: %d book(s)", len(blocks))
-    notify.send(text, title=f"Track record {d:%d %b}")
+    # logged, not pushed (operator 2026-09-26: notifications only for stock actions and errors that need a person); the
+    # scorecard is on the book pages and in `idx track`
+    logger.info("idx track: %d book(s)\n%s", len(blocks), "\n\n".join(blocks))
 
 
 def run_feed_symbols() -> None:
@@ -1119,6 +1139,7 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_ara_touch, IntervalTrigger(minutes=2), id="ara_touch")
     s.add_job(run_feed_audit, CronTrigger(day_of_week="mon-fri", hour=20, minute=10, timezone=WIB), id="feed_audit")
     # after the daily chain has marked the books, before the 20:45 nightly agent run
+    s.add_job(run_ops_digest, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="ops_digest")
     s.add_job(run_track_report, CronTrigger(day_of_week="mon-fri", hour=20, minute=20, timezone=WIB), id="track_report")
     # mid-session and before the close: a ticket drafted this morning can still be worked today
     s.add_job(run_ticket_nudge, CronTrigger(day_of_week="mon-fri", hour="10,14", minute=30, timezone=WIB), id="ticket_nudge")

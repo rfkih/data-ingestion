@@ -538,7 +538,10 @@ def plan(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date 
                 out["status"] = "issued"
         journal.record(conn, book, actor, "note", ticket_id=out["ticket"], rationale=f"combo plan {d}: {out['lines']} line(s), {len(watches)} watch(es)",
                        refs={"watches": [w["code"] for w in watches], "regime": res.get("regime"), "ml_scored": res["ml_scored"]})
-        _notify(conn, book, text)
+        # push only when there is something to execute tomorrow on a real book (operator 2026-09-26): an ML watch is not an
+        # action yet - its KONFIRMASI push comes when the price confirms; a paper book needs nobody
+        if res["lines"] and ticket.is_live(book):
+            _notify(conn, book, text)
     return out
 
 
@@ -781,7 +784,10 @@ def preopen_text(conn: psycopg.Connection, book: str, d: date | None = None) -> 
 
 def preopen(conn: psycopg.Connection, book: str, d: date | None = None) -> str:
     text = preopen_text(conn, book, d)
-    _notify(conn, book, text)
+    # the 08:30 reminder buzzes only when a line must be worked at the open (an open ticket line, a gap-fade leftover to
+    # sell) on a real book - "nothing scheduled" and a list of ML watches are not actions (operator 2026-09-26)
+    if ticket.is_live(book) and ("Ticket #" in text or "Sisa posisi gap-fade" in text):
+        _notify(conn, book, text)
     return text
 
 

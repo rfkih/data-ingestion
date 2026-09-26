@@ -650,8 +650,8 @@ class Collector:
                 self.reconnects += 1
                 delay = min(30.0, 2 ** min(self.fails, 5))
                 self.set_state("reconnecting", f"after {why}: attempt {self.fails} in {delay:.0f}s")
-                if self.fails == 5:
-                    notify.send(f"IDX feed: 5 reconnects in a row (last: {why}); still trying.", title="IDX feed")
+                if self.fails == 5:                                        # logged, not pushed: still self-healing; if it
+                    logger.warning("feed: 5 reconnects in a row (last: %s); still trying", why)  # stays down, feed_watch alerts
                 await self._sleep(delay)
         finally:
             self.stop.set()
