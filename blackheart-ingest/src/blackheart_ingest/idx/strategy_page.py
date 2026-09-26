@@ -660,7 +660,7 @@ def results(conn: psycopg.Connection, key: str) -> dict[str, Any]:
         # the trades imported from the run that currently stands for the cited study (a re-run imports under its own id)
         cur_bt = _q(conn, "SELECT current_id FROM idx.study_current WHERE id = %s", (bt["study"],))
         bt_id = cur_bt[0]["current_id"] if cur_bt else bt["study"]
-        rows = _q(conn, """SELECT code, d_in, d_out, cost, pnl, exit_reason, entry_price, exit_price FROM idx.strategy_backtest_trade
+        rows = _q(conn, """SELECT code, d_in, d_out, cost, pnl, exit_reason, entry_price, exit_price, leg FROM idx.strategy_backtest_trade
                             WHERE strategy = %s AND study_id = %s ORDER BY d_out, seq""", (key, bt_id))
         if rows:
             summ = _q(conn, "SELECT summary FROM idx.study WHERE id = %s", (bt_id,))
@@ -668,6 +668,7 @@ def results(conn: psycopg.Connection, key: str) -> dict[str, Any]:
             first, last = rows[0]["d_in"], rows[-1]["d_out"]
             sessions = _q(conn, "SELECT count(DISTINCT trade_date) AS n FROM idx.bar WHERE source = 'idx' AND trade_date BETWEEN %s AND %s", (first, last))
             trades = [{"code": r["code"], "d_in": _iso(r["d_in"]), "d_out": _iso(r["d_out"]), "entry": _f(r["entry_price"]), "exit": _f(r["exit_price"]),
+                       "leg": r["leg"],
                        "cost": float(r["cost"]), "pnl": float(r["pnl"]), "ret": float(r["pnl"]) / float(r["cost"]) * 100 if float(r["cost"]) else 0.0,
                        "reason": r["exit_reason"]} for r in rows]
             sources.append({"key": "bt", "label": "Backtest", "from": _iso(first), "to": _iso(last), "sessions": sessions[0]["n"] if sessions else None,
@@ -707,6 +708,8 @@ BACKTEST_EXIT = {"gapfade": "Same-day close", "trend_small": "10 % trailing stop
 # a trade list's own exit reason (the `why` column idx_combo_live.py writes), in the page's words
 EXIT_WHY = {"stop_same": "Same-day stop", "swap": "Swapped for a better score", "max_hold": "Longest hold reached", "gone": "No score"}
 EXIT_BY_SLEEVE = {"gap": "Same-day close", "trend": "10 % trailing stop"}     # a combined book's trade list: by its sleeve
+# the leg a trade list row belongs to: the ML sleeve's ens4 rules (idx_combo_live.py writes ML1..ML4 in ENS4 order)
+LEG = {"ML1": "ML +5/10", "ML2": "ML +8/10", "ML3": "ML +10/10", "ML4": "ML +8/5", "gap": "Gap-fade", "trend": "Trend"}
 
 
 def _price(v: Any) -> float | None:
@@ -721,11 +724,11 @@ def import_backtest(conn: psycopg.Connection, key: str, study_id: int, path: str
     with conn.cursor() as cur:
         cur.execute("DELETE FROM idx.strategy_backtest_trade WHERE strategy = %s AND study_id = %s", (key, study_id))
         cur.executemany("""INSERT INTO idx.strategy_backtest_trade (strategy, study_id, seq, code, d_in, d_out, cost, pnl, exit_reason,
-                                                                  entry_price, exit_price)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                                                                  entry_price, exit_price, leg)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         [(key, study_id, i, r["code"], r["d_in"], r["d_out"], round(float(r["cost"]), 2), round(float(r["pnl"]), 2),
                           EXIT_WHY.get(r.get("why") or "") or EXIT_BY_SLEEVE.get(r.get("strat") or "") or BACKTEST_EXIT.get(key),
-                          _price(r.get("entry")), _price(r.get("exit")))
+                          _price(r.get("entry")), _price(r.get("exit")), LEG.get(r.get("strat") or ""))
                          for i, r in enumerate(rows)])
     conn.commit()
     return len(rows)

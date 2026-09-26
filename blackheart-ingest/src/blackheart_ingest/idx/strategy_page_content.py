@@ -475,7 +475,7 @@ PAGES: dict[str, dict[str, Any]] = {
         "one": "The live portfolio: gap-fade, trend and the ML ranking on one Rp 20 M book with a cash floor.",
         "what": "One cash pool runs three strategies at once. Each trade is sized as a share of the book's value, and a 30 % cash "
                 "floor keeps part of it in cash. As deployed it earns {cagr} %/yr with Sharpe {sharpe} and a max drawdown of {mdd} % "
-                "in the backtest; without 2025, {x25} %/yr.",
+                "in a backtest over the same years its settings were chosen on; without 2025, {x25} %/yr. Read it as the best case.",
         "rules": ["Gap-fade: 10 % of NAV per gap, up to 5 a day, bought at the open and sold into the close.",
                   "Trend: 5 % of NAV per name, 60-day high on volume, 10 % trailing stop, no new entries under the regime gate.",
                   "ML: 10 % of NAV per name, a quarter for each of the four ens4 confirmation rules, same-day stop -5 %.",
@@ -491,8 +491,12 @@ PAGES: dict[str, dict[str, Any]] = {
                    ("Configuration", "The allocation was raised from 10/5/5 to 10/5/10 with the stop on 2026-09-26. The same engine with "
                                      "the old allocation and no stop earned {old} %/yr, Sharpe {olds} (#282)."),
                    ("When it struggles", "A market-wide sell-off hits the trend and ML sleeves together; the cash floor and the "
-                                         "regime gate soften it but do not remove it.")],
-        "figs": {"cagr": S(348, PCT("combined/cagr", 1, sign=True)), "sharpe": S(348, V("combined/sharpe", 2)),
+                                         "regime gate soften it but do not remove it."),
+                   ("Reading the backtest", "In-sample: the allocation, the stop and the way the stop is executed were each chosen "
+                                            "after seeing this same history, and 2025 alone returned {y25} %. Treat the figures as "
+                                            "the best case, not a forecast. The live book has no record yet: judge it by its paper "
+                                            "twin and its real fills, and set the loss that would stop it before it trades.")],
+        "figs": {"y25": S(348, PCT("combined/by_year/2025", 0, sign=True)), "cagr": S(348, PCT("combined/cagr", 1, sign=True)), "sharpe": S(348, V("combined/sharpe", 2)),
                  "mdd": S(348, PCT("combined/mdd", 0)), "x25": S(348, PCT("combined/cagr_ex2025", 1, sign=True)),
                  "sx25": S(348, V("combined/sharpe_ex2025", 2)), "h1": S(348, V("combined/sharpe_h1", 2)),
                  "h2": S(348, V("combined/sharpe_h2", 2)), "ml_mdd": S(348, PCT("ml_only/mdd", 0)),
