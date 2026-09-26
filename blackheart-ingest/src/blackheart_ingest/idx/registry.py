@@ -197,7 +197,7 @@ REGISTRY: list[dict[str, Any]] = [
         "books": {"rule": "combo"},
         "runs_in": "combo_book.py (plan 21:10, pre-open 08:30, gap entry 09:00), intents.py session tick every minute, "
                    "combo_expire 20:30",
-        "evidence": [348, 282, 288, 166],
+        "evidence": [386, 348, 282, 288, 166],
         "note": "Allocation 10/5/10 with the stop since 2026-09-26 (operator).",
     },
     {

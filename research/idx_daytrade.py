@@ -116,9 +116,16 @@ def signals(P: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
 
 
 def eligible(P: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """What is knowable at the open. 2026-09-26 (independent replication, operator item 4): the old filter dropped names locked
+    all day (open = high = low) - a look-ahead, the high and low are only known at the close, and at the open such a name
+    DOES fill and loses (~ +0.5 pt/trade of inflation on the gap-fade); and it read the board on the day itself instead of the
+    previous day's. IDX_LEGACY_ELIG=1 restores the old filter to reproduce studies stored before the fix."""
     o, h, lo, c, v60 = P["open"], P["high"], P["low"], P["close"], P["v60"]
-    locked = (o == h) & (h == lo)
-    return P["main"] & (v60.shift(1) >= LIQ) & (c.shift(1) >= 50) & o.notna() & c.notna() & ~locked
+    if os.environ.get("IDX_LEGACY_ELIG") == "1":
+        locked = (o == h) & (h == lo)
+        return P["main"] & (v60.shift(1) >= LIQ) & (c.shift(1) >= 50) & o.notna() & c.notna() & ~locked
+    main_prev = P["main"].shift(1).fillna(False).astype(bool)
+    return main_prev & (v60.shift(1) >= LIQ) & (c.shift(1) >= 50) & o.notna() & c.notna()
 
 
 def net_day_return(P: dict[str, pd.DataFrame]) -> pd.DataFrame:

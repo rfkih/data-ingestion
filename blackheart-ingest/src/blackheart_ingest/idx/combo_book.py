@@ -80,12 +80,12 @@ CATALOG: dict[str, dict[str, str]] = {
     "ml": {"name": "ML ranking", "one": "The 5-day score, cost-aware: signalled when the expected excess pays twice the round trip, bought only after the price confirms (one or several +x % within n days rules, each with a share of the slot).",
            "line": "Nightly plan + intraday confirmation · holds ~25 days"},
 }
-# what the backtest says each sleeve does - the scorecard's yardstick: study #348, the book AS DEPLOYED (10/5/10, ens4, same-day
+# what the backtest says each sleeve does - the scorecard's yardstick: study #386 (#348 after the gap-fade look-ahead fix), the book AS DEPLOYED (10/5/10, ens4, same-day
 # stop 5 %, floor 0.30), per sleeve from its trade list (win share, mean net return per trade, median hold in trading days,
 # the sleeve run alone). The kill rules (idx/killrules.py) bootstrap the same trades.
-BACKTEST = {"ml": {"win": 0.31, "avg_net": 0.0653, "hold_days": 5, "cagr": 0.297, "study": 348},
-            "trend": {"win": 0.42, "avg_net": 0.0452, "hold_days": 19, "cagr": 0.127, "study": 348},
-            "gap": {"win": 0.49, "avg_net": 0.0262, "hold_days": 0, "cagr": 0.128, "study": 348}}
+BACKTEST = {"ml": {"win": 0.31, "avg_net": 0.0653, "hold_days": 5, "cagr": 0.297, "study": 386},
+            "trend": {"win": 0.42, "avg_net": 0.0452, "hold_days": 19, "cagr": 0.127, "study": 386},
+            "gap": {"win": 0.43, "avg_net": 0.0207, "hold_days": 0, "cagr": 0.110, "study": 386}}
 # Phase 0 (operator 2026-09-26): the live book and its paper twin are FROZEN - no change to what the book trades or how much,
 # so the live record measures ONE configuration. Allowed while frozen: switching a sleeve OFF (a kill rule's action), cash,
 # fees, broker, label, note. Anything else needs an explicit override with a reason, which is journalled. Stored in

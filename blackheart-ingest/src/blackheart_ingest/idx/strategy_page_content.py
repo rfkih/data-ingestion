@@ -50,11 +50,11 @@ PAGES: dict[str, dict[str, Any]] = {
                             "none beat selling at the close."),
                    ("Sizing and risk", "10 % of NAV per trade in the combined portfolio. All trades are intraday, so the strategy "
                                        "carries no overnight risk. As deployed, the sleeve alone earns {lc} %/yr, Sharpe {ls}, max "
-                                       "DD {ld} %; without 2025, {lx} %/yr (#348)."),
+                                       "DD {ld} %; without 2025, {lx} %/yr (#386)."),
                    ("When it struggles", "Days when the gap is real news - a rights issue, a bad report - and the name keeps falling. "
                                          "Most of the historical events are from 2025–26, so the record rests on one regime.")],
-        "figs": {"lc": S(348, PCT("gap_only/cagr", 1, sign=True)), "ls": S(348, V("gap_only/sharpe", 2)),
-                 "ld": S(348, PCT("gap_only/mdd", 0)), "lx": S(348, PCT("gap_only/cagr_ex2025", 1, sign=True))},
+        "figs": {"lc": S(386, PCT("gap_only/cagr", 1, sign=True)), "ls": S(386, V("gap_only/sharpe", 2)),
+                 "ld": S(386, PCT("gap_only/mdd", 0)), "lx": S(386, PCT("gap_only/cagr_ex2025", 1, sign=True))},
         "research": [
             {"study": 77, "title": "The rule itself", "tested": "Buying opening gaps of −3 % to −10 %, sold at the close, 2020–2026 IDX opens.",
              "found": "The t-statistic of the −5 % and −7 % cuts is {t5} and {t7}, just under the bar of 3. A boundary result, re-read as "
@@ -81,8 +81,8 @@ PAGES: dict[str, dict[str, Any]] = {
         ],
         "findings": {"per_day": "Tuning the threshold", "size": "Tuning the threshold"},
         "headline": {"state": "gapfade"},
-        "backtest": {"study": 348, "file": "gap_only",
-                     "config": "As deployed: Rp 20 M book, 10 % of NAV per gap, up to 5 a day, 30 % cash floor (study #348)."},
+        "backtest": {"study": 386, "file": "gap_only",
+                     "config": "As deployed: Rp 20 M book, 10 % of NAV per gap, up to 5 a day, 30 % cash floor (study #386)."},
         "fills": "The open plus one tick at entry, the close less one tick at exit; Stockbit fees.",
     },
     "trend_small": {
@@ -103,12 +103,12 @@ PAGES: dict[str, dict[str, Any]] = {
                    ("Sizing and risk", "5 % of NAV per trade in the combined portfolio, one tenth of its own book. The regime gate "
                                        "stops new entries while the IDX Composite is under its 200-day average. As deployed, the "
                                        "sleeve alone earns {lc} %/yr, Sharpe {ls}, max DD {ld} %; without 2025 only {lx} %/yr - "
-                                       "most of its return came in one year (#348)."),
+                                       "most of its return came in one year (#386)."),
                    ("When it struggles", "Choppy markets, when breakouts fail - {fail5} % of volume breakouts are back inside their base "
                                          "within 5 days. The hit rate is about {hit} %; a few long trends carry the result.")],
         "figs": {"sh_ref": S(65, V("ref/sharpe", 2)), "sh_late": S(65, V("V5/late/ref/sharpe", 2)),
-                 "lc": S(348, PCT("trend_only/cagr", 1, sign=True)), "ls": S(348, V("trend_only/sharpe", 2)),
-                 "ld": S(348, PCT("trend_only/mdd", 0)), "lx": S(348, PCT("trend_only/cagr_ex2025", 1, sign=True)),
+                 "lc": S(386, PCT("trend_only/cagr", 1, sign=True)), "ls": S(386, V("trend_only/sharpe", 2)),
+                 "ld": S(386, PCT("trend_only/mdd", 0)), "lx": S(386, PCT("trend_only/cagr_ex2025", 1, sign=True)),
                  "fail5": S(130, PCT("primary/LIQ/fail5", 0)), "hit": S(23, PCT("results/small/hit", 0))},
         "research": [
             {"study": 22, "title": "Trend following with trailing exits", "tested": "Ten breakout and exit rules, 2020–2026.",
@@ -153,8 +153,8 @@ PAGES: dict[str, dict[str, Any]] = {
         ],
         "findings": {"regime_gate": "Regime gate on entries", "size": "Robustness"},
         "headline": {"state": "trend_small"},
-        "backtest": {"study": 348, "file": "trend_only",
-                     "config": "As deployed: Rp 20 M book, 5 % of NAV per name, regime gate, 30 % cash floor (study #348)."},
+        "backtest": {"study": 386, "file": "trend_only",
+                     "config": "As deployed: Rp 20 M book, 5 % of NAV per name, regime gate, 30 % cash floor (study #386)."},
         "fills": "The closing offer at entry and the closing bid at exit, one session after the signal; Stockbit fees.",
     },
     "ml_rank": {
@@ -185,7 +185,7 @@ PAGES: dict[str, dict[str, Any]] = {
                             "checks the stop from 15:40. Take-profits made it worse. Whether the stop is on is shown under Options."),
                    ("Sizing and risk", "10 % of NAV per name in the live book since 2026-09-26, shared across the four confirmation "
                                        "rules (a quarter each). The portfolio's cash floor is checked before each buy. As deployed, "
-                                       "the sleeve alone earns {lc} %/yr, Sharpe {ls}, max DD {ld} %; without 2025, {lx} %/yr (#348)."),
+                                       "the sleeve alone earns {lc} %/yr, Sharpe {ls}, max DD {ld} %; without 2025, {lx} %/yr (#386)."),
                    ("When it struggles", "Market-wide sell-offs such as 2022, when rankings built on recent behaviour stop holding. "
                                          "No filter or overlay tested fixed the 2022 drawdown.")],
         "figs": {"universe": LIVE("ml_universe"), "confirm": S(160, PCT("wait_up5/cagr", 0, sign=True)),
@@ -198,8 +198,8 @@ PAGES: dict[str, dict[str, Any]] = {
                  "c5c": S(282, PCT("arms/stop5/cagr", 1, sign=True)), "c5s": S(282, V("arms/stop5/sharpe", 2)),
                  "c0c": S(282, PCT("arms/none/cagr", 1, sign=True)), "c0s": S(282, V("arms/none/sharpe", 2)),
                  "nx": S(288, V("arms/nextclose_stop5/worst", 1, sign=True)), "sd": S(288, V("arms/same_stop5/worst", 1, sign=True)),
-                 "lc": S(348, PCT("ml_only/cagr", 1, sign=True)), "ls": S(348, V("ml_only/sharpe", 2)), "ld": S(348, PCT("ml_only/mdd", 0)),
-                 "lx": S(348, PCT("ml_only/cagr_ex2025", 1, sign=True))},
+                 "lc": S(386, PCT("ml_only/cagr", 1, sign=True)), "ls": S(386, V("ml_only/sharpe", 2)), "ld": S(386, PCT("ml_only/mdd", 0)),
+                 "lx": S(386, PCT("ml_only/cagr_ex2025", 1, sign=True))},
         "research": [
             {"study": 154, "title": "Cost-aware construction", "tested": "The same 5-day score used cost-aware instead of as fixed daily cohorts.",
              "found": "{cagr} %/yr, Sharpe {sharpe}, max DD {mdd} % for the cost-aware book; positive in {pos} of {years} years.",
@@ -261,9 +261,9 @@ PAGES: dict[str, dict[str, Any]] = {
         "findings": {"confirm": "Confirmation ensemble", "margin": "Cost-aware construction", "max_hold": "Stops", "size": "Cost-aware construction",
                      "stop": "Exits on the live sleeve"},
         "headline": {"study": 288, "path": ["arms", "same_stop5"]},              # ens4 with the same-day stop, as deployed
-        "backtest": {"study": 348, "file": "ml_only",
+        "backtest": {"study": 386, "file": "ml_only",
                      "config": "As deployed: Rp 20 M book, 10 % of NAV per name split over the four ens4 confirmation rules, same-day "
-                               "stop -5 %, 30 % cash floor (study #348)."},
+                               "stop -5 %, 30 % cash floor (study #386)."},
         "fills": "The closing offer on the day the confirmation level prints; the closing bid at exit (a stop: the bid at the close "
                  "that triggers it); Stockbit fees.",
     },
@@ -496,10 +496,10 @@ PAGES: dict[str, dict[str, Any]] = {
                                             "after seeing this same history, and 2025 alone returned {y25} %. Treat the figures as "
                                             "the best case, not a forecast. The live book has no record yet: judge it by its paper "
                                             "twin and its real fills, and set the loss that would stop it before it trades.")],
-        "figs": {"y25": S(348, PCT("combined/by_year/2025", 0, sign=True)), "cagr": S(348, PCT("combined/cagr", 1, sign=True)), "sharpe": S(348, V("combined/sharpe", 2)),
-                 "mdd": S(348, PCT("combined/mdd", 0)), "x25": S(348, PCT("combined/cagr_ex2025", 1, sign=True)),
-                 "sx25": S(348, V("combined/sharpe_ex2025", 2)), "h1": S(348, V("combined/sharpe_h1", 2)),
-                 "h2": S(348, V("combined/sharpe_h2", 2)), "ml_mdd": S(348, PCT("ml_only/mdd", 0)),
+        "figs": {"y25": S(386, PCT("combined/by_year/2025", 0, sign=True)), "cagr": S(386, PCT("combined/cagr", 1, sign=True)), "sharpe": S(386, V("combined/sharpe", 2)),
+                 "mdd": S(386, PCT("combined/mdd", 0)), "x25": S(386, PCT("combined/cagr_ex2025", 1, sign=True)),
+                 "sx25": S(386, V("combined/sharpe_ex2025", 2)), "h1": S(386, V("combined/sharpe_h1", 2)),
+                 "h2": S(386, V("combined/sharpe_h2", 2)), "ml_mdd": S(386, PCT("ml_only/mdd", 0)),
                  "old": S(282, PCT("arms/none/cagr", 1, sign=True)), "olds": S(282, V("arms/none/sharpe", 2))},
         "research": [
             {"study": 166, "title": "Three strategies on one book", "tested": "Gap-fade, trend and ML at 5 % of NAV each, one cash pool.",
@@ -514,7 +514,7 @@ PAGES: dict[str, dict[str, Any]] = {
              "figs": {"c0": PCT("arms/none/cagr", 1, sign=True), "s0": V("arms/none/sharpe", 2), "c5": PCT("arms/stop5/cagr", 1, sign=True),
                       "s5": V("arms/stop5/sharpe", 2)},
              "verdict": "Adopted", "n": "2 arms"},
-            {"study": 348, "title": "As deployed", "tested": "Gap 10 % / trend 5 % / ML 10 % with the same-day stop, 30 % cash floor.",
+            {"study": 386, "title": "As deployed", "tested": "Gap 10 % / trend 5 % / ML 10 % with the same-day stop, 30 % cash floor.",
              "found": "{cagr} %/yr, Sharpe {sharpe}, Sortino {sortino}, max DD {mdd} % over {sessions} sessions; {pos} of {months} "
                       "months positive; without 2025, {x25} %/yr.",
              "figs": {"cagr": PCT("combined/cagr", 1, sign=True), "sharpe": V("combined/sharpe", 2), "sortino": V("combined/sortino", 2),
@@ -523,10 +523,10 @@ PAGES: dict[str, dict[str, Any]] = {
              "verdict": "Adopted", "n": "{trades} trades"},
         ],
         "findings": {},
-        "headline": {"study": 348, "path": ["combined"]},
-        "backtest": {"study": 348, "file": "combined",
+        "headline": {"study": 386, "path": ["combined"]},
+        "backtest": {"study": 386, "file": "combined",
                      "config": "As deployed in live-fae554 (settings v2): Rp 20 M, gap 10 % / trend 5 % / ML 10 % of NAV per trade, ens4 "
-                               "confirmation, same-day stop -5 %, 30 % cash floor (study #348)."},
+                               "confirmation, same-day stop -5 %, 30 % cash floor (study #386)."},
         "fills": "Gap-fade: the open plus a tick, the close less a tick. Trend and ML: the closing offer at entry, the closing bid at "
                  "exit (an ML stop: the bid at the close that triggers it). Stockbit fees.",
     },

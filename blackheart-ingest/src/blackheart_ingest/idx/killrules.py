@@ -6,9 +6,10 @@ frozen (combo_book.FREEZE) and the only way a sleeve comes off is one of the rul
 never switches a sleeve off by itself - live settings are the operator's; a breach raises one actionable alert a day that
 names the rule and the pre-registered action.
 
-Rules (declared 2026-09-26, reference = study #348, the book as deployed):
+Rules (declared 2026-09-26, reference = study #386: the book as deployed, #348 re-run after the gap-fade eligibility
+look-ahead fix found by the independent replication the same evening - no live trade existed yet):
   edge:<sleeve>   the mean return of the sleeve's CLOSED live trades sits below the 5th percentile of the mean of the same
-                  number of trades drawn from #348's trades for that sleeve (bootstrap). "The live trades are not what the
+                  number of trades drawn from #386's trades for that sleeve (bootstrap). "The live trades are not what the
                   backtest produces" - it cannot tell "no edge" from "unlucky" on a few trades, and it is not meant to.
                   Needs EDGE_MIN_N closed trades. Action: switch the sleeve off.
   fills:<sleeve>  share of the sleeve's live lines actually filled < 80 % after 10 lines (the backtest fills 100 %; the
@@ -34,7 +35,7 @@ from .card import _rows
 
 WIB = ZoneInfo("Asia/Jakarta")
 DECLARED = "2026-09-26"
-REFERENCE_STUDY = 348
+REFERENCE_STUDY = 386          # #348 re-run 2026-09-26 after the gap-fade look-ahead fix (#348 superseded)
 BACKTEST_STRATEGY = {"gap": "gapfade", "trend": "trend_small", "ml": "ml_rank"}      # idx.strategy_backtest_trade names
 EDGE_MIN_N = {"gap": 20, "trend": 15, "ml": 20}
 EDGE_PCT = 5.0
