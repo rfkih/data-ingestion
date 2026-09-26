@@ -112,6 +112,10 @@ def send(text: str, *, title: str | None = None, data: dict[str, Any] | None = N
     if not configured():
         logger.info("idx notify: no channel configured (%s or telegram); dropped: %s", push.SA_ENV, text[:120])
         return False
+    from .alert_policy import paper_book
+    if paper_book(book):                                                   # a paper/test book fills itself: nobody to act
+        logger.info("idx notify: paper book %s, not pushed: %s", book, text[:80])
+        return False
     sent = False
     if push.configured():
         desk = user_id is None and book is None

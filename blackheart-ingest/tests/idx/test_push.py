@@ -191,6 +191,8 @@ def test_devices_round_trip_and_fan_out(conn, sa_file, monkeypatch) -> None:
 
         monkeypatch.setattr(push, "broadcast", lambda t, b_, d=None, sender=None, user_id=None: push.send_all(conn, t, b_, d, sender=psender, user_id=user_id))
         monkeypatch.setattr(notify, "owner_of", lambda book: uid if book == "test-book" else None)
+        from blackheart_ingest.idx import alert_policy  # test-book is silenced like a paper book;
+        monkeypatch.setattr(alert_policy, "paper_book", lambda b: False)  # this test is about the push path
         monkeypatch.delenv(notify.OPS_ENV, raising=False)
         assert notify.channels() == ["app"] and notify.configured()
         assert notify.send("drafted by scheduler\nTicket #9 trend_live", data={"route": "/m/ticket?book=trend_live"}, user_id=uid)

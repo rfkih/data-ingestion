@@ -32,8 +32,8 @@ def test_notify_sends_and_pushes_only_warning_and_critical(monkeypatch) -> None:
         return {"ok": True}
 
     assert notify.send("hello", sender=sender) and sent[-1][0].endswith("/bot123:abc/sendMessage") and sent[-1][1]["chat_id"] == "42"
-    assert notify.on_alert("info", "book:paper", "quiet", sender=sender) is False and len(sent) == 1
-    assert notify.on_alert("warning", "book:paper", "held X broke the gate", sender=sender) and sent[-1][1]["text"] == "[WARNING] book:paper\nheld X broke the gate"
+    assert notify.on_alert("info", "book:live", "quiet", sender=sender) is False and len(sent) == 1
+    assert notify.on_alert("warning", "book:live", "held X broke the gate", sender=sender) and sent[-1][1]["text"] == "[WARNING] book:live\nheld X broke the gate"
     assert notify.send("y" * 5000, sender=sender) and len(sent[-1][1]["text"]) <= notify.MAX_LEN
 
     def failing(url, payload):
@@ -131,6 +131,10 @@ def test_reconcile_round_trip_and_alert_push(conn, monkeypatch) -> None:
         monkeypatch.setenv(notify.CHAT_ENV, "c")
         sent = []
         monkeypatch.setattr(notify, "_post", lambda url, payload, timeout=15.0: sent.append(payload) or {"ok": True})
+        from blackheart_ingest.idx import (
+            alert_policy,  # test_* books are silenced like paper ones; this
+        )
+        monkeypatch.setattr(alert_policy, "paper_book", lambda b: False)  # test is about the push path itself
         runlog.alert(conn, "info", f"book:{bk}", "nothing")
         runlog.alert(conn, "warning", f"book:{bk}", "something")
         assert len(sent) == 1 and sent[0]["text"].startswith("[WARNING] book:test_recon")

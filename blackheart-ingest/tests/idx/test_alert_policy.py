@@ -15,7 +15,7 @@ def row(severity: str, job: str, message: str, kind: str | None = None, strategy
     row("warning", "risk:trend_live", "trend_live risk: 1-day VaR99 5.0 % > 4 %", kind="risk"),
     row("critical", "levels:trend_live", "ERAA stop 580 hit (close 575)"),
     row("warning", "intents:live-fae554", "intent #3 stop ERAA: filled"),
-    row("warning", "gapfade:paper_gapfade", "exit ticket #9 could not be filled: no bar for 2026-09-25 yet"),
+    row("warning", "gapfade:live-fae554", "exit ticket #9 could not be filled: no bar for 2026-09-25 yet"),
     row("warning", "book:live", "held ELSA: -18 % from entry"),
     row("warning", "ara", "ELSA at ARA, locked", kind="ara", strategy="ara_sell"),
     row("info", "ticket:trend_live", "take profit: DEWI"),
@@ -60,3 +60,30 @@ def test_execution_reads_are_shown_never_pushed() -> None:
 
 def test_tag_sets_the_flag() -> None:
     assert ap.tag(row("info", "ml", "x"))["actionable"] is False
+
+
+@pytest.mark.parametrize("r", [
+    row("warning", "gapfade:paper_gapfade", "exit ticket #9 could not be filled: no bar yet"),
+    row("warning", "ticket:paper-edbb01", "combo ticket #12 not issued - cash"),
+    row("critical", "levels:paper_trend", "ERAA stop hit"),
+    row("warning", "book:live", "held SMDR: [exchange_query] 2026-09-22 Penjelasan atas Permintaan Penjelasan Bursa"),
+    row("warning", "book:live", "held ACES: [auditor] change of auditor"),
+    row("warning", "gapfade:live-fae554", "1 position(s) survived the previous session and were swept at today's open: TSTB"),
+])
+def test_paper_books_non_freeze_disclosures_and_self_handled_reports_are_quiet(r: dict) -> None:
+    assert not ap.actionable(r) and not ap.push_now(r)
+
+
+def test_a_trading_freeze_on_a_held_name_is_an_action() -> None:
+    r = row("warning", "book:live", "held BUMI: [suspension] 2026-09-22 Penghentian Sementara Perdagangan")
+    assert ap.actionable(r) and ap.push_now(r)
+
+
+def test_direct_send_for_a_paper_book_is_dropped(monkeypatch) -> None:
+    from blackheart_ingest.idx import notify, push
+    calls: list = []
+    monkeypatch.setattr(push, "configured", lambda: True)
+    monkeypatch.setattr(push, "broadcast", lambda *a, **k: calls.append(k) or {"sent": 1, "devices": 1})
+    monkeypatch.delenv(notify.TOKEN_ENV, raising=False)
+    assert notify.send("[combo] KONFIRMASI ML X", book="paper-edbb01") is False
+    assert calls == []

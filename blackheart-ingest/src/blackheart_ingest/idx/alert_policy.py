@@ -22,11 +22,32 @@ from typing import Any
 STOCK_JOBS = ("ticket", "levels", "risk", "intents", "gapfade", "combo", "book", "exec")
 STOCK_KINDS = ("ticket", "exec", "risk")
 NOT_ACTION_PREFIXES = ("regime on", "regime off", "entry gate", "no gap-fade scan")
+NOT_ACTION_WORDS = ("were swept at today's open",)                     # the runner already sold them: a report
 FEED_ACTION_WORDS = ("down", "token", "expired", "expires", "missing")
+# a disclosure on a held name: only an actual trading FREEZE is an action (operator 2026-09-24: a UMA flag or an exchange
+# query is not a reason to sell); the book monitor tags them "[<kind>]" in the message
+DISCLOSURE_ACTION = ("[suspension]",)
+DISCLOSURE_TAGS = ("[exchange_query]", "[legal]", "[auditor]", "[control_change]", "[affiliated_tx]", "[uma]")
 
 
 def _prefix(job: str | None) -> str:
     return (job or "").split(":", 1)[0].strip().lower()
+
+
+def book_of(row: dict[str, Any]) -> str | None:
+    """The book an alert is about: the typed field, else the ``<prefix>:<book>`` job convention of the stock jobs."""
+    if row.get("book"):
+        return str(row["book"])
+    job = row.get("job") or ""
+    if ":" in job and _prefix(job) in STOCK_JOBS:
+        return job.split(":", 1)[1].strip() or None
+    return None
+
+
+def paper_book(book: str | None) -> bool:
+    """A paper or test book fills itself - nothing about it needs a person (same test as ticket.is_live)."""
+    b = (book or "").lower()
+    return bool(b) and (b.startswith("paper") or b.startswith("test"))
 
 
 def actionable(row: dict[str, Any]) -> bool:
@@ -35,8 +56,12 @@ def actionable(row: dict[str, Any]) -> bool:
     kind = (row.get("kind") or "").lower()
     job = _prefix(row.get("job"))
     msg = (row.get("message") or "").strip().lower()
-    if any(msg.startswith(p) for p in NOT_ACTION_PREFIXES):
+    if paper_book(book_of(row)):
         return False
+    if any(msg.startswith(p) for p in NOT_ACTION_PREFIXES) or any(w in msg for w in NOT_ACTION_WORDS):
+        return False
+    if job == "book" and any(t in msg for t in DISCLOSURE_TAGS + DISCLOSURE_ACTION):
+        return any(t in msg for t in DISCLOSURE_ACTION)
     if kind == "exec":
         return True
     if job == "ticket" and msg.startswith("take profit"):
