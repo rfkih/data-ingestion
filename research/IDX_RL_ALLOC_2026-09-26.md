@@ -2,24 +2,24 @@
 
 Streams (engine #168, costs): gap / trend / ML alone + value book; weekly allocation among 7 templates; reward = log return - 2.0 x drawdown increase - 0.3% x turnover; REINFORCE MLP, 3000 episodes of 26 weeks, 5 seeds; walk-forward test 2024-2026 stitched (2024-01-02 -> 2026-09-16).
 
-Daily return correlation of the streams: {"gap": {"gap": 1.0, "trend": 0.02, "ML": 0.23, "value": 0.09}, "trend": {"gap": 0.02, "trend": 1.0, "ML": 0.17, "value": 0.2}, "ML": {"gap": 0.23, "trend": 0.17, "ML": 1.0, "value": 0.28}, "value": {"gap": 0.09, "trend": 0.2, "ML": 0.28, "value": 1.0}}
+Daily return correlation of the streams: {"gap": {"gap": 1.0, "trend": 0.02, "ML": 0.13, "value": 0.09}, "trend": {"gap": 0.02, "trend": 1.0, "ML": 0.26, "value": 0.2}, "ML": {"gap": 0.13, "trend": 0.26, "ML": 1.0, "value": 0.32}, "value": {"gap": 0.09, "trend": 0.2, "ML": 0.32, "value": 1.0}}
 
 | allocator | CAGR | Sharpe | mDD | 2024 | 2025 | 2026 |
 |---|---|---|---|---|---|---|
-| FIXED_EQ | +40.1% | 2.38 | -12% | +12% | +70% | +24% |
-| REGIME | +30.1% | 2.22 | -12% | +11% | +52% | +16% |
-| WF_BEST | +42.5% | 1.97 | -17% | +20% | +73% | +19% |
-| RL seed 1 | +21.5% | 1.50 | -13% | +9% | +38% | +9% |
-| RL seed 2 | +20.6% | 1.55 | -14% | +5% | +38% | +12% |
-| RL seed 3 | +20.7% | 1.45 | -14% | +3% | +35% | +16% |
-| RL seed 4 | +16.9% | 1.56 | -11% | +13% | +23% | +7% |
-| RL seed 5 | +14.2% | 1.22 | -12% | +4% | +30% | +4% |
-| **RL mean** | +18.8% | 1.46 (range 1.22..1.56) | -13% | |
+| FIXED_EQ | +41.1% | 2.44 | -13% | +13% | +77% | +21% |
+| REGIME | +31.6% | 2.36 | -10% | +12% | +56% | +15% |
+| WF_BEST | +53.1% | 2.41 | -12% | +13% | +88% | +40% |
+| RL seed 1 | +19.9% | 1.42 | -14% | +10% | +29% | +12% |
+| RL seed 2 | +16.0% | 1.21 | -22% | +3% | +28% | +10% |
+| RL seed 3 | +17.6% | 1.30 | -12% | +3% | +28% | +14% |
+| RL seed 4 | +15.4% | 1.19 | -13% | +8% | +25% | +7% |
+| RL seed 5 | +13.2% | 1.13 | -14% | +4% | +29% | +2% |
+| **RL mean** | +16.4% | 1.25 (range 1.13..1.42) | -15% | |
 
-RANDOM placebo (200 draws): Sharpe median 1.52, 95th pct 2.05. WF_BEST picks: {2024: 'ML', 2025: 'ML', 2026: 'ML'}.
+RANDOM placebo (200 draws): Sharpe median 1.58, 95th pct 2.13. WF_BEST picks: {2024: 'VALUE', 2025: 'ML', 2026: 'GAP'}.
 
-Actions taken in test (weeks, per seed): {"EQ": 5, "TREND": 53, "ML": 19, "GAP": 5, "VALUE": 17, "DEF": 16, "OFF": 25}; {"EQ": 7, "TREND": 37, "ML": 17, "GAP": 29, "VALUE": 12, "DEF": 1, "OFF": 37}; {"EQ": 15, "TREND": 24, "ML": 10, "GAP": 11, "VALUE": 19, "DEF": 31, "OFF": 30}; {"EQ": 1, "TREND": 29, "ML": 15, "GAP": 7, "VALUE": 15, "DEF": 8, "OFF": 65}; {"EQ": 13, "TREND": 47, "ML": 7, "GAP": 17, "VALUE": 18, "DEF": 11, "OFF": 27}
+Actions taken in test (weeks, per seed): {"EQ": 3, "TREND": 49, "ML": 13, "GAP": 10, "VALUE": 7, "DEF": 7, "OFF": 51}; {"EQ": 16, "TREND": 27, "ML": 16, "GAP": 7, "VALUE": 12, "DEF": 10, "OFF": 52}; {"EQ": 23, "TREND": 12, "ML": 7, "GAP": 13, "VALUE": 13, "DEF": 22, "OFF": 50}; {"EQ": 4, "TREND": 40, "ML": 14, "GAP": 5, "VALUE": 17, "DEF": 3, "OFF": 57}; {"EQ": 2, "TREND": 66, "ML": 5, "GAP": 7, "VALUE": 9, "DEF": 0, "OFF": 51}
 
 ## Verdict (pre-registered)
 
-Best baseline: FIXED_EQ. Checks: sharpe no, cagr no, mdd yes, seeds no, random no -> **NOT better - the agent is not given capital**
+Best baseline: FIXED_EQ. Checks: sharpe no, cagr no, mdd no, seeds no, random no -> **NOT better - the agent is not given capital**

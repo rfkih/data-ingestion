@@ -16,12 +16,15 @@ PRE-REGISTERED before the run:
   Window is the overlap, which the value book starts in 2020-05 - about 6.4 years. That is SHORT, and it is the main
   limitation of this menu: family D had 20 years and covered 2008; this cannot.
 
-READ-ONLY. INGEST_DB_DSN=... blackheart-ingest/.venv/Scripts/python research/idx_allocbook.py
+INGEST_DB_DSN=... blackheart-ingest/.venv/Scripts/python research/idx_allocbook.py [--no-store] [--report PATH]
+Reads the desk; its only write is the idx.study row 'allocbook' (added 2026-09-26: the 2026-09-23 run #92 was stored by hand).
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -69,7 +72,45 @@ def rebalanced(parts: dict[str, pd.Series], weights: dict[str, float]) -> pd.Ser
     return pd.Series(out, index=idx)
 
 
+N_TRIALS_CUMULATIVE = 585            # menu 31: 6 arms, cumulative as stored on #92
+
+
+def summarize(rows, halves, idx) -> tuple[dict, str]:
+    """The stored summary, with #92's keys (of, better, ref, gold30, halves, status, operator) plus every arm and the IHSG row."""
+    by = {st["label"]: st for st in rows if st}
+    ref = by["book5050 (REF)"]
+    arms = [k for k in by if k.startswith("book") and k != "book5050 (REF)"] + ["EW3 v/t/gold"]
+    r = lambda st: {"mdd": round(st["mdd"], 3), "cagr": round(st["cagr"], 3), "sharpe": round(st["sharpe"], 2)}  # noqa: E731
+    sh_ok = [k for k in arms if by[k]["sharpe"] >= ref["sharpe"] + 0.15]
+    dd_ok = [k for k in arms if by[k]["mdd"] >= ref["mdd"]]
+    better = [k for k in sh_ok if k in dd_ok]
+    miss = sorted((ref["mdd"] - by[k]["mdd"]) * 100 for k in sh_ok if k not in dd_ok)
+    h1, h2 = halves
+    status = ("BETTER: " + ", ".join(better) if better else
+              f"PARTIAL: Sharpe bar cleared by {len(sh_ok)} of {len(arms)} arms"
+              + (f", drawdown bar missed by {miss[0]:.1f}-{miss[-1]:.1f}pt" if miss else "")
+              + f"; Sharpe gain in H1 {sum(1 for k in h1 if k != 'book5050 (REF)' and h1[k]['sharpe'] > h1['book5050 (REF)']['sharpe'])}"
+              f"/5 and H2 {sum(1 for k in h2 if k != 'book5050 (REF)' and h2[k]['sharpe'] > h2['book5050 (REF)']['sharpe'])}/5 gold arms"
+              if sh_ok else "tested: no arm clears the Sharpe bar")
+    summary = {"of": len(arms), "better": len(better), "ref": r(ref), "gold30": r(by["book70/gold30"]),
+               "halves": {"H1_gold_flat": {"ref_mdd": round(h1["book5050 (REF)"]["mdd"], 3), "gold40_mdd": round(h1["book60/gold40"]["mdd"], 3),
+                                           "ref_sharpe": round(h1["book5050 (REF)"]["sharpe"], 2),
+                                           "gold40_sharpe": round(h1["book60/gold40"]["sharpe"], 2)},
+                          "H2_gold_boom": {"ref_sharpe": round(h2["book5050 (REF)"]["sharpe"], 2),
+                                           "gold50_sharpe": round(h2["book50/gold50"]["sharpe"], 2)}},
+               "status": status, "operator": "parked - equities only",
+               "arms": {k: r(v) for k, v in by.items()}, "ihsg": r(by["IHSG"]) if "IHSG" in by else None,
+               "window": f"{idx[0]:%Y-%m}..{idx[-1]:%Y-%m}", "months": len(idx)}
+    note = (f"{len(better)}/{len(arms)} by the letter; book70/gold30 Sharpe {by['book70/gold30']['sharpe']:.2f} vs ref "
+            f"{ref['sharpe']:.2f}, mDD {by['book70/gold30']['mdd']:.1%} vs {ref['mdd']:.1%}; parked by the operator (no gold)")
+    return summary, note
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--no-store", action="store_true")
+    ap.add_argument("--report", default=None, help="report_path recorded on the study row (e.g. this run's log)")
+    args = ap.parse_args()
     dsn = os.environ["INGEST_DB_DSN"]
     print("loading value book NAV (this regenerates the screen per rebalance) ...", flush=True)
     nav_v = B.value_nav(dsn)
@@ -124,8 +165,9 @@ def main():
     print("")
     print("=== robustness: the same grid in each half (diversification, or gold's run?) ===")
     half = idx[len(idx) // 2]
-    for name, sl in (("H1 " + f"{idx[0]:%Y-%m}..{half:%Y-%m}", idx[:len(idx)//2]),
-                     ("H2 " + f"{half:%Y-%m}..{idx[-1]:%Y-%m}", idx[len(idx)//2:])):
+    halves = ({}, {})
+    for hi, (name, sl) in enumerate((("H1 " + f"{idx[0]:%Y-%m}..{half:%Y-%m}", idx[:len(idx)//2]),
+                                     ("H2 " + f"{half:%Y-%m}..{idx[-1]:%Y-%m}", idx[len(idx)//2:]))):
         p2 = {k: v.reindex(sl) for k, v in parts.items()}
         g_st = stats(parts["g"].reindex(sl), "gold")
         print("")
@@ -135,11 +177,26 @@ def main():
             w = {k: x for k, x in w.items() if x > 0}
             st = stats(rebalanced(p2, w), label)
             if st:
+                halves[hi][label] = st
                 print(f"    {label.split()[0]:16} sharpe={st['sharpe']:5.2f} mdd={st['mdd']*100:6.1f}% cagr={st['cagr']*100:+6.1f}%")
     print()
     for st in rows:
         if st and st["label"] in ("value only", "trend only", "book5050 (REF)", "book70/gold30", "EW3 v/t/gold", "IHSG"):
             print(f"  {st['label']:16} " + " ".join(f"{y}:{r}" for y, r in st["years"].items()))
+
+    summary, note = summarize(rows, halves, idx)
+    print("\n" + note + "\n" + summary["status"])
+    if not args.no_store:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "blackheart-ingest", "src"))
+        from blackheart_ingest.idx import research_store as rs
+        params = {"bar": "Sharpe >= ref+0.15 AND mdd no deeper (ref = value50/trend50)", "menu": 31,
+                  "trials": [g[0] for g in GRID[1:]] + ["EW3 value/trend/gold", "reference book50/50"],
+                  "window": f"{summary['window']} ({summary['months']} months)", "rebalance": "monthly, 0.30% switch cost",
+                  "diversifier": "gold IDR (idx.macro gold x usdidr) + cash BI-1.5", "n_trials_cumulative": N_TRIALS_CUMULATIVE}
+        with psycopg.connect(dsn) as conn:
+            sid = rs.record_study(conn, "allocbook", date(2026, 9, 23), params=params, summary=summary, names=[],
+                                  report_path=args.report, note=note)
+        print(f"study #{sid} stored")
 
 
 if __name__ == "__main__":

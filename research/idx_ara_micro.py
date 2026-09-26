@@ -97,7 +97,9 @@ BAR_ENS = {"years": 4}
 def load(conn: psycopg.Connection, end: date) -> pd.DataFrame:
     cols = ["code", "d", "prev", "open", "high", "low", "close", "vol", "val", "freq", "bid", "bv", "off", "ov", "fb", "fs", "nreg", "tsh", "bd", "adj"]
     with conn.cursor() as cur:
-        cur.execute("""SELECT s.code, s.trade_date, s.previous::float8, s.open::float8, s.high::float8, s.low::float8, s.close::float8,
+        # the open as the live model reads it (ara_model.load_summary): IDX's own, else the validated fill in idx.bar
+        # (jobs/bar_open.py, 2026-09-26). The first run (#146) read daily_summary.open, NULL outside the pre-opening session.
+        cur.execute("""SELECT s.code, s.trade_date, s.previous::float8, COALESCE(b.open, s.open)::float8, s.high::float8, s.low::float8, s.close::float8,
                               s.volume::float8, s.value::float8, s.frequency::float8, s.bid::float8, s.bid_volume::float8, s.offer::float8,
                               s.offer_volume::float8, s.foreign_buy::float8, s.foreign_sell::float8, s.nonreg_volume::float8,
                               s.tradeable_shares::float8, substr(s.remarks, 5, 1), b.adj_factor::float8

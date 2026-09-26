@@ -100,6 +100,7 @@ def gap_events(dsn, dates):
     g7, elig, v60 = B["masks"]["g7"], B["elig"], B["v60"]
     R = B["R"]["close"]
     o = B["P"]["open"]
+    c = B["P"].get("close") if hasattr(B["P"], "get") else None       # the exit price, for trade lists only
     pos = {d: i for i, d in enumerate(dates)}
     out = []
     for d in R.index:
@@ -113,7 +114,8 @@ def gap_events(dsn, dates):
         for code in pick:
             r, op = R.loc[d, code], o.loc[d, code]
             if np.isfinite(r) and np.isfinite(op) and op > 0:
-                out.append({"strat": "gap", "code": code, "t": pos[dd], "net": float(r), "open": float(op)})
+                cl = float(c.loc[d, code]) if c is not None and code in c.columns and np.isfinite(c.loc[d, code]) else None
+                out.append({"strat": "gap", "code": code, "t": pos[dd], "net": float(r), "open": float(op), "close": cl})
     return out
 
 

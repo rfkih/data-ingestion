@@ -73,7 +73,8 @@ TMP = os.path.join(ROOT, "tmp")
 CAL_PKL = os.path.join(TMP, "fe_capacity_cal.pkl")
 RUN_PKL = os.path.join(TMP, "fe_capacity_runs.pkl")
 OUT = os.path.join(HERE, "IDX_FE_CAPACITY_2026-09-26.md")
-REF = {"cagr": 0.338, "sharpe": 1.83, "mdd": -0.179}
+# the #192 (d) baseline this run must reproduce; FE_REF (JSON) carries a re-run #192's numbers (re-run 2026-09-26)
+REF = json.loads(os.environ["FE_REF"]) if os.environ.get("FE_REF") else {"cagr": 0.338, "sharpe": 1.83, "mdd": -0.179}
 
 
 def log(*a):

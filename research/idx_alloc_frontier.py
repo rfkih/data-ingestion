@@ -72,7 +72,9 @@ def dsn() -> str:
 
 # ---- engine: idx_combo_rupiah.engine with per-sleeve sizing, a cash floor and a daily exposure multiplier ----------------------
 def engine(dates, codes, A, raw, offer, bid, ml, tr, gap, pct: dict[str, float], *, cash_floor: float = 0.0, overlay: str | None = None,
-           comp_below: np.ndarray | None = None):
+           comp_below: np.ndarray | None = None, log: dict | None = None):
+    """log (optional, reporting only - the book is identical with or without it): collects log["trades"] (strat, code, t_in,
+    t_out, cost, proceeds incl. fees) and log["invested"] (market value / NAV at each close)."""
     idx = {c: i for i, c in enumerate(codes)}
     T = len(dates)
     t0 = int(np.searchsorted(dates, np.datetime64(CR.START)))
@@ -138,6 +140,10 @@ def engine(dates, codes, A, raw, offer, bid, ml, tr, gap, pct: dict[str, float],
             held[("gap", x["code"])] = {"cost": cost}
             proceeds = cost * (1 + x["net"])
             day_gap += proceeds
+            if log is not None:
+                cl = x.get("close")
+                log.setdefault("trades", []).append({"strat": "gap", "code": x["code"], "t_in": t, "t_out": t, "cost": cost, "proceeds": proceeds,
+                                                     "entry": x["open"] + tick(x["open"]), "exit": cl - tick(cl) if cl else None})
         for key in [k for k in held if k[0] == "gap"]:
             held.pop(key)
         cash += day_gap
@@ -150,6 +156,9 @@ def engine(dates, codes, A, raw, offer, bid, ml, tr, gap, pct: dict[str, float],
             px = bid[t, j] if bid[t, j] > 0 and bid[t, j] <= raw[t, j] else raw[t, j] - tick(raw[t, j])
             value = p["units"] * (A[t, j] / p["a_in"]) * (px / raw[t, j]) if not np.isnan(A[t, j]) else p["units"]
             cash += value * (1 - CR.FEE_SELL)
+            if log is not None:
+                log.setdefault("trades", []).append({"strat": x["strat"], "code": x["code"], "t_in": p["t"], "t_out": t, "cost": p["cost"],
+                                                     "proceeds": value * (1 - CR.FEE_SELL), "why": x.get("why"), "entry": p.get("px"), "exit": px})
         mv = sum(p["units"] * (A[t, idx[k[1]]] / p["a_in"]) for k, p in held.items() if k[0] != "gap" and not np.isnan(A[t, idx[k[1]]]))
         nav_now = cash + mv
         for x in sorted(entries.get(t, []), key=lambda z: 0 if z["strat"] == "trend" else 1):
@@ -166,10 +175,12 @@ def engine(dates, codes, A, raw, offer, bid, ml, tr, gap, pct: dict[str, float],
                 continue
             cash -= cost
             mv += cost / (1 + CR.FEE_BUY)
-            held[key] = {"t": t, "a_in": A[t, j], "units": lots * CR.LOT * raw[t, j], "cost": cost, "scale": expo}
+            held[key] = {"t": t, "a_in": A[t, j], "units": lots * CR.LOT * raw[t, j], "cost": cost, "scale": expo, "px": px}
         mv = sum(p["units"] * (A[t, idx[k[1]]] / p["a_in"]) for k, p in held.items() if not np.isnan(A[t, idx[k[1]]]))
         nav[t] = cash + mv
         peak = max(peak, nav[t])
+        if log is not None:
+            log.setdefault("invested", []).append(mv / nav[t] if nav[t] > 0 else 0.0)
     navs = pd.Series(nav[t0:], index=dates[t0:])
     return navs, float(np.mean(expo_hist))
 

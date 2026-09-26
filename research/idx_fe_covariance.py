@@ -60,6 +60,7 @@ IDX_ML_CACHE=tmp/ml_strategy_cache.pkl.
 """
 from __future__ import annotations
 
+import json
 import os
 import pickle
 import sys
@@ -94,7 +95,8 @@ PCT, FLOOR = K.PCT, K.FLOOR
 MRC_MIN, MRC_MULT = 0.15, 1.5
 ERC_EVERY, ERC_BAND, ERC_CAP = 5, 0.25, 0.10
 BETA_CAP, SECTOR_CAP = 0.50, 0.25
-REF = {"cagr": 0.338, "sharpe": 1.83, "mdd": -0.179}
+# the #192 (d) baseline this run must reproduce; FE_REF (JSON) carries a re-run #192's numbers (re-run 2026-09-26)
+REF = json.loads(os.environ["FE_REF"]) if os.environ.get("FE_REF") else {"cagr": 0.338, "sharpe": 1.83, "mdd": -0.179}
 
 
 # ---- inputs ------------------------------------------------------------------------------------------------------------------
