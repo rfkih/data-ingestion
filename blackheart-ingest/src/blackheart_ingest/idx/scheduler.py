@@ -25,7 +25,7 @@ Schedule (WIB):
   09:00, 09:05    combo_gap_entry     gap-fade sleeve of the combined book (its 15:50 exit is a session_tick intent)
   every minute    session_tick        08:58-15:58 WIB: the session rule engine (idx/intents.py) - ML confirmations, the ML
                                       same-day stop, the gap-fade closing exit; one job for every intraday rule
-  16:30, 19:30    combo_nudge         lines still open on today's live tickets; 20:30 combo_expire = unexecuted lines marked missed + scorecard
+  16:30, 19:30    combo_nudge         lines still open on today's live tickets; 20:30 combo_expire = unexecuted lines marked missed + scorecard + kill rules (idx/killrules.py)
   18:00 Mon-Fri   alert if today's bar has still not landed (holiday, or IDX late)
   20:30 Mon-Fri   announce_recent     all-emiten disclosures for the last 3 days -> idx.announcement / idx.event
   21:00 Mon-Fri   fundamentals        discover current fiscal year -> download pending workbooks (universe) -> parse
@@ -1064,7 +1064,7 @@ def run_combo_expire() -> None:
     if today_wib().weekday() >= 5:
         return
     _combo_each("expire")
-    _combo_each("scorecard")
+    _combo_each("kill_check")                        # scorecard (stored) + the pre-registered kill rules; alert on a live breach
 
 
 def run_logos() -> None:

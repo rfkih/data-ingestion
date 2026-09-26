@@ -111,7 +111,22 @@ def get_book(conn: psycopg.Connection, book: str) -> dict[str, Any]:
     return rows[0]
 
 
-def ensure_book(conn: psycopg.Connection, book: str, **fields: Any) -> None:
+def ensure_book(conn: psycopg.Connection, book: str, freeze_override: str | None = None, **fields: Any) -> None:
+    """``freeze_override`` = the reason for changing a FROZEN combo book anyway (combo_book.freeze_violations); journalled."""
+    if fields:
+        from . import combo_book
+        cols = ["rule", "params", "strategy", "max_names", "regime_filter", "entry_gate", "take_profit_pct", "trend_exit",
+                "cash_floor_pct", "stress_cash_pct", "stress_rule", "trend_variant"]
+        old = _rows(conn, f"SELECT {', '.join(cols)} FROM idx.book WHERE book = %s", (book,), cols)
+        bad = combo_book.freeze_violations(old[0], fields) if old else []
+        if bad and not (freeze_override or "").strip():
+            f = combo_book.freeze_of(old[0]["params"]) or {}
+            raise combo_book.FrozenError(f"{book} is frozen until {f.get('until')} (Phase 0: one configuration measured live); not allowed: "
+                                  f"{', '.join(bad)}. Switching a sleeve off is allowed; anything else needs an override with a reason.")
+        if bad:
+            from . import journal
+            journal.record(conn, book, "operator", "note", rationale=f"FREEZE OVERRIDE ({', '.join(bad)}): {str(freeze_override).strip()}",
+                           refs={"fields": sorted(fields)}, commit=False)
     with conn.cursor() as cur:
         cur.execute("INSERT INTO idx.book (book) VALUES (%s) ON CONFLICT (book) DO NOTHING", (book,))
         if cur.rowcount == 1 and "strategy" not in fields:                # a new book follows the deployed strategy

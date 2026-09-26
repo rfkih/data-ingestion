@@ -80,10 +80,17 @@ CATALOG: dict[str, dict[str, str]] = {
     "ml": {"name": "ML ranking", "one": "The 5-day score, cost-aware: signalled when the expected excess pays twice the round trip, bought only after the price confirms (one or several +x % within n days rules, each with a share of the slot).",
            "line": "Nightly plan + intraday confirmation · holds ~25 days"},
 }
-# what the backtest says each sleeve does (the scorecard's yardstick; studies #160/#162 ML, #157 trend, #166 gap)
-BACKTEST = {"ml": {"win": 0.54, "avg_net": 0.075, "hold_days": 24, "cagr": 0.362},
-            "trend": {"win": 0.38, "avg_net": 0.052, "hold_days": 24, "cagr": 0.285},
-            "gap": {"win": 0.49, "avg_net": 0.0304, "hold_days": 0, "cagr": None}}
+# what the backtest says each sleeve does - the scorecard's yardstick: study #348, the book AS DEPLOYED (10/5/10, ens4, same-day
+# stop 5 %, floor 0.30), per sleeve from its trade list (win share, mean net return per trade, median hold in trading days,
+# the sleeve run alone). The kill rules (idx/killrules.py) bootstrap the same trades.
+BACKTEST = {"ml": {"win": 0.31, "avg_net": 0.0653, "hold_days": 5, "cagr": 0.297, "study": 348},
+            "trend": {"win": 0.42, "avg_net": 0.0452, "hold_days": 19, "cagr": 0.127, "study": 348},
+            "gap": {"win": 0.49, "avg_net": 0.0262, "hold_days": 0, "cagr": 0.128, "study": 348}}
+# Phase 0 (operator 2026-09-26): the live book and its paper twin are FROZEN - no change to what the book trades or how much,
+# so the live record measures ONE configuration. Allowed while frozen: switching a sleeve OFF (a kill rule's action), cash,
+# fees, broker, label, note. Anything else needs an explicit override with a reason, which is journalled. Stored in
+# params["freeze"] = {"since", "until", "reason"}; the twin book is params["twin"].
+FREEZE_FREE_FIELDS = ("cash", "fee_buy_pct", "fee_sell_pct", "div_tax_pct", "broker", "note", "label")
 SESSION_FROM, SESSION_TO = time(8, 58), time(15, 50)
 
 
@@ -138,6 +145,43 @@ def settings(b: dict[str, Any]) -> dict[str, Any]:
         out["sizes"][k] = v
         out["sleeves"][k] = 0.0 if k in off else v                     # an OFF sleeve keeps its size but takes no new position
     return out
+
+
+class FrozenError(ValueError):
+    """A change a frozen combo book does not allow (a ValueError, so the API answers 422 and rolls back)."""
+
+
+def freeze_of(params: dict[str, Any] | str | None, today: date | None = None) -> dict[str, Any] | None:
+    """The book's freeze when it is in force on ``today`` (WIB), else None. Pure."""
+    if isinstance(params, str):
+        import json
+        params = json.loads(params) if params.strip() else {}
+    f = (params or {}).get("freeze")
+    if not f:
+        return None
+    today = today or datetime.now(WIB).date()
+    until = date.fromisoformat(str(f["until"])) if f.get("until") else None
+    return f if until is None or today <= until else None
+
+
+def freeze_violations(old: dict[str, Any], fields: dict[str, Any], today: date | None = None) -> list[str]:
+    """Pure. What in ``fields`` (an ensure_book update of the book row ``old``) the freeze forbids; [] = allowed. A sleeve
+    moving to 'off' is always allowed (turning risk off is what a kill rule asks for); so are the book's money/admin fields."""
+    if old.get("rule") != "combo" or freeze_of(old.get("params"), today) is None:
+        return []
+    bad = [k for k in fields if k not in FREEZE_FREE_FIELDS and k != "params" and fields[k] != old.get(k)]
+    if "params" in fields:
+        import json
+        was, now = old.get("params") or {}, fields["params"]
+        was = json.loads(was) if isinstance(was, str) else dict(was)
+        now = json.loads(now) if isinstance(now, str) else dict(now)
+        if was.get("freeze") != now.get("freeze"):
+            bad.append("params.freeze")
+        if {k: v for k, v in was.items() if k not in ("off", "freeze")} != {k: v for k, v in now.items() if k not in ("off", "freeze")}:
+            bad.append("params")
+        if set(was.get("off") or []) - set(now.get("off") or []):
+            bad.append("params.off (a sleeve back on)")
+    return bad
 
 
 def strategy_pages() -> dict[str, str]:
@@ -787,9 +831,15 @@ def nudge(conn: psycopg.Connection, book: str) -> str | None:
 # ---------------------------------------------------------------------------------------------------------------- scorecard
 def scorecard(conn: psycopg.Connection, book: str, d: date | None = None, store: bool = True) -> dict[str, Any]:
     """Per sleeve since the book started: lines issued / filled / missed, slippage vs the plan's reference (bps, buys pay more =
-    positive), hours from ticket to fill record, realised and open P&L; the book's NAV path; the backtest yardstick."""
+    positive), hours from ticket to fill record, realised and open P&L; the book's NAV path; the backtest yardstick.
+
+    Implementation shortfall against the paper twin (params["twin"], same rule and settings): each live fill is matched to the
+    twin's fill of the same sleeve, name and side on the same day - ``vs_twin_bps`` is the pure execution cost (the twin fills
+    at the desk's paper price), and ``missed_twin_filled`` counts live misses the twin did trade (the trades the backtest
+    has and the live book does not). The kill rules (idx/killrules.py) are evaluated on the result."""
     d = d or datetime.now(WIB).date()
     b = bk.get_book(conn, book)
+    twin = twin_fills(conn, str((b.get("params") or {}).get("twin") or "")) if ticket.is_live(book) else {}
     rows = _rows(conn, """
         SELECT t.id AS ticket, t.mode, t.ticket_date, t.created_at AS issued_at, l.code, l.side, l.lots, l.limit_price, l.ref_close, l.status, l.skip_reason, l.flags,
                l.filled_lots, f.price AS fill_price, f.fee, f.created_at AS filled_at, f.trade_date AS fill_date
@@ -800,7 +850,8 @@ def scorecard(conn: psycopg.Connection, book: str, d: date | None = None, store:
     per: dict[str, dict[str, Any]] = {}
     for r in rows:
         s = sleeve_of(r["flags"])
-        p = per.setdefault(s, {"lines": 0, "filled": 0, "missed": 0, "skipped": 0, "slip_bps": [], "delay_h": [], "buy_rp": Decimal(0), "sell_rp": Decimal(0), "fees_rp": Decimal(0)})
+        p = per.setdefault(s, {"lines": 0, "filled": 0, "missed": 0, "skipped": 0, "slip_bps": [], "delay_h": [], "buy_rp": Decimal(0), "sell_rp": Decimal(0), "fees_rp": Decimal(0),
+                               "vs_twin": [], "missed_twin": 0})
         p["lines"] += 1
         if r["status"] in ("filled", "partial") and r["fill_price"]:
             p["filled"] += 1
@@ -808,6 +859,9 @@ def scorecard(conn: psycopg.Connection, book: str, d: date | None = None, store:
             fp = Decimal(r["fill_price"])
             slip = (fp / ref - 1) if r["side"] == "buy" else (1 - fp / ref)
             p["slip_bps"].append(float(slip) * 1e4)
+            tp = twin.get((s, r["code"], r["side"], r["fill_date"]))
+            if tp:
+                p["vs_twin"].append(twin_gap_bps(r["side"], fp, tp))
             if r["filled_at"] and r["issued_at"]:
                 p["delay_h"].append((r["filled_at"] - r["issued_at"]).total_seconds() / 3600)
             gross = Decimal(r["filled_lots"]) * ticket.LOT * fp
@@ -820,6 +874,8 @@ def scorecard(conn: psycopg.Connection, book: str, d: date | None = None, store:
         elif r["status"] == "skipped":
             if (r["skip_reason"] or "").startswith("missed"):
                 p["missed"] += 1
+                if twin.get((s, r["code"], r["side"], r["ticket_date"])):
+                    p["missed_twin"] += 1
             else:
                 p["skipped"] += 1
     pos = sleeve_positions(conn, book)
@@ -833,7 +889,9 @@ def scorecard(conn: psycopg.Connection, book: str, d: date | None = None, store:
                     "fill_rate": (p["filled"] / p["lines"]) if p["lines"] else None,
                     "slip_bps_mean": float(np.mean(p["slip_bps"])) if p["slip_bps"] else None, "slip_bps_median": float(np.median(p["slip_bps"])) if p["slip_bps"] else None,
                     "delay_h_median": float(np.median(p["delay_h"])) if p["delay_h"] else None, "bought_rp": float(p["buy_rp"]), "sold_rp": float(p["sell_rp"]),
-                    "open_rp": float(open_value), "pnl_rp": float(pnl), "fees_rp": float(p["fees_rp"]), "open_names": sorted(pos.get(s, {})), "backtest": BACKTEST.get(s)}
+                    "open_rp": float(open_value), "pnl_rp": float(pnl), "fees_rp": float(p["fees_rp"]), "open_names": sorted(pos.get(s, {})), "backtest": BACKTEST.get(s),
+                    "vs_twin_bps": [round(x, 1) for x in p["vs_twin"]], "vs_twin_bps_mean": float(np.mean(p["vs_twin"])) if p["vs_twin"] else None,
+                    "missed_twin_filled": p["missed_twin"]}
     nav = _rows(conn, "SELECT trade_date, nav, cash FROM idx.book_nav WHERE book = %s ORDER BY trade_date", (book,), ["trade_date", "nav", "cash"])
     navs = [float(r["nav"]) for r in nav]
     peak = 0.0
@@ -845,7 +903,14 @@ def scorecard(conn: psycopg.Connection, book: str, d: date | None = None, store:
            "nav": {"first": navs[0] if navs else None, "last": navs[-1] if navs else None, "days": len(navs), "mdd": mdd,
                    "return": (navs[-1] / navs[0] - 1) if len(navs) > 1 and navs[0] else None},
            "watches": watch_counts(conn, book),
-           "settings": settings(b)}
+           "settings": settings(b), "twin": (b.get("params") or {}).get("twin"), "freeze": freeze_of(b.get("params"), d)}
+    try:
+        from . import killrules
+        out["kill"] = killrules.evaluate(conn, book, out)
+    except Exception:                                                       # the scorecard must not fail on its judge
+        conn.rollback()
+        logger.exception("combo kill rules failed for %s", book)
+        out["kill"] = None
     if store:
         import json
         with conn.cursor() as cur:
@@ -853,6 +918,34 @@ def scorecard(conn: psycopg.Connection, book: str, d: date | None = None, store:
                         (book, d, json.dumps(out, default=str)))
         conn.commit()
     return out
+
+
+def twin_fills(conn: psycopg.Connection, twin: str) -> dict[tuple[str, str, str, date], Decimal]:
+    """The paper twin's fills keyed (sleeve, code, side, trade day) -> the first fill price."""
+    if not twin:
+        return {}
+    out: dict[tuple[str, str, str, date], Decimal] = {}
+    for r in _rows(conn, """SELECT l.code, l.side, l.flags, f.trade_date, f.price FROM idx.ticket_line l JOIN idx.ticket t ON t.id = l.ticket_id
+                             JOIN idx.fill f ON f.id = l.fill_id WHERE t.book = %s AND l.filled_lots > 0 ORDER BY f.id""", (twin,),
+                   ["code", "side", "flags", "trade_date", "price"]):
+        out.setdefault((sleeve_of(r["flags"]), r["code"], r["side"], r["trade_date"]), Decimal(r["price"]))
+    return out
+
+
+def twin_gap_bps(side: str, live: Decimal, twin: Decimal) -> float:
+    """Pure. Live fill vs the twin's, in bps, positive = the live book did worse (paid more on a buy, got less on a sell)."""
+    g = (live / twin - 1) if side == "buy" else (1 - live / twin)
+    return float(g) * 1e4
+
+
+def kill_check(conn: psycopg.Connection, book: str, d: date | None = None) -> str:
+    """20:30 after expire: the scorecard (stored, kill rules inside) and, on a live book, one alert while a rule is breached."""
+    from . import killrules
+    sc = scorecard(conn, book, d)
+    ev = sc.get("kill")
+    if ev and ticket.is_live(book):
+        killrules.alert(conn, book, ev, d)
+    return killrules.render(ev) if ev else "kill rules unavailable"
 
 
 def watch_counts(conn: psycopg.Connection, book: str) -> dict[str, int]:
@@ -878,6 +971,19 @@ def render_scorecard(sc: dict[str, Any]) -> str:
         o.append(f"{s:<7}{p['lines']:>6}{p['filled']:>7}{p['missed']:>7}{('%+.0f' % p['slip_bps_mean']) if p['slip_bps_mean'] is not None else '-':>10}"
                  f"{('%.1f' % p['delay_h_median']) if p['delay_h_median'] is not None else '-':>9}{p['pnl_rp']:>14,.0f}{p['fees_rp']:>10,.0f}  "
                  + (f"win {bt.get('win', 0) * 100:.0f} % avg {bt.get('avg_net', 0) * 100:+.1f} %" if bt else ""))
+    tw = {s: p for s, p in sc["sleeves"].items() if p.get("vs_twin_bps_mean") is not None or p.get("missed_twin_filled")}
+    if tw:
+        parts = []
+        for s, p in tw.items():
+            m = p.get("vs_twin_bps_mean")
+            parts.append(f"{s} {'-' if m is None else f'{m:+.0f} bps'} ({len(p.get('vs_twin_bps') or [])} fills), "
+                         f"{p.get('missed_twin_filled', 0)} missed that the twin traded")
+        o.append(f"vs paper twin {sc.get('twin')}: " + ", ".join(parts))
+    if sc.get("freeze"):
+        o.append(f"FROZEN {sc['freeze'].get('since')} -> {sc['freeze'].get('until')}: {sc['freeze'].get('reason', '')}")
     if sc.get("watches"):
         o.append("watches: " + ", ".join(f"{k} {v}" for k, v in sc["watches"].items()))
+    if sc.get("kill"):
+        from . import killrules
+        o.append(killrules.render(sc["kill"]))
     return "\n".join(o)

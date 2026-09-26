@@ -1451,8 +1451,30 @@ def cmd_combo(a: argparse.Namespace) -> int:
                     else:
                         p["ml"]["confirm_rules"] = [[float(x.split("/")[0]) / 100, int(x.split("/")[1])] for x in a.ml_confirm.split(",") if x.strip()]
                 cb.settings({"params": p})
-                bkm.ensure_book(conn, bkid, params=p)
+                bkm.ensure_book(conn, bkid, freeze_override=a.override, params=p)
                 print(bkid, _json.dumps(p))
+            return 0
+        if a.sub == "freeze":                                              # Phase 0: freeze [--until D --reason R] | --off (needs --override)
+            from . import book as bkm
+            for bkid in books:
+                b = bkm.get_book(conn, bkid)
+                p = dict(b.get("params") or {})
+                if a.off:
+                    p.pop("freeze", None)
+                else:
+                    if not a.until or not (a.reason or "").strip():
+                        print("freeze needs --until YYYY-MM-DD and --reason")
+                        return 2
+                    p["freeze"] = {"since": str(datetime.now(cb.WIB).date()), "until": str(_d(a.until)), "reason": a.reason.strip()}
+                if a.twin is not None:
+                    p["twin"] = a.twin or None
+                bkm.ensure_book(conn, bkid, freeze_override=a.override, params=p)
+                print(bkid, _json.dumps({k: p.get(k) for k in ("freeze", "twin")}))
+            return 0
+        if a.sub == "kill":
+            from . import killrules
+            for bkid in books:
+                print(killrules.render(killrules.evaluate(conn, bkid)))
             return 0
         for bkid in books:
             if a.sub == "plan":
@@ -1820,8 +1842,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top", type=int, default=20)
     p.add_argument("--as-of")
     p.set_defaults(fn=cmd_ml)
-    p = sub.add_parser("combo", help="combined book: create --kind paper|live --label L --cash RP [--owner EMAIL] [--trend 0.05 --ml 0.05 --gap 0.10 --slots 20] | set [--book B] [--trend|--ml|--gap|--slots] | plan | preopen | confirm | gap-entry | gap-exit | expire | nudge | scorecard | status [--book B] [--as-of D]")
-    p.add_argument("sub", choices=["create", "set", "plan", "preopen", "confirm", "gap-entry", "gap-exit", "expire", "nudge", "scorecard", "status"])
+    p = sub.add_parser("combo", help="combined book: create --kind paper|live --label L --cash RP [--owner EMAIL] [--trend 0.05 --ml 0.05 --gap 0.10 --slots 20] | set [--book B] [--trend|--ml|--gap|--slots] | plan | preopen | confirm | gap-entry | gap-exit | expire | nudge | scorecard | status [--book B] [--as-of D] | freeze --until D --reason R [--twin B] | kill")
+    p.add_argument("sub", choices=["create", "set", "plan", "preopen", "confirm", "gap-entry", "gap-exit", "expire", "nudge", "scorecard", "status",
+                                   "freeze", "kill"])
     p.add_argument("--book")
     p.add_argument("--kind", choices=["paper", "live"], default="paper")
     p.add_argument("--label")
@@ -1834,6 +1857,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--slots", type=int)
     p.add_argument("--cash-floor", type=float, help="set: share of NAV kept in cash, e.g. 0.30 (menu 34); 0 = off")
     p.add_argument("--ml-confirm", help="set: confirmation rules 'pct/days,...' e.g. '5/10,8/10,10/10,8/5' (ML-8 ens4), or 'single'")
+    p.add_argument("--override", help="set/freeze on a FROZEN book: the reason for changing it anyway (journalled)")
+    p.add_argument("--until", help="freeze: last frozen day, YYYY-MM-DD")
+    p.add_argument("--reason", help="freeze: why")
+    p.add_argument("--off", action="store_true", help="freeze: lift the freeze (needs --override)")
+    p.add_argument("--twin", help="freeze: the paper twin book the live fills are measured against ('' = none)")
     p.add_argument("--as-of")
     p.set_defaults(fn=cmd_combo)
     p = sub.add_parser("scores", help="public factor scores (spec §04): build [--as-of D] | show [--code X] [--as-of D] | stats [--refresh] [--criteria C]")
