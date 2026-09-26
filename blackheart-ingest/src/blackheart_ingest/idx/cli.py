@@ -1019,6 +1019,31 @@ def cmd_bar_opens(a: argparse.Namespace) -> int:
     return 0 if r.status == "ok" else 1
 
 
+def cmd_deriv(a: argparse.Namespace) -> int:
+    """Rights / warrants (idx/jobs/deriv.py): universe (IDX monthly tables + rights' terms) | bars (Stockbit daily) | all."""
+    from . import broker
+    from .client import IdxClient
+    from .jobs import deriv
+    since = date.fromisoformat(a.since) if a.since else deriv.FIRST
+    with get_connection() as conn:
+        if a.sub in ("universe", "all"):
+            with IdxClient() as cl:
+                r = deriv.run_universe(conn, cl, since)
+            print(f"universe {r.status}: {r.rows_out} month rows, offerings {r.detail}" + (f" - {r.error}" if r.error else ""))
+        if a.sub in ("bars", "all"):
+            cfg = broker.config(conn=conn)
+            headers = {"Authorization": f"Bearer {cfg['key']}", "X-Platform": "web", "Accept": "application/json",
+                       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) blackheart-idx research feed"}
+            r = deriv.run_bars(conn, headers, since=since, refetch=a.refetch)
+            print(f"bars {r.status}: {r.rows_in} series fetched, {r.rows_out} bars, {len(r.warnings)} empty" + (f" - {r.error}" if r.error else ""))
+        if a.sub == "status":
+            for row in conn.execute("""SELECT kind, count(DISTINCT idx_code), min(month), max(month) FROM idx.deriv_month GROUP BY 1""").fetchall():
+                print("month", row)
+            print("offerings", conn.execute("SELECT count(*), min(ex_date), max(ex_date) FROM idx.right_offering").fetchone())
+            print("bars", conn.execute("SELECT count(DISTINCT series), count(*), min(trade_date), max(trade_date) FROM idx.deriv_bar").fetchone())
+    return 0
+
+
 def cmd_bar_opens_stockbit(a: argparse.Namespace) -> int:
     import json as _json
 
@@ -1769,6 +1794,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--cache", help="directory for the Yahoo download (re-used by a second run)")
     p.set_defaults(fn=cmd_bar_opens)
+    p = sub.add_parser("deriv", help="rights / warrants: universe | bars | all | status [--since D] [--refetch]")
+    p.add_argument("sub", choices=["universe", "bars", "all", "status"])
+    p.add_argument("--since")
+    p.add_argument("--refetch", action="store_true")
+    p.set_defaults(fn=cmd_deriv)
     p = sub.add_parser("bar-opens-stockbit", help="fill the opens Yahoo could not, from Stockbit, same rule: --since D [--dry-run]")
     p.add_argument("--since", required=True)
     p.add_argument("--dry-run", action="store_true")

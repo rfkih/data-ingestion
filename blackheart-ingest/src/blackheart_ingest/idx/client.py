@@ -85,6 +85,11 @@ ENDPOINTS: dict[str, tuple[str, str, str | None]] = {
     "announcement": ("/primary/ListedCompany/GetAnnouncement?kodeEmiten={code}&indexFrom={index_from}"
                      "&pageSize={page_size}&dateFrom={date_from}&dateTo={date_to}&lang=id&keyword=",
                      "/id/perusahaan-tercatat/keterbukaan-informasi/", "Replies"),
+    # the exchange's "digital statistics" tables (urlName LINK_TRADING_SUMMARY_RIGHT / _WARRANT monthly, LINK_RIGHT_OFFERING yearly
+    # cumulative) - rights and warrants, which the daily stock summary does not carry (idx/jobs/deriv.py)
+    "digital_stat": ("/primary/DigitalStatistic/GetApiDataPaginated?urlName={name}&periodYear={year}&periodMonth={month}"
+                     "&periodType={period}&isPrint=False&cumulative={cumulative}&pageSize=500&pageNumber=1",
+                     "/id/data-pasar/laporan-statistik/digital-statistic/", "data"),
 }
 
 
@@ -304,6 +309,11 @@ class IdxClient:
         key = f"{code.upper() or '*'}:{date_from.isoformat()}:{date_to.isoformat()}:{index_from}"
         return self.fetch("announcement", key=key, code=quote(code.upper()), index_from=index_from,
                           page_size=page_size, date_from=yyyymmdd(date_from), date_to=yyyymmdd(date_to))
+
+    def digital_stat(self, name: str, year: int, month: int, period: str = "monthly", cumulative: bool = False) -> FetchResult:
+        key = f"{name}:{year}:{month}:{period}:{int(cumulative)}"
+        return self.fetch("digital_stat", key=key, name=name, year=year, month=month, period=period,
+                          cumulative="true" if cumulative else "false")
 
     # -- core ---------------------------------------------------------------------------------
 
