@@ -15,15 +15,16 @@ Schedule (WIB):
                                       + every held name's ARA price; runs `idx ara watch` in a subprocess
   every 2 min     ara_touch           in-session: held/watched names at the ARA limit - locked / sellers queued / faded (study #101)
   20:25 Mon-Fri   risk_check          risk report of each real book holding names (idx/risk.py); one warning a day per book past risk.LIMITS
-  20:40 Mon-Fri   ml_daily            self-learning prediction desk (idx/ml): realise, retrain the daily horizons, predict, score
+  20:40 Mon-Fri   ml_daily          self-learning prediction desk (idx/ml): realise, retrain the daily horizons, predict, score
   20:50 Mon-Fri   feed_symbols        feed subscription = every name >= Rp 5 bn 60-day median value + top 100 + held + watched
   16:30 Mon-Fri   ml_intraday_train   retrain the 1/10/30/60-minute horizons on every feed day
   every 1 min     ml_intraday_predict in-session: score every live name for the minute horizons
   every 10 min    ml_evaluate         fill in what happened for every forecast whose horizon has passed
   21:10 Mon-Fri   combo_plan          the combined book: tomorrow's plan (sells, trend buys, ML watches) + push (retry 21:40)
   08:30 Mon-Fri   combo_preopen       the plan and the ML levels on the phone before the open
-  09:00, 09:05    combo_gap_entry     gap-fade sleeve of the combined book; 15:50 combo_gap_exit
-  every 2 min     combo_confirm       in-session: ML watches whose price confirmed -> buy ticket
+  09:00, 09:05    combo_gap_entry     gap-fade sleeve of the combined book (its 15:50 exit is a session_tick intent)
+  every minute    session_tick        08:58-15:58 WIB: the session rule engine (idx/intents.py) - ML confirmations, the ML
+                                      same-day stop, the gap-fade closing exit; one job for every intraday rule
   16:30, 19:30    combo_nudge         lines still open on today's live tickets; 20:30 combo_expire = unexecuted lines marked missed + scorecard
   18:00 Mon-Fri   alert if today's bar has still not landed (holiday, or IDX late)
   20:30 Mon-Fri   announce_recent     all-emiten disclosures for the last 3 days -> idx.announcement / idx.event
@@ -49,6 +50,7 @@ from zoneinfo import ZoneInfo
 from ..shared.db import get_connection
 from . import (
     book,
+    broker,
     candidates,
     features,
     fin_store,
@@ -62,11 +64,13 @@ from . import (
 )
 from .client import BudgetExceeded, CircuitOpen, IdxClient, IdxFetchError
 from .jobs import announce as job_announce
+from .jobs import bar_open as job_bar_open
 from .jobs import crosscheck as job_crosscheck
 from .jobs import daily as job_daily
 from .jobs import dividends as job_dividends
 from .jobs import fin as job_fin
 from .jobs import index as job_index
+from .jobs import index_open as job_index_open
 from .jobs import universe as job_universe
 from .metrics import universe_codes
 
@@ -111,6 +115,23 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
                 return
             ri = job_index.run(conn, cl, d)
             _fail_alert(conn, ri)
+        # IDX publishes no open for the index; take Yahoo's ^JKSE open for the new days (the chart's OHLC bars). Not
+        # alerted: a day without an open still has its close, and the next run fills it.
+        job_index_open.run(conn, since=d - timedelta(days=10))
+        # IDX leaves the open out for names outside the pre-opening session; fill the last ten days from Yahoo where
+        # the rule (jobs/bar_open.py) reproduces IDX's own opens on the same days - before publish, so market_data
+        # and the nightly model see them. A day Yahoo has not posted yet is filled on a later night.
+        rbo, _ = job_bar_open.run(conn, since=d - timedelta(days=10))
+        logger.info("idx bar opens %s filled=%s accuracy=%s", rbo.status, rbo.detail.get("filled"), rbo.detail.get("accuracy"))
+        # what Yahoo could not give (a name it does not carry, a day it misaligns on) from Stockbit, same rule
+        try:
+            cfg = broker.config(conn=conn)
+            sb_headers = {"Authorization": f"Bearer {cfg['key']}", "X-Platform": "web", "Accept": "application/json",
+                          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) blackheart-idx research feed"}
+            rsb, _ = job_bar_open.run_stockbit(conn, since=d - timedelta(days=10), headers=sb_headers)
+            logger.info("idx stockbit opens %s filled=%s", rsb.status, rsb.detail.get("filled"))
+        except Exception as e:  # no token or Stockbit down: the day keeps its gap until a later night
+            logger.warning("idx stockbit opens skipped: %s", e)
         rp = publish.publish(conn, since=publish.default_since(7), yahoo_dir=None)
         _fail_alert(conn, rp)
         logger.info("idx publish %s rows=%s", rp.status, rp.rows_out)
@@ -1012,18 +1033,24 @@ def run_combo_gap_entry() -> None:
     _combo_each("gap_entry")
 
 
-def run_combo_gap_exit() -> None:
-    if today_wib().weekday() >= 5:
+def run_session_tick() -> None:
+    """Every minute in the session: the session rule engine (idx/intents.py) - every armed intent of every book, one price read:
+    ML confirmations (ml_confirm), the ML same-day stop (ml_stop, from 15:40), the gap-fade closing exit (gap_exit, from 15:50).
+    New rules are intent kinds / trigger types, not new jobs."""
+    from . import intents
+    if not intents.in_window(datetime.now(WIB)):
         return
-    _combo_each("gap_exit")
-
-
-def run_combo_confirm() -> None:
-    """Every 2 min in the session: ML watches whose price confirmed -> a buy ticket (live: draft + push; paper: filled)."""
-    from . import combo_book
-    if not combo_book.in_session(datetime.now(WIB)):
-        return
-    _combo_each("confirm")
+    with get_connection() as conn:
+        for rep in intents.session_tick(conn):
+            acted = [f for f in rep.get("fired", []) if not str(f["result"]).startswith("waiting")]
+            if acted or rep.get("created") or rep.get("cancelled") or rep.get("expired"):
+                logger.info("idx session tick %s: armed %s created %s cancelled %s fired %s", rep["book"], rep["armed"], rep["created"],
+                            rep["cancelled"], rep["fired"])
+            for f in rep.get("fired", []):
+                if str(f["result"]).startswith("error") or f["result"] == "validation":
+                    runlog.alert(conn, "warning", f"intents:{rep['book']}", f"intent #{f['intent']} {f['kind']} {f['code']}: {f['result']}"[:400],
+                                 kind="ticket", book=rep["book"])
+                    conn.commit()
 
 
 def run_combo_nudge() -> None:
@@ -1163,8 +1190,8 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_combo_plan, CronTrigger(day_of_week="mon-fri", hour=21, minute="10,40", timezone=WIB), id="combo_plan", misfire_grace_time=3600)
     s.add_job(run_combo_preopen, CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone=WIB), id="combo_preopen")
     s.add_job(run_combo_gap_entry, CronTrigger(day_of_week="mon-fri", hour=9, minute="0,5", timezone=WIB), id="combo_gap_entry")
-    s.add_job(run_combo_gap_exit, CronTrigger(day_of_week="mon-fri", hour=15, minute=50, timezone=WIB), id="combo_gap_exit")
-    s.add_job(run_combo_confirm, IntervalTrigger(minutes=2), id="combo_confirm", misfire_grace_time=60)
+    s.add_job(run_session_tick, CronTrigger(day_of_week="mon-fri", hour="8-15", minute="*", second=5, timezone=WIB), id="session_tick",
+              misfire_grace_time=30, max_instances=1, coalesce=True)
     s.add_job(run_combo_nudge, CronTrigger(day_of_week="mon-fri", hour="16,19", minute=30, timezone=WIB), id="combo_nudge")
     s.add_job(run_combo_expire, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="combo_expire")
     # the online learning agent (idx/agent.py): paper decisions at 5 minutes a day, settlement + refit after the intraday train

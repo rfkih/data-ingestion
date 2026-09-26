@@ -290,6 +290,90 @@ def make_router(require_token) -> APIRouter:
         with get_connection() as conn:
             return ch.view(conn, code, bars=bars, minutes=minutes)
 
+    # ---- the Strategies page (idx/strategy_page.py; design "Blackridge Strategies.dc.html") -------------------------------
+    @router.get("/v2/strategies")
+    def strategies_v2(response: Response) -> dict[str, Any]:
+        """Every strategy the page shows: family, status, headline backtest (or an overlay's effect), live since start, the
+        portfolios it runs in. Figures are read from where they are stored; none is typed in code."""
+        from . import strategy_page as sp
+        response.headers["Cache-Control"] = "private, max-age=30"
+        with get_connection() as conn:
+            return _plain(sp.catalog(conn))
+
+    @router.get("/v2/strategies/{key}")
+    def strategy_v2(key: str, response: Response) -> dict[str, Any]:
+        """One strategy: Overview, where it runs, Research, Training, Options per portfolio (with versions) and Timeline."""
+        from . import strategy_page as sp
+        response.headers["Cache-Control"] = "private, max-age=30"
+        with get_connection() as conn:
+            try:
+                return _plain(sp.detail(conn, key))
+            except KeyError:
+                raise HTTPException(status_code=404, detail=f"no strategy {key!r}") from None
+
+    @router.get("/v2/strategies/{key}/performance")
+    def strategy_perf_v2(key: str, book: str, response: Response) -> dict[str, Any]:
+        """One portfolio's live curve and drawdown for this strategy (book NAV, the combined book's sleeve, or the agent)."""
+        from . import strategy_page as sp
+        response.headers["Cache-Control"] = "private, max-age=60"
+        with get_connection() as conn:
+            try:
+                return _plain(sp.performance(conn, key, book))
+            except KeyError:
+                raise HTTPException(status_code=404, detail=f"{key!r} does not run in {book!r}") from None
+
+    @router.get("/v2/strategies/{key}/results")
+    def strategy_results_v2(key: str, response: Response) -> dict[str, Any]:
+        """Trade lists per source: the imported backtest round trips and each portfolio's paper/live round trips."""
+        from . import strategy_page as sp
+        response.headers["Cache-Control"] = "private, max-age=60"
+        with get_connection() as conn:
+            return _plain(sp.results(conn, key))
+
+    @router.get("/v2/benchmarks")
+    def benchmarks_v2(response: Response) -> list[dict[str, Any]]:
+        """What the equity chart can be compared with: the exchange's indices and any imported mutual-fund NAV history."""
+        from . import benchmarks
+        response.headers["Cache-Control"] = "private, max-age=300"
+        with get_connection() as conn:
+            return benchmarks.catalog(conn)
+
+    @router.get("/v2/benchmarks/series")
+    def benchmark_series_v2(key: str, response: Response, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+        """One benchmark's daily values over [start, end] (ISO dates): index closes or fund NAV per unit."""
+        from . import benchmarks
+        response.headers["Cache-Control"] = "private, max-age=300"
+        try:
+            d0 = date.fromisoformat(start) if start else None
+            d1 = date.fromisoformat(end) if end else None
+            with get_connection() as conn:
+                return benchmarks.series(conn, key, d0, d1)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"no benchmark {key}") from None
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from None
+
+    @router.put("/v2/strategies/{key}/options/{book}", dependencies=[Depends(require_token)])
+    def strategy_options_v2(key: str, book: str, body: dict[str, Any] = _BODY, c: Caller = _CALLER) -> dict[str, Any]:
+        """{changes: [{option, value, reason}], expected_version} -> one new settings version. Operator only, like every
+        book setting; 409 when someone saved a newer version first, 422 when the book's own rules refuse a value."""
+        from . import strategy_page as sp
+        _operator_only(c.actor, f"changing {key} settings on a book")
+        with get_connection() as conn:
+            own_book(conn, book, c)
+            try:
+                out = sp.set_options(conn, key, book, list(body.get("changes") or []), int(body.get("expected_version") or 0), c.actor)
+            except LookupError as e:
+                conn.rollback()
+                raise HTTPException(status_code=409, detail=str(e)) from None
+            except ValueError as e:
+                conn.rollback()
+                raise HTTPException(status_code=422, detail=str(e)) from None
+            journal.record(conn, book, c.actor, "settings", rationale="; ".join(f"{x['label']} {x['from']} → {x['to']}: {x['reason']}"
+                                                                                 for x in out["changes"])[:900],
+                           refs={"strategy": key, "version": out["version"]})
+            return _plain(out)
+
     @router.get("/logo/{code}")
     def logo(code: str) -> Response:
         """The company's logo (PNG, fetched once from Stockbit's public CDN into the data dir - idx/logos.py). 404 when

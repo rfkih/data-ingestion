@@ -54,7 +54,8 @@ SEQ_CH = ["ret1", "hl_range", "clv", "lvr", "qimb0", "sprd0", "lfreq", "fnet0", 
 STUDY_CALIB = {"lock": (0.64, -3.92), "touch": (0.70, -3.40), "dl": (0.92, -3.72)}
 MIN_CALIB_POS = 30
 # what the app says about the model - the study's out-of-sample numbers, never recomputed at run time
-FACTS = {"study": 146, "report": "research/IDX_ARA_MICRO_2026-09-24.md", "auc": "0.88-0.93", "precision_top5": "8-20 %",
+FACTS = {"study": 237, "report": "research/IDX_ARA_MICRO_2026-09-24.md",  # #146 re-run on corrected opens: AUC 0.901 -> 0.900, p@5 unchanged
+         "auc": "0.88-0.93", "precision_top5": "8-20 %",
          "base_rate": "0.3-0.9 %", "lift": "~20x", "recall_top20": "48-76 %", "test_years": "2022-2026",
          "note": "nama yang paling mungkin terkunci biasanya sudah terkunci hari ini; yang masih bisa dibeli rata-rata rugi besok",
          # the same figures as numbers, for a screen that has to print them: the model's own scorecard (study #146) and
@@ -90,7 +91,9 @@ def load_summary(conn: psycopg.Connection, start: date = START, end: date | None
     """Every daily-summary row (all boards) with the bar's adjustment factor; ~1.4 M rows for 2020->today in ~15 s."""
     cols = ["code", "d", *COLS[:-1], "bd", "adj"]
     with conn.cursor(row_factory=tuple_row) as cur:                      # the desk's connections default to dict rows
-        cur.execute("""SELECT s.code, s.trade_date, s.previous::float8, s.open::float8, s.high::float8, s.low::float8, s.close::float8,
+        # the open from idx.bar: IDX's own where it published one, else the validated Yahoo fill (jobs/bar_open.py).
+        # daily_summary.open is NULL for every name outside the pre-opening session, which left gap_open empty for most.
+        cur.execute("""SELECT s.code, s.trade_date, s.previous::float8, COALESCE(b.open, s.open)::float8, s.high::float8, s.low::float8, s.close::float8,
                               s.volume::float8, s.value::float8, s.frequency::float8, s.bid::float8, s.bid_volume::float8, s.offer::float8,
                               s.offer_volume::float8, s.foreign_buy::float8, s.foreign_sell::float8, s.nonreg_volume::float8,
                               s.tradeable_shares::float8, substr(s.remarks, 5, 1), b.adj_factor::float8

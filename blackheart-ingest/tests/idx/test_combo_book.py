@@ -84,6 +84,31 @@ def test_compose_sells_exits_buys_trend_and_watches_ml_within_slots() -> None:
     assert set(res["targets"]) >= {"AAAA", "BBBB", "NNNN"} and "TTTT" not in res["targets"]
 
 
+def test_ml_stop_sells_at_the_band_floor_and_is_off_by_default() -> None:
+    """ML-9 (#281): a close at or below (1 - stop) x entry sells next session; the limit sits at the lower auto-rejection bound so
+    the stop fills even if the name keeps falling. No stop in the defaults; the stop is checked after expiry and before the swap."""
+    pos = {"gap": {}, "trend": {}, "manual": {},
+           "ml": {"SSSS": {"lots": Decimal(10), "entry_date": date(2026, 9, 1), "entry_price": Decimal(1000)},   # close 945: -5.5 %
+                  "KKKK": {"lots": Decimal(10), "entry_date": date(2026, 9, 1), "entry_price": Decimal(1000)}}}  # close 960: -4 %
+    closes = {"SSSS": Decimal(945), "KKKK": Decimal(960)}
+    ml = _ml([("SSSS", 0.02, 0.01, 945, 6e9), ("KKKK", 0.02, 0.01, 960, 6e9)])            # scores still positive: no swap
+    off = cb.compose(BOOK, cb.settings({"params": {}}), Decimal(20_000_000), Decimal(5_000_000), pos, closes, [], [], ml, {}, set(), set(), date(2026, 9, 25))
+    assert cb.settings({"params": {}})["ml"]["stop"] is None and not [ln for ln in off["lines"] if ln["side"] == "sell"]
+    S = cb.settings({"params": {"ml": {"stop": 0.05}}})
+    res = cb.compose(BOOK, S, Decimal(20_000_000), Decimal(5_000_000), pos, closes, [], [], ml, {}, set(), set(), date(2026, 9, 25))
+    sells = {ln["code"]: ln for ln in res["lines"] if ln["side"] == "sell"}
+    assert set(sells) == {"SSSS"}                                                          # -5.5 % stops, -4 % does not
+    s = sells["SSSS"]
+    assert "ml:stop" in s["flags"] and "exit:must" in s["flags"] and "ML stop 5 %" in s["reason"]
+    lo, _hi = cb.ticket.reject_band(Decimal(945))
+    assert s["limit_price"] <= lo + cb.ticket.tick_size(lo) and s["limit_price"] < Decimal(940)   # at the band floor, not close - 1 tick
+    assert s["notional"] == Decimal(10) * cb.ticket.LOT * s["limit_price"]
+    exp = cb.compose(BOOK, S, Decimal(20_000_000), Decimal(5_000_000), pos, closes, [], [], ml, {"SSSS": 61}, set(), set(), date(2026, 9, 25))
+    assert "expiry" in {ln["code"]: ln for ln in exp["lines"]}["SSSS"]["reason"]          # expiry is checked first
+    with pytest.raises(ValueError):
+        cb.settings({"params": {"ml": {"stop": 0.9}}})
+
+
 def test_confirm_rules_make_one_watch_per_rule_with_a_share_of_the_slot() -> None:
     S = cb.settings({"params": {"ml": {"confirm_rules": [[0.05, 10], [0.08, 10], [0.10, 10], [0.08, 5]]}}})
     assert S["ml"]["rule_names"] == ["+5/10", "+8/10", "+10/10", "+8/5"] and abs(S["ml"]["size_frac"] - 0.25) < 1e-9

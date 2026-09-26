@@ -36,13 +36,19 @@ _SUMMARY_SQL = (
     + ", ".join(f"{c} = EXCLUDED.{c}" for c in _SUMMARY_COLS if c not in ("trade_date", "code"))
 )
 _BAR_SQL = """
-INSERT INTO idx.bar (code, trade_date, source, basis, open, high, low, close, volume, value, open_missing, quality_flags)
+INSERT INTO idx.bar (code, trade_date, source, basis, open, high, low, close, volume, value, open_missing, quality_flags, open_src)
 VALUES (%(code)s, %(trade_date)s, %(source)s, %(basis)s, %(open)s, %(high)s, %(low)s, %(close)s, %(volume)s, %(value)s,
-        %(open_missing)s, %(quality_flags)s)
+        %(open_missing)s, %(quality_flags)s, CASE WHEN %(open)s::numeric IS NULL THEN NULL ELSE 'idx' END)
 ON CONFLICT (code, trade_date) DO UPDATE SET
-    source = EXCLUDED.source, basis = EXCLUDED.basis, open = EXCLUDED.open, high = EXCLUDED.high,
+    source = EXCLUDED.source, basis = EXCLUDED.basis, high = EXCLUDED.high,
     low = EXCLUDED.low, close = EXCLUDED.close, volume = EXCLUDED.volume, value = EXCLUDED.value,
-    open_missing = EXCLUDED.open_missing, quality_flags = EXCLUDED.quality_flags, updated_at = now()
+    open_missing = EXCLUDED.open_missing, quality_flags = EXCLUDED.quality_flags, updated_at = now(),
+    -- IDX's own open wins; without one, an open filled by jobs/bar_open.py survives the re-run while it still lies
+    -- inside the day's (possibly corrected) low-high
+    open = CASE WHEN EXCLUDED.open IS NOT NULL THEN EXCLUDED.open
+                WHEN idx.bar.open_src IN ('yahoo', 'stockbit') AND idx.bar.open BETWEEN EXCLUDED.low AND EXCLUDED.high THEN idx.bar.open END,
+    open_src = CASE WHEN EXCLUDED.open IS NOT NULL THEN 'idx'
+                    WHEN idx.bar.open_src IN ('yahoo', 'stockbit') AND idx.bar.open BETWEEN EXCLUDED.low AND EXCLUDED.high THEN idx.bar.open_src END
 """
 # adj_factor is deliberately NOT in the upsert: it is owned by corporate-action detection.
 
@@ -233,11 +239,12 @@ def replay(conn: psycopg.Connection, d: date) -> runlog.RunResult:
 
 
 _FALLBACK_SQL = """
-INSERT INTO idx.bar (code, trade_date, source, basis, open, high, low, close, volume, value, open_missing, quality_flags)
-VALUES (%(code)s, %(trade_date)s, 'yahoo', 'split_only', %(open)s, %(high)s, %(low)s, %(close)s, %(volume)s, %(value)s, false, '{fallback}')
+INSERT INTO idx.bar (code, trade_date, source, basis, open, high, low, close, volume, value, open_missing, quality_flags, open_src)
+VALUES (%(code)s, %(trade_date)s, 'yahoo', 'split_only', %(open)s, %(high)s, %(low)s, %(close)s, %(volume)s, %(value)s, false, '{fallback}',
+        CASE WHEN %(open)s::numeric IS NULL THEN NULL ELSE 'yahoo' END)
 ON CONFLICT (code, trade_date) DO UPDATE SET
     open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close, volume = EXCLUDED.volume,
-    value = EXCLUDED.value, updated_at = now()
+    value = EXCLUDED.value, open_src = EXCLUDED.open_src, updated_at = now()
 WHERE idx.bar.source <> 'idx'
 """
 

@@ -170,7 +170,11 @@ def conn():
 
 def test_tables_exist_and_reads_work(conn) -> None:
     lw = ara.latest_watch(conn)
-    assert "rows" in lw and lw["facts"]["study"] == 146
+    # the facts cite the run that currently stands for study #146 (re-run on corrected opens 2026-09-26 -> #237)
+    with conn.cursor() as cur:
+        cur.execute("SELECT current_id FROM idx.study_current WHERE id = 146")
+        current = cur.fetchone()[0]
+    assert "rows" in lw and lw["facts"]["study"] == current
     for r in lw["rows"]:
         assert r["p_lock"] is not None and r["confidence"] in ("high", "medium", "low")
     rows = ara.touches_today(conn)

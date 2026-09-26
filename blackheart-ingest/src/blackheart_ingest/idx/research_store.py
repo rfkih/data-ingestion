@@ -57,6 +57,21 @@ def record_study(conn: psycopg.Connection, name: str, as_of: date, *, params: di
     return sid
 
 
+def supersede(conn: psycopg.Connection, old_id: int, new_id: int, reason: str) -> None:
+    """Mark ``old_id`` as replaced by the re-run ``new_id`` (migration 0047). Rows are never edited otherwise: the old
+    numbers stay on file, and readers going through ``idx.study_current`` land on the new run."""
+    if old_id == new_id:
+        raise ValueError("a study cannot supersede itself")
+    with conn.cursor() as cur:
+        cur.execute("SELECT name FROM idx.study WHERE id = ANY(%s)", ([old_id, new_id],))
+        names = {r[0] if not isinstance(r, dict) else r["name"] for r in cur.fetchall()}
+        if len(names) != 1:
+            raise ValueError(f"#{old_id} and #{new_id} are not runs of the same study ({sorted(names)})")
+        cur.execute("UPDATE idx.study SET superseded_by = %s, supersede_reason = %s WHERE id = %s", (new_id, reason, old_id))
+    conn.commit()
+    logger.info("idx study #%s superseded by #%s: %s", old_id, new_id, reason)
+
+
 def studies(conn: psycopg.Connection, name: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute("""SELECT s.id, s.name, s.as_of, s.run_at, s.report_path, s.note, count(n.code) AS names

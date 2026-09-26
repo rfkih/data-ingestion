@@ -83,13 +83,19 @@ def test_depth_reports_the_spread_next_to_the_imbalance(db) -> None:
 
 
 def test_the_index_is_never_given_an_open_it_does_not_have(db) -> None:
-    """IDX publishes previous/high/low/close for an index and no open. Filling it with the close would draw a candle
-    asserting the day opened where it closed, which nobody said - so it stays null and the screen draws a line."""
+    """IDX publishes previous/high/low/close for an index and no open. The only open the index may carry is one with a
+    named source (Yahoo's ^JKSE, jobs/index_open.py) inside IDX's own low-high - never one filled in from the close."""
     rows = chart.index_daily(db, bars=30)
     if not rows:
         pytest.skip("no index history in this database")
     assert all(r["close"] is not None for r in rows)
-    assert all(r["open"] is None for r in rows), "an index open must not be invented from the close"
+    for r in rows:
+        if r["open"] is not None:
+            assert r["low"] <= r["open"] <= r["high"], r
+    with db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM idx.index_daily WHERE open IS NOT NULL AND open_src IS NULL")
+        row = cur.fetchone()
+    assert (row[0] if not isinstance(row, dict) else row["count"]) == 0, "an index open without a source"
 
 
 def test_index_view_carries_the_regime_gate_the_books_actually_use(db) -> None:

@@ -28,7 +28,7 @@ from .card import _rows
 
 logger = logging.getLogger(__name__)
 
-FAMILIES = ("value", "trend", "event", "overlay", "execution", "filter", "allocation")
+FAMILIES = ("value", "trend", "event", "ml", "overlay", "execution", "filter", "allocation")
 STATUSES = ("live", "paper", "overlay", "research", "reference", "closed")
 CADENCES = ("annual", "monthly", "daily", "open_window", "session", "event", "none")
 SCORECARD_STUDY = "roi_scorecard"
@@ -51,17 +51,17 @@ REGISTRY: list[dict[str, Any]] = [
         "runs_in": "candidates.py / scores.py, rebalance ticket each May",
         "evidence": [66, 47],
         "years": {"catalog": True},
-        "note": "The only strategy with real fills (IPOT). Its 2020-26 window is one cycle; the 2023-26 half earned +14 % a "
-                "year against +31 % in 2020-23.",
+        "note": "The only strategy with real fills (IPOT). Its 2020-26 window is one cycle; the 2023-26 half earned +13 % a "
+                "year against +31 % in 2020-23 (study #66, re-run 2026-09-26).",
     },
     {
         "key": "trend_small", "label": "Trend: 60-day high on volume, small caps", "family": "trend", "status": "paper",
-        "cadence": "daily", "roi": ("ranked", "trend_small"),
+        "cadence": "daily", "roi": ("ranked", "trend_small_gated"),        # the deployed rule runs with the regime gate
         "rule": "A name in the small tier (liquid but not blue chip) that closes at a 60-day high, above its 200-day average, "
                 "on at least 1.5 times its median volume. Ten slots, equal weight, exit on a 10 % trailing stop. Signals are "
                 "drafted after the close; the fill belongs to the next open.",
-        "falsifier": "Fills one session late - the same rule filled a day late falls from Sharpe 1.31 to 0.91 - or the long-run "
-                     "base rate reasserting itself: 2005-19 on survivors earned 13 % a year, not 30 %.",
+        "falsifier": "Fills one session late - the same rule filled a day late falls from Sharpe 1.21 to 0.90 - or the long-run "
+                     "base rate reasserting itself: 2005-19 on survivors earned 13 % a year, not the 28-29 % of 2020-26.",
         "books": {"rule": "trend", "trend_variant": "small"},
         "runs_in": "trend_book.py, nightly draft + scheduler",
         "evidence": [23, 22, 46, 44, 45],
@@ -76,22 +76,26 @@ REGISTRY: list[dict[str, Any]] = [
                 "their trailing stop. Set per book (regime filter), deployed on both trend books since 2026-09-22.",
         "falsifier": "A bear market where the gate neither shortens the drawdown nor holds the Sharpe - the return gain was "
                      "never robust, so only the drawdown claim is on trial.",
-        "books": {"flag": "regime_filter"},
+        # only trend and combined books: on a value (annual) book the same column is the regime EXIT (sell to cash), a
+        # different rule with different evidence - that one belongs to regime_damper
+        "books": {"flag": "regime_filter", "rules": ["trend", "combo"]},
         "runs_in": "overlay.index_regime + trend_book.hold_back",
         "evidence": [62, 63, 66, 64, 65],
-        "note": "Adopted as a RISK rule only: the drawdown cut and the MA200 timing are real (placebo 99th percentile), the "
+        "note": "Adopted as a RISK rule only: the drawdown cut and the MA200 timing are real (placebo 95th percentile, "
+                "exactly on the bar since the 2026-09-26 re-run), the "
                 "return gain appears only in bear blocks.",
     },
     {
         "key": "combined_book", "label": "Combined book: value and trend, half each", "family": "value",
         "status": "research", "cadence": "annual", "roi": ("ranked", "combined_50_50_gated"),
-        "rule": "Half the capital in the value strict composite, half in the gated trend book. The two sleeves correlate +0.37, "
+        "rule": "Half the capital in the value strict composite, half in the gated trend book. The two sleeves correlate +0.36, "
                 "so the pair clears the money rule that neither clears alone on drawdown.",
         "falsifier": "The correlation rising toward 1 in a drawdown, which is when the pairing has to earn its keep.",
         "books": None,
         "runs_in": "not a book yet - the operator's live split is 67 / 33",
         "evidence": [93, 66],
-        "note": "The best risk-adjusted configuration the desk has found; four of five weightings pass the money rule.",
+        "note": "All five weightings pass the money rule, but since the 2026-09-26 re-run the 50/50 split leads in only one "
+                "of the two halves (PARTIAL).",
     },
     {
         "key": "gapfade", "label": "Gap-down fade at the open", "family": "event", "status": "paper",
@@ -162,11 +166,92 @@ REGISTRY: list[dict[str, Any]] = [
                 "book in cash (50 % while the stress detector is on).",
         "falsifier": "Already partly falsified as a return rule: the buffer missed the pre-registered return floor by two "
                      "points. Both stay as drawdown insurance, priced in return.",
-        "books": {"flag": "cash_floor_pct"},
+        "books": {"flag": "value_damper"},
         "runs_in": "overlay.py, monthly check",
         "evidence": [],
         "note": "2008 flat instead of -36 %, 2020 -13 % instead of -47 %; costs 0 to 49 % of the return in calm years. "
                 "Evidence predates the research store: research/IDX_TREND_OVERLAY_2026-09-13.md and IDX_CASH_BUFFER_2026-09-14.md.",
+    },
+    # ---- added 2026-09-25 with the Strategies page: the combined book's ML sleeve and cash floor, the paper agent,
+    # the next-report forecast, and the families research closed since (their studies are the evidence) -------------
+    {
+        "key": "ml_rank", "label": "ML ranking with price confirmation", "family": "ml", "status": "live",
+        "cadence": "daily", "roi": None,
+        "rule": "The 5-day model's score, cost-aware: a signal when the smoothed expected excess pays twice the name's round trip, "
+                "bought only after the price confirms (ens4: four confirmation levels, a quarter of the slot each), sold on a score "
+                "swap or after 60 sessions.",
+        "falsifier": "Live slippage per trade 50 bps or more worse than the paper twin, or the realised rank IC negative in most weeks.",
+        "books": {"rule": "combo"},
+        "runs_in": "combo_book.py (plan 21:10), intents.py session tick every minute (confirmations, the same-day stop), "
+                   "ml/daily.py (the 5d model, 20:40)",
+        "evidence": [160, 175, 154, 159],
+        "note": "The combined book's ML sleeve; it had no registry entry before the Strategies page.",
+    },
+    {
+        "key": "combo_live", "label": "Combined live book: gap-fade, trend and ML", "family": "ml", "status": "live",
+        "cadence": "session", "roi": None,
+        "rule": "One Rp 20 M cash pool: gap-fade 10 %, trend 5 % and ML 10 % of NAV per trade (ens4, same-day stop -5 %), no buy "
+                "past a 70 % invested share.",
+        "falsifier": "The live book trailing its paper twin by more than its backtest's noise over three months, or a drawdown "
+                     "past the backtest's worst.",
+        "books": {"rule": "combo"},
+        "runs_in": "combo_book.py (plan 21:10, pre-open 08:30, gap entry 09:00), intents.py session tick every minute, "
+                   "combo_expire 20:30",
+        "evidence": [348, 282, 288, 166],
+        "note": "Allocation 10/5/10 with the stop since 2026-09-26 (operator).",
+    },
+    {
+        "key": "cash_floor", "label": "Cash floor on the combined book", "family": "overlay", "status": "overlay",
+        "cadence": "session", "roi": None,
+        "rule": "No new buy in the combined book that would take the invested share above 100 % minus the floor.",
+        "falsifier": "The floor cutting return without cutting the drawdown in live trading.",
+        "books": {"flag": "combo_cash_floor"},
+        "runs_in": "combo_book.invested_ok, before every buy",
+        "evidence": [177],
+        "note": "30 % on both combined books since 2026-09-25 (menu 34).",
+    },
+    {
+        "key": "ml_agent", "label": "Online learning agent (paper)", "family": "ml", "status": "paper",
+        "cadence": "session", "roi": None,
+        "rule": "Five decisions a session over the tick feed's names: a bracket or nothing, bought only when the pessimistic expected "
+                "reward clears +0.3 %; learns nightly from every name's counterfactual outcome.",
+        "falsifier": "After 20 sessions and 30 trades: not beating the random agent by 0.5 pp a trade with t >= 2.",
+        "books": None,
+        "runs_in": "agent.py, jobs agent_decide / agent_settle",
+        "evidence": [],
+        "note": "Paper only, virtual Rp 20 M.",
+    },
+    {
+        "key": "fund_forecast", "label": "Next-report forecast", "family": "ml", "status": "research",
+        "cadence": "none", "roi": None,
+        "rule": "Forecast the next quarterly report's profit direction and deterioration on the quarter's end date.",
+        "falsifier": "The full-data run (FF-1b) not beating persistence where no same-year report is out.",
+        "books": None, "runs_in": "research only", "evidence": [179],
+        "note": "Preliminary on 40 % of the filings.",
+    },
+    {
+        "key": "breakout_filter", "label": "Breakout hold-or-fail model", "family": "trend", "status": "closed",
+        "cadence": "none", "roi": None, "rule": "A model of whether a trend breakout holds, as a filter on the trend book.",
+        "falsifier": None, "books": None, "runs_in": "closed", "evidence": [180, 130],
+        "note": "Closed 2026-09-25: the model is the distance above the level in disguise.",
+    },
+    {
+        "key": "close_vwap", "label": "Close below VWAP", "family": "event", "status": "closed",
+        "cadence": "none", "roi": None, "rule": "Buy closes dumped below the day's VWAP, sell the next session.",
+        "falsifier": None, "books": None, "runs_in": "closed", "evidence": [182],
+        "note": "Closed 2026-09-25: the dump carries information; one-day holds cannot pay IDX costs.",
+    },
+    {
+        "key": "sideways", "label": "Sideways ranges", "family": "trend", "status": "closed",
+        "cadence": "none", "roi": None, "rule": "Trade the floor, ceiling, break or dividend of names resting in a range.",
+        "falsifier": None, "books": None, "runs_in": "closed", "evidence": [69, 68],
+        "note": "Closed 2026-09-21.",
+    },
+    {
+        "key": "bandarmologi", "label": "Broker accumulation", "family": "event", "status": "closed",
+        "cadence": "none", "roi": None, "rule": "Follow names the broker tape labels as accumulated.",
+        "falsifier": None, "books": None, "runs_in": "closed", "evidence": [18, 19, 16, 133],
+        "note": "Closed 2026-09-17: accumulation precedes crashes as often as rises.",
     },
     # ---- reference rows: ranked by the scorecard, useful as yardsticks, not run by the desk -----------------------
     {
@@ -182,7 +267,7 @@ REGISTRY: list[dict[str, Any]] = [
         "rule": "The deployed trend rule run over 2005-2019 on the names Yahoo still carries.", "falsifier": None,
         "books": None, "runs_in": "reference", "evidence": [46],
         "note": "Survivorship-inflated and still the best long-run estimate the desk has: read 13 % a year as the base rate, "
-                "not the 30 % of the recent block.",
+                "not the 28-29 % of the recent block.",
     },
     {
         "key": "book_gold", "label": "Book 70 / gold 30", "family": "allocation", "status": "research",
@@ -221,11 +306,18 @@ def _book_filter_sql(f: dict[str, Any] | None) -> tuple[str, list[Any]]:
         if f.get(col):
             where.append(f"b.{col} = %s")
             params.append(f[col])
+    if f.get("rules"):
+        where.append("b.rule = ANY(%s)")
+        params.append(list(f["rules"]))
     flag = f.get("flag")
     if flag == "regime_filter":
         where.append("b.regime_filter")
     elif flag == "cash_floor_pct":
         where.append("b.cash_floor_pct > 0")
+    elif flag == "value_damper":                  # a value book with the regime exit or a cash buffer switched on
+        where.append("b.rule = 'annual' AND (b.regime_filter OR b.cash_floor_pct > 0)")
+    elif flag == "combo_cash_floor":
+        where.append("b.rule = 'combo' AND coalesce((b.params->>'cash_floor')::numeric, 0) > 0")
     return (" AND ".join(where) if where else "false"), params
 
 
@@ -358,7 +450,8 @@ def years_for(conn: psycopg.Connection, entry: dict[str, Any]) -> dict[str, Any]
 
 
 def _study_summary(conn: psycopg.Connection, study_id: int) -> dict[str, Any] | None:
-    rows = _rows(conn, "SELECT summary FROM idx.study WHERE id = %s", (study_id,), ["summary"])
+    rows = _rows(conn, """SELECT s.summary FROM idx.study_current c JOIN idx.study s ON s.id = c.current_id
+                          WHERE c.id = %s""", (study_id,), ["summary"])       # a re-run study reads from its latest run
     return rows[0]["summary"] if rows else None
 
 
@@ -427,8 +520,9 @@ def detail(conn: psycopg.Connection, key: str) -> dict[str, Any] | None:
     studies = []
     if ids:
         found = {r["id"]: r for r in _rows(conn, """
-            SELECT id, name, as_of, note, report_path FROM idx.study WHERE id = ANY(%s)""", (list(ids),),
-            ["id", "name", "as_of", "note", "report_path"])}
+            SELECT c.id, s.name, s.as_of, s.note, s.report_path, c.current_id FROM idx.study_current c
+              JOIN idx.study s ON s.id = c.current_id WHERE c.id = ANY(%s)""", (list(ids),),
+            ["id", "name", "as_of", "note", "report_path", "current_id"])}
         studies = [{**found[i], "as_of": _iso(found[i]["as_of"])} for i in ids if i in found]
     row["studies"] = studies
     row["yearly"] = years_for(conn, e)

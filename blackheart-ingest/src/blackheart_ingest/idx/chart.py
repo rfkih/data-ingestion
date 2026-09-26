@@ -214,9 +214,9 @@ def index_daily(conn: psycopg.Connection, bars: int = 260, index_code: str = IND
         rows = [dict(r) if isinstance(r, dict) else dict(zip(
             ["trade_date", "open", "high", "low", "close", "volume"], r, strict=True)) for r in cur.fetchall()]
     rows.reverse()
-    # `open` is NULL on every one of these rows and always has been: IDX publishes previous/high/low/close for an index
-    # and no open. It is passed through as null rather than filled with the close - a candle drawn from a made-up open
-    # is a claim about the day that nobody made. The screen draws an index as a LINE for that reason.
+    # IDX publishes previous/high/low/close for an index and no open. `open` is Yahoo's ^JKSE open bounded by IDX's own
+    # high and low (jobs/index_open.py, `open_src` = 'yahoo'); where that job has not filled a day it stays null rather
+    # than being filled with the close - a bar drawn from a made-up open is a claim about the day that nobody made.
     return [{"date": r["trade_date"].isoformat(), "open": _f(r["open"]), "high": _f(r["high"]),
              "low": _f(r["low"]), "close": _f(r["close"]), "volume": int(r["volume"] or 0)}
             for r in rows if r["close"] is not None]

@@ -5,6 +5,10 @@ Commands (build plan 2026-09-12, phase 0):
   universe [--date D]             Daftar Saham snapshot -> idx.listing(_snapshot)
   daily --date D                  one day's Ringkasan Saham -> daily_summary, bar, corporate_action
   index --date D                  one day's Ringkasan Indeks -> index_daily
+  index-opens [--since D]         the COMPOSITE's open from Yahoo ^JKSE (IDX publishes none), bounded by IDX high/low
+  bar-opens --since D [--dry-run] the stock opens IDX leaves out, from Yahoo - validated on IDX's own opens first
+  bar-opens-stockbit --since D [--dry-run]   the opens still missing after that, from Stockbit, same rule
+  intents [--book B] [--events]   the session rule engine's live intents (armed stops, ...) and their history
   backfill --from D --to D        every weekday in range (daily [+ --index]); archived days replay from bronze
   replay --job daily|index --date D [--to D]   re-derive silver from bronze, no network
   publish [--since D | --full] [--codes A,B]   idx.bar (+ Yahoo pre-2020 on --full) -> market_data
@@ -989,6 +993,84 @@ def cmd_risk(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_index_opens(a: argparse.Namespace) -> int:
+    from .jobs import index_open
+    with get_connection() as conn:
+        r = index_open.run(conn, since=date.fromisoformat(a.since) if a.since else None)
+    print(f"index opens: {r.status}, rows without an open {r.rows_in}, filled {r.detail.get('filled', 0)}, "
+          f"not on Yahoo {r.detail.get('not_on_yahoo', 0)}, too far outside IDX's range {r.detail.get('too_far_outside', 0)}"
+          + (f" - {r.error}" if r.error else ""))
+    return 0 if r.status == "ok" else 1
+
+
+def cmd_bar_opens(a: argparse.Namespace) -> int:
+    import json as _json
+
+    from .jobs import bar_open
+    with get_connection() as conn:
+        r, rep = bar_open.run(conn, since=date.fromisoformat(a.since), dry_run=a.dry_run,
+                              cache=Path(a.cache) if a.cache else None)
+    acc = rep.get("accuracy")
+    print(f"bar opens since {a.since}: {r.status}{' (dry run)' if a.dry_run else ''}")
+    print(f"  rule on IDX's own opens: {rep.get('total', {}).get('exact', 0):,} exact of {rep.get('total', {}).get('accepted', 0):,} "
+          f"accepted ({acc:.4%})" if acc is not None else "  rule on IDX's own opens: nothing to score")
+    print(f"  missing opens {r.rows_in:,}, filled {r.detail.get('filled', 0):,}, left missing {r.detail.get('left_missing', 0):,}; "
+          f"dates not used {_json.dumps(rep.get('bad_dates', []))}" + (f" - {r.error}" if r.error else ""))
+    return 0 if r.status == "ok" else 1
+
+
+def cmd_bar_opens_stockbit(a: argparse.Namespace) -> int:
+    import json as _json
+
+    from . import broker
+    from .jobs import bar_open
+    with get_connection() as conn:
+        cfg = broker.config(conn=conn)
+        headers = {"Authorization": f"Bearer {cfg['key']}", "X-Platform": "web", "Accept": "application/json",
+                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) blackheart-idx research feed"}
+        r, rep = bar_open.run_stockbit(conn, since=date.fromisoformat(a.since), headers=headers, dry_run=a.dry_run,
+                                       cache=Path(a.cache) if a.cache else None)
+    print(f"stockbit opens since {a.since}: {r.status}{' (dry run)' if a.dry_run else ''}"
+          + (f" - STOPPED: {r.detail.get('stopped')}" if r.detail.get("stopped") else ""))
+    for k in ("vs_idx", "vs_yahoo"):
+        t = rep.get(k, {}).get("total", {})
+        acc = rep.get(k, {}).get("accuracy")
+        print(f"  rule against the {k[3:]} opens in the fetched windows: {t.get('exact', 0):,} exact of {t.get('accepted', 0):,}"
+              + (f" ({acc:.4%})" if acc is not None else ""))
+    print(f"  missing {r.rows_in:,} in {r.detail.get('windows', 0):,} windows, filled {r.detail.get('filled', 0):,}, "
+          f"left missing {r.detail.get('left_missing', 0):,}; dates not used {_json.dumps(rep.get('bad_dates', []))}"
+          + (f" - {r.error}" if r.error else ""))
+    return 0 if r.status in ("ok", "partial") else 1
+
+
+def cmd_fund_import(a: argparse.Namespace) -> int:
+    from . import benchmarks
+    with get_connection() as conn:
+        n = benchmarks.import_fund_csv(conn, a.code, a.name, a.csv, a.source)
+    print(f"{a.code}: {n} NAV rows imported")
+    return 0
+
+
+def cmd_intents(a: argparse.Namespace) -> int:
+    from . import intents
+    with get_connection() as conn:
+        rows = intents.live_intents(conn, a.book)
+        if not rows:
+            print("no live intents")
+        for it in rows:
+            t = it["trigger"]
+            print(f"#{it['id']:<5} {it['book']:<14} {it['kind']:<9} {it['side']:<4} {it['code']:<6} {it['status']:<13} "
+                  f"{t['type']} {t.get('level')} [{t.get('after', '')}-{t.get('before', '')}] ref {it['ref']}")
+            if a.events:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT at, from_status, to_status, price, note, actor FROM idx.order_intent_event WHERE intent_id = %s ORDER BY at",
+                                (it["id"],))
+                    for e in cur.fetchall():
+                        e = e if isinstance(e, dict) else dict(zip(["at", "from_status", "to_status", "price", "note", "actor"], e, strict=True))
+                        print(f"        {e['at']:%Y-%m-%d %H:%M} {e['from_status'] or '-'} -> {e['to_status']} {e['price'] or ''} {e['note'] or ''} ({e['actor']})")
+    return 0
+
+
 def cmd_agent(a: argparse.Namespace) -> int:
     import json as _json
 
@@ -1657,11 +1739,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--codes")
     p.add_argument("--refresh", action="store_true", help="download again even when a logo (or a known miss) is on disk")
     p.set_defaults(fn=cmd_logos)
+    p = sub.add_parser("index-opens", help="fill the COMPOSITE's open from Yahoo ^JKSE (IDX publishes none): [--since D]")
+    p.add_argument("--since")
+    p.set_defaults(fn=cmd_index_opens)
+    p = sub.add_parser("bar-opens", help="fill the stock opens IDX leaves out, from Yahoo, validated first: --since D [--dry-run]")
+    p.add_argument("--since", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--cache", help="directory for the Yahoo download (re-used by a second run)")
+    p.set_defaults(fn=cmd_bar_opens)
+    p = sub.add_parser("bar-opens-stockbit", help="fill the opens Yahoo could not, from Stockbit, same rule: --since D [--dry-run]")
+    p.add_argument("--since", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--cache", help="directory for the Stockbit responses (a re-run resumes from it)")
+    p.set_defaults(fn=cmd_bar_opens_stockbit)
     p = sub.add_parser("risk", help="book risk report (read-only): VaR/ES, beta, concentration, liquidity, stress: [--book B] [--as-of D] [--json]")
     p.add_argument("--book", help="one book; default every non-archived book, real ones first")
     p.add_argument("--as-of")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_risk)
+    p = sub.add_parser("fund-import", help="a mutual fund's NAV history from CSV (date, NAV) - a benchmark for the Strategies page")
+    p.add_argument("--code", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--csv", required=True)
+    p.add_argument("--source", default="csv")
+    p.set_defaults(fn=cmd_fund_import)
+    p = sub.add_parser("intents", help="the session rule engine's live intents: [--book B] [--events]")
+    p.add_argument("--book")
+    p.add_argument("--events", action="store_true")
+    p.set_defaults(fn=cmd_intents)
     p = sub.add_parser("agent", help="online learning agent, PAPER only: warmstart | settle [--date D] | decide | report")
     p.add_argument("sub", choices=["warmstart", "settle", "decide", "report"])
     p.add_argument("--date")

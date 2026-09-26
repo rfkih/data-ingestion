@@ -37,19 +37,20 @@ def test_static_registry_is_consistent() -> None:
         assert e["cadence"] in R.CADENCES, where
         assert e["rule"] and e["note"] and e["runs_in"], where
         assert all(isinstance(i, int) for i in e["evidence"]), where
-        if e["status"] != "reference":                       # a yardstick needs no falsifier; a strategy the desk runs does
+        if e["status"] not in ("reference", "closed"):      # a yardstick or a closed family needs no falsifier; a live one does
             assert e["falsifier"], where
         if e.get("roi") is not None:
             block, name = e["roi"]
             assert block in ("ranked", "overlays") and name, where
         if e.get("books"):
-            assert set(e["books"]) <= {"rule", "strategy", "trend_variant", "flag"}, where
+            assert set(e["books"]) <= {"rule", "rules", "strategy", "trend_variant", "flag"}, where
+            assert e["books"].get("flag") in (None, "regime_filter", "cash_floor_pct", "value_damper", "combo_cash_floor"), where
     assert R.BY_KEY["value_strict"]["status"] == "live"      # the only one with real fills
 
 
 def test_scorecard_is_read_out_of_the_study_in_every_shape() -> None:
     by = {e["key"]: e for e in R.REGISTRY}
-    sc = R.scorecard_from_study(SUMMARY, by["trend_small"])
+    sc = R.scorecard_from_study(SUMMARY, {"roi": ("ranked", "trend_small")})          # the ungated row of the fixture
     assert (sc["cagr_pct"], sc["sharpe"], sc["mdd_pct"], sc["roi_rank"]) == (29.5, 1.31, -30.0, 3)
     assert sc["live"] is None and sc["sources"] == [23, 62]           # "-" is not a book; the string source is dropped
     gf = R.scorecard_from_study(SUMMARY, by["gapfade"])
@@ -129,5 +130,5 @@ def test_years_pointer_only_reads_paths_that_exist(conn) -> None:
         else:
             assert y is None, e["key"]
     trend = R.years_for(conn, R.BY_KEY["trend_small"])
-    assert trend["source"] == "study #23" and round(trend["years"]["2025"]) == 137     # percent, not a fraction
+    assert trend["source"] == "study #23" and round(trend["years"]["2025"]) == 148     # percent, not a fraction (#23 via study_current -> re-run #321; was 137)
     assert R.years_for(conn, R.BY_KEY["value_strict"])["source"] == "research record"

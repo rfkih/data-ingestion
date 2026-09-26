@@ -360,6 +360,19 @@ def mark(conn: psycopg.Connection, book: str, as_of: date | None = None, rebuild
             return r
         last = _rows(conn, "SELECT trade_date, cash FROM idx.book_nav WHERE book = %s ORDER BY trade_date DESC LIMIT 1", (book,), ["d", "cash"])
         deltas = _fill_cash_deltas(conn, book)
+        if last and not rebuild:
+            # A fill entered AFTER its day was marked (a sell recorded at 20:46 for a session marked at 16:xx) is not a new
+            # delta for the incremental walk, so its cash never reached book_nav (2026-09-25: trend_live's DEWI/IRSX
+            # proceeds, NAV understated by Rp 2.1 M). book.cash reflects every fill, so the cash the last mark SHOULD hold
+            # is book.cash less the fills dated after it; when that disagrees, the marks are stale - rebuild them.
+            expected = Decimal(b["cash"]) - sum((v for k, v in deltas.items() if k > last[0]["d"]), Decimal(0))
+            if abs(expected - Decimal(last[0]["cash"])) > 1:
+                logger.warning("book:mark %s: last mark's cash %s != %s from book.cash - a backdated fill; rebuilding", book, last[0]["cash"], expected)
+                reset_marks(conn, book)                  # also takes back credited dividends and split fills: re-read both
+                r.detail["rebuilt"] = "backdated fill"
+                last = []
+                b = get_book(conn, book)
+                deltas = _fill_cash_deltas(conn, book)
         credited = _rows(conn, "SELECT coalesce(sum(dividends), 0) AS s FROM idx.book_nav WHERE book = %s", (book,), ["s"])[0]["s"]
         if last:
             start, cash = last[0]["d"] + timedelta(days=1), Decimal(last[0]["cash"])     # fills dated before this need --rebuild

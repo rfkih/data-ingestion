@@ -57,7 +57,13 @@ DEFAULTS: dict[str, Any] = {
            "confirm_rules": None,
            # only names on the main boards (Utama/Pengembangan) on the day: 22 of 672 backtest ML trades were on a watch-list
            # board (Akselerasi / Pemantauan Khusus), which the desk's other sleeves never buy (operator 2026-09-26)
-           "main_board_only": True},
+           "main_board_only": True,
+           # fixed stop from the fill. Sold the SAME day: idx/intents.py arms one stop intent per ML holding and the session tick
+           # issues the sell from 15:40 WIB for that day's closing session (#288: 35.0 %/yr, worst trade -22 % vs -34.6 %).
+           # compose() below keeps the next-session stop as the fallback for a close that ends under the level after 15:40.
+           # None = no stop. ML-9 (#281, ens4, pre-registered + robustness): -5 % 34.4 %/yr Sharpe 1.96 mDD -20 %; -10 % 31.2 %
+           # / 1.74 / -25 %; none 27.9 % / 1.30 / -35 %. Off until the operator sets it (live settings are operator-only).
+           "stop": None},
     # participation cap: a new buy may not exceed this share of the name's 20-day mean traded value (FE-2 #198: square-root impact
     # makes the trend sleeve lose 25 % of its return near Rp 10 B without it). None = uncapped (ML: a cap cost more in skipped
     # signals than it saved). The gap sleeve keeps its own, tighter cap: 1 % of the 60-day median value (gapfade.PARTICIPATION).
@@ -120,6 +126,8 @@ def settings(b: dict[str, Any]) -> dict[str, Any]:
     rules = [(float(thr), int(days)) for thr, days in rules]
     if not rules or any(not (0 < thr <= 0.5) or not (1 <= days <= 60) for thr, days in rules) or len({r for r in rules}) != len(rules):
         raise ValueError(f"confirm_rules {rules} must be distinct [threshold in (0, 0.5], days in 1..60]")
+    if m.get("stop") is not None and not 0 < float(m["stop"]) <= 0.5:
+        raise ValueError(f"ml stop {m['stop']} must be None or within (0, 0.5]")
     m["rules"] = rules
     m["rule_names"] = [rule_name(thr, days) for thr, days in rules]
     m["size_frac"] = 1.0 / len(rules)
@@ -339,14 +347,27 @@ def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, p
             continue
         ref = closes_raw.get(c, px_map.get(c))
         why = None
+        stopped = False
+        entry = p.get("entry_price")
+        # the order of the checks is the backtest's (research/idx_ml_ens4_exits.book): expiry, no score, stop, swap
         if ml_age.get(c, 0) >= int(m["max_hold"]):
             why = f"ML expiry: {ml_age[c]} hari, skor tidak pernah minta tukar"
         elif c not in e_map:
             why = "ML: tidak ada skor / bar hari ini"
+        elif m.get("stop") and ref is not None and entry and Decimal(ref) <= (1 - Decimal(str(m["stop"]))) * Decimal(entry):
+            stopped = True
+            why = (f"ML stop {float(m['stop']) * 100:g} %: close {Decimal(ref):,.0f} <= {(1 - float(m['stop'])) * 100:g} % dari harga masuk "
+                   f"{Decimal(entry):,.0f} - jual di sesi penutupan besok, limit di batas bawah ARB supaya tetap terisi")
         elif e_map[c] < 0 and best - e_map[c] > float(m["margin"]) * rt_map.get(c, 0.01):
             why = f"ML swap: skor {e_map[c] * 1e4:+.0f} bps, kandidat terbaik {best * 1e4:+.0f} bps"
         if why and ref is not None:
-            ln = size_line(c, "sell", Decimal(ref), Decimal(p["lots"]), Decimal(0), cash_after, fee_s, nav, why, ["sleeve:ml", "ml:exit"])
+            ln = size_line(c, "sell", Decimal(ref), Decimal(p["lots"]), Decimal(0), cash_after, fee_s, nav, why,
+                           ["sleeve:ml", "ml:exit"] + (["ml:stop", "exit:must"] if stopped else []))
+            if stopped:
+                # a stop must fill even when the name keeps falling: the limit sits at the day's lower auto-rejection bound
+                # (the backtest sells at the next close whatever the price)
+                ln["limit_price"] = ticket.snap(ticket.reject_band(Decimal(ref))[0], "sell")
+                ln["notional"] = Decimal(p["lots"]) * ticket.LOT * ln["limit_price"]
             lines.append(ln)
             cash_after += ln["notional"] * (1 - fee_s)
             exiting.add(c)
@@ -400,16 +421,31 @@ def _open_lines(conn: psycopg.Connection, book: str) -> set[str]:
                                                WHERE t.book = %s AND t.status IN ('draft', 'issued') AND l.status IN ('open', 'partial')""", (book,), ["code"])}
 
 
+WATCH_COLS = ["id", "code", "signal_date", "ref_price", "level_price", "until_date", "e_bps", "cost_bps", "rule", "size_frac"]
+FIRED = ("triggered", "ticket_issued", "filled", "carried")          # an ml_confirm intent in one of these has taken its share
+
+
 def pending_watches(conn: psycopg.Connection, book: str, d: date | None = None) -> list[dict[str, Any]]:
-    return _rows(conn, """SELECT id, code, signal_date, ref_price, level_price, until_date, e_bps, cost_bps, rule, size_frac FROM idx.combo_watch
-                          WHERE book = %s AND status = 'pending' AND (%s::date IS NULL OR until_date >= %s) ORDER BY e_bps DESC, level_price""", (book, d, d),
-                 ["id", "code", "signal_date", "ref_price", "level_price", "until_date", "e_bps", "cost_bps", "rule", "size_frac"])
+    """The ML sleeve's armed confirmation watches - ml_confirm intents of the session rule engine (idx/intents.py), in the shape
+    idx.combo_watch had (that table keeps the history before 2026-09-26)."""
+    return _rows(conn, """SELECT id, code, (ref->>'signal_date')::date AS signal_date, (ref->>'ref_price')::numeric AS ref_price,
+                                 (ref->>'level_price')::numeric AS level_price, expires_on AS until_date, (ref->>'e_bps')::numeric AS e_bps,
+                                 (ref->>'cost_bps')::numeric AS cost_bps, COALESCE(ref->>'rule', '+5/10') AS rule,
+                                 COALESCE((ref->>'size_frac')::numeric, 1) AS size_frac
+                            FROM idx.order_intent
+                           WHERE book = %s AND kind = 'ml_confirm' AND status = 'armed' AND (%s::date IS NULL OR expires_on >= %s)
+                           ORDER BY (ref->>'e_bps')::numeric DESC NULLS LAST, (ref->>'level_price')::numeric""", (book, d, d), WATCH_COLS)
 
 
-def triggered_share(conn: psycopg.Connection, book: str, code: str, signal_date: date) -> float:
-    """The share of the ML slot already triggered for (code, signal) - the rules that fired before this one."""
-    r = _rows(conn, "SELECT COALESCE(sum(size_frac), 0) AS s FROM idx.combo_watch WHERE book = %s AND code = %s AND signal_date = %s AND status = 'triggered'",
-              (book, code, signal_date), ["s"])
+def triggered_share(conn: psycopg.Connection, book: str, code: str, signal_date: date, exclude: int | None = None) -> float:
+    """The share of the ML slot already triggered for (code, signal) - the rules that fired before this one (intents, plus the
+    combo_watch history for signals from before the move)."""
+    r = _rows(conn, """SELECT (SELECT COALESCE(sum(COALESCE((ref->>'size_frac')::numeric, 1)), 0) FROM idx.order_intent
+                                WHERE book = %s AND kind = 'ml_confirm' AND code = %s AND ref->>'signal_date' = %s AND status = ANY(%s)
+                                  AND id <> COALESCE(%s, -1))
+                            + (SELECT COALESCE(sum(size_frac), 0) FROM idx.combo_watch
+                                WHERE book = %s AND code = %s AND signal_date = %s AND status = 'triggered') AS s""",
+              (book, code, str(signal_date), list(FIRED), exclude, book, code, signal_date), ["s"])
     return float(r[0]["s"]) if r else 0.0
 
 
@@ -510,13 +546,10 @@ def plan(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date 
                 out["status"] = "issued"
                 out["why"] = "tonight's plan is already issued"
                 return out
-        # watches: new ones tonight; the pending ones stay until they expire
-        with conn.cursor() as cur:
-            for w in res["watches"]:
-                cur.execute("""INSERT INTO idx.combo_watch (book, code, sleeve, signal_date, ref_price, level_price, until_date, e_bps, cost_bps, rule, size_frac)
-                               VALUES (%s, %s, 'ml', %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (book, code, signal_date, rule) DO NOTHING""",
-                            (book, w["code"], w["signal_date"], w["ref_price"], w["level_price"], w["until_date"], w["e_bps"], w["cost_bps"],
-                             w.get("rule", "+5/10"), w.get("size_frac", 1.0)))
+        # watches: new ones tonight arm ml_confirm intents; the armed ones stay until they expire (one live per name and rule)
+        from . import intents
+        for w in res["watches"]:
+            intents.create(conn, book, intents.ml_confirm_spec(w), actor, if_absent=True)
         conn.commit()
         watches = pending_watches(conn, book, d)
         text = render_plan(res, watches, b.get("label"))
@@ -552,109 +585,10 @@ def in_session(now: datetime) -> bool:
 
 
 def confirm(conn: psycopg.Connection, book: str, actor: str = "scheduler", now: datetime | None = None) -> dict[str, Any]:
-    """Every couple of minutes in the session: a pending watch whose last trade is at or above its level becomes a buy ticket
-    (one line, sleeve ml, sized ml_pct x NAV). Live: draft + push at once. Paper: issued and filled at the limit right away.
-    Expired watches are closed. Cheap: one query for the watches, one for the prices."""
-    now = now or datetime.now(WIB)
-    d = now.astimezone(WIB).date()
-    b = bk.get_book(conn, book)
-    S = settings(b)
-    out: dict[str, Any] = {"book": book, "date": str(d), "pending": 0, "triggered": [], "expired": [], "skipped": []}
-    if bk.is_halted(b):
-        return out
-    with ticket._book_lock(conn, f"combo:{book}"):
-        with conn.cursor() as cur:
-            cur.execute("UPDATE idx.combo_watch SET status = 'expired', updated_at = now() WHERE book = %s AND status = 'pending' AND until_date < %s RETURNING code",
-                        (book, d))
-            out["expired"] = [r[0] if not isinstance(r, dict) else r["code"] for r in cur.fetchall()]
-        conn.commit()
-        ws = pending_watches(conn, book, d)
-        out["pending"] = len(ws)
-        if not ws:
-            return out
-        px = gapfade.last_feed_prices(conn, d, [w["code"] for w in ws])
-        hits = [w for w in ws if w["code"] in px and px[w["code"]] >= Decimal(w["level_price"])]
-        if not hits:
-            return out
-        snap = bk.snapshot(conn, book)
-        nav, cash = Decimal(snap["nav_now"]), Decimal(b["cash"])
-        pos = sleeve_positions(conn, book)
-        n_open = len(held_codes(pos)) + len(_open_lines(conn, book))
-        fee_b = Decimal(b["fee_buy_pct"]) / 100
-        slot = Decimal(str(S["sleeves"]["ml"])) * nav
-        ml_cap = S["adv_cap"].get("ml")
-        adv = adv20(conn, [w["code"] for w in hits], d - timedelta(days=1)) if ml_cap is not None else {}
-        for w in hits:
-            frac = Decimal(str(w.get("size_frac") or 1))
-            held_ml = pos["ml"].get(w["code"])
-            same_signal = held_ml is not None and held_ml.get("entry_date") is not None and held_ml["entry_date"] >= w["signal_date"]
-            if w["code"] in held_codes(pos) and not (frac < 1 and same_signal):
-                _set_watch(conn, w["id"], "cancelled", note="already held")
-                continue
-            if w["code"] not in held_codes(pos) and n_open >= S["slots"]:
-                out["skipped"].append((w["code"], "no free slot"))
-                continue
-            last = px[w["code"]]
-            # the ensemble: this rule tops the name up to the cumulative share of the rules that fired (a dust fraction rolls forward)
-            budget = slot
-            if frac < 1:
-                done = Decimal(str(triggered_share(conn, book, w["code"], w["signal_date"])))
-                bought = (held_ml["lots"] * ticket.LOT * held_ml["entry_price"]) if same_signal else Decimal(0)
-                budget = slot * min(done + frac, Decimal(1)) - bought
-                if budget <= 0:
-                    _set_watch(conn, w["id"], "triggered", trigger_price=last, note="share already filled by an earlier rule")
-                    continue
-            budget = adv_capped(budget, adv.get(w["code"]), ml_cap)
-            ln = size_line(w["code"], "buy", last, None, budget, cash, fee_b, nav,
-                           f"ML konfirmasi {w.get('rule') or ''}: harga {float(last):,.0f} >= level {float(w['level_price']):,.0f} (sinyal {w['signal_date']:%d %b}, "
-                           f"ekspektasi {float(w['e_bps']):+.0f} bps)", ["sleeve:ml", "ml:entry", f"level:{float(w['level_price']):.0f}", f"rule:{w.get('rule') or '+5/10'}"])
-            if ln is None and frac < 1 and cash >= budget:
-                _set_watch(conn, w["id"], "triggered", trigger_price=last, note="dust: share carried to the next rule")
-                out["skipped"].append((w["code"], f"dust, carried ({w.get('rule')})"))
-                continue
-            if ln is None:
-                out["skipped"].append((w["code"], "cash or dust"))
-                _set_watch(conn, w["id"], "cancelled", note="no cash for a slot")
-                continue
-            if not invested_ok(nav, cash, ln["notional"] * (1 + fee_b), S["cash_floor"]):
-                out["skipped"].append((w["code"], "cash floor"))            # stays pending: the floor may free up before the window ends
-                continue
-            res = gapfade._ticket_res(book, d, MODE, [ln], b, conn, targets=[w["code"]] + sorted(held_codes(pos)))
-            res["strategy"] = "combo"
-            tid = ticket.store(conn, res, notes=f"combo ML confirmation {w['code']} at {float(last):,.0f}", actor=actor)
-            checks = ticket.validate(conn, tid)
-            if not checks["ok"]:
-                ticket.set_status(conn, tid, "cancelled", actor=actor, rationale="combo: confirmation ticket failed validation")
-                _set_watch(conn, w["id"], "cancelled", note="validation: " + ticket.breaches_text(checks))
-                out["skipped"].append((w["code"], "validation"))
-                continue
-            _set_watch(conn, w["id"], "triggered", ticket_id=tid, trigger_price=last)
-            t = ticket.load(conn, tid)
-            if ticket.is_live(book):
-                _notify(conn, book, f"[combo] KONFIRMASI ML {w['code']}: harga {float(last):,.0f} >= level {float(w['level_price']):,.0f}\n"
-                                    f"BELI {int(ln['lots'])} lot, limit <= {float(ln['limit_price']):,.0f} (Rp {float(ln['notional']) / 1e6:,.2f} jt), ticket #{tid}",
-                        data={"route": f"/m/ticket?book={book}", "kind": "ticket", "book": book, "ticket": tid})
-                out["triggered"].append((w["code"], tid, "draft"))
-            else:
-                ticket.set_status(conn, tid, "issued", actor=actor, rationale="combo: paper confirmation issued")
-                ticket.fill_line(conn, t["lines"][0]["id"], ln["lots"], ln["limit_price"], trade_date=d, note=f"combo paper fill at the trigger (ticket {tid})",
-                                 source="paper")
-                ticket.set_status(conn, tid, "closed", actor=actor, rationale="combo: paper confirmation filled at the trigger price")
-                cash -= ln["notional"] * (1 + fee_b)
-                out["triggered"].append((w["code"], tid, "filled"))
-                pos["ml"][w["code"]] = {"lots": (held_ml["lots"] if same_signal else Decimal(0)) + ln["lots"], "entry_date": w["signal_date"] if not same_signal else held_ml["entry_date"],
-                                        "entry_price": ln["limit_price"]}
-            if w["code"] not in held_codes(pos):
-                n_open += 1
-    return out
-
-
-def _set_watch(conn: psycopg.Connection, wid: int, status: str, *, ticket_id: int | None = None, trigger_price: Decimal | None = None, note: str | None = None) -> None:
-    with conn.cursor() as cur:
-        cur.execute("UPDATE idx.combo_watch SET status = %s, ticket_id = COALESCE(%s, ticket_id), trigger_price = COALESCE(%s, trigger_price), "
-                    "triggered_at = CASE WHEN %s = 'triggered' THEN now() ELSE triggered_at END, note = COALESCE(%s, note), updated_at = now() WHERE id = %s",
-                    (status, ticket_id, trigger_price, status, note, wid))
-    conn.commit()
+    """The ML confirmations run in the session rule engine now (ml_confirm intents, idx/intents.py): this is one tick of it for
+    the book, kept for the CLI."""
+    from . import intents
+    return intents.tick_book(conn, book, now or datetime.now(WIB), actor)
 
 
 # ---------------------------------------------------------------------------------------------------------------- gap-fade sleeve
@@ -722,38 +656,48 @@ def gap_entry(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: 
 
 
 def gap_exit(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date | None = None) -> dict[str, Any]:
-    """15:50: sell every gap-sleeve position into the close (the same-day rule); other sleeves are untouched."""
+    """Sell every gap-sleeve position into the close (the same-day rule); other sleeves are untouched. The session rule engine
+    does this from 15:50 through its gap_exit intents (idx/intents.py); this entry point is kept for the CLI."""
     d = d or datetime.now(WIB).date()
     b = bk.get_book(conn, book)
-    out: dict[str, Any] = {"book": book, "date": str(d), "positions": 0, "ticket": None, "status": None, "why": None}
     with ticket._book_lock(conn, f"combo:{book}"):
-        if gapfade._tickets_today(conn, book, d, gapfade.MODE_OUT):
-            out["why"] = "an exit ticket for today already exists"
-            return out
-        pos = sleeve_positions(conn, book)["gap"]
-        out["positions"] = len(pos)
-        if not pos:
-            return out
-        plist = [{"code": c, "lots": p["lots"], "avg_price": p["entry_price"]} for c, p in pos.items()]
-        px = gapfade.last_feed_prices(conn, d, [p["code"] for p in plist])
-        lines = gapfade.plan_exits(plist, px)
-        for ln in lines:
-            ln["flags"] = ["sleeve:gap", *ln.get("flags", [])]
-        missing = [p["code"] for p in plist if p["code"] not in px]
-        if missing:
-            runlog.alert(conn, "warning", f"combo:{book}", f"no price today for {', '.join(missing)} - gap position not in the exit ticket")
-        if not lines:
-            out["why"] = "no price for any position"
-            return out
-        res = gapfade._ticket_res(book, d, gapfade.MODE_OUT, lines, b, conn)
-        res["strategy"] = "combo"
-        tid = ticket.store(conn, res, notes="combo gap-fade: sell into the closing auction", actor=actor)
-        out["ticket"] = tid
-        ticket.set_status(conn, tid, "issued", actor=actor, rationale="combo: gap exit ticket for the closing auction")
-        out["status"] = "issued"
-        if ticket.is_live(book):
-            _notify(conn, book, f"[combo] JUAL gap-fade ke penutupan, ticket #{tid}\n" + "\n".join(f"  {ln['code']} {int(ln['lots'])} lot @ ~{float(ln['limit_price']):,.0f}" for ln in lines),
-                    data={"route": f"/m/ticket?book={book}", "kind": "ticket", "book": book, "ticket": tid})
+        return gap_exit_unlocked(conn, b, actor, d)
+
+
+def gap_exit_unlocked(conn: psycopg.Connection, b: dict[str, Any], actor: str, d: date) -> dict[str, Any]:
+    """gap_exit's body, for a caller that already holds the book lock. Idempotent per day: a second call finds today's exit
+    ticket and returns it (ticket, codes) with why = 'an exit ticket for today already exists'."""
+    book = b["book"]
+    out: dict[str, Any] = {"book": book, "date": str(d), "positions": 0, "ticket": None, "status": None, "why": None, "codes": []}
+    today = gapfade._tickets_today(conn, book, d, gapfade.MODE_OUT)
+    if today:
+        out.update({"why": "an exit ticket for today already exists", "ticket": today[-1]["id"], "status": today[-1]["status"],
+                    "codes": sorted({ln["code"] for t in today for ln in t["lines"]})})
+        return out
+    pos = sleeve_positions(conn, book)["gap"]
+    out["positions"] = len(pos)
+    if not pos:
+        return out
+    plist = [{"code": c, "lots": p["lots"], "avg_price": p["entry_price"]} for c, p in pos.items()]
+    px = gapfade.last_feed_prices(conn, d, [p["code"] for p in plist])
+    lines = gapfade.plan_exits(plist, px)
+    for ln in lines:
+        ln["flags"] = ["sleeve:gap", *ln.get("flags", [])]
+    missing = [p["code"] for p in plist if p["code"] not in px]
+    if missing:
+        runlog.alert(conn, "warning", f"combo:{book}", f"no price today for {', '.join(missing)} - gap position not in the exit ticket")
+    if not lines:
+        out["why"] = "no price for any position"
+        return out
+    res = gapfade._ticket_res(book, d, gapfade.MODE_OUT, lines, b, conn)
+    res["strategy"] = "combo"
+    tid = ticket.store(conn, res, notes="combo gap-fade: sell into the closing auction", actor=actor)
+    out.update({"ticket": tid, "codes": sorted(ln["code"] for ln in lines)})
+    ticket.set_status(conn, tid, "issued", actor=actor, rationale="combo: gap exit ticket for the closing auction")
+    out["status"] = "issued"
+    if ticket.is_live(book):
+        _notify(conn, book, f"[combo] JUAL gap-fade ke penutupan, ticket #{tid}\n" + "\n".join(f"  {ln['code']} {int(ln['lots'])} lot @ ~{float(ln['limit_price']):,.0f}" for ln in lines),
+                data={"route": f"/m/ticket?book={book}", "kind": "ticket", "book": book, "ticket": tid})
     return out
 
 
@@ -887,7 +831,7 @@ def scorecard(conn: psycopg.Connection, book: str, d: date | None = None, store:
     out = {"book": book, "date": str(d), "label": b.get("label"), "kind": "live" if ticket.is_live(book) else "paper", "sleeves": out_s,
            "nav": {"first": navs[0] if navs else None, "last": navs[-1] if navs else None, "days": len(navs), "mdd": mdd,
                    "return": (navs[-1] / navs[0] - 1) if len(navs) > 1 and navs[0] else None},
-           "watches": {r["status"]: r["n"] for r in _rows(conn, "SELECT status, count(*) AS n FROM idx.combo_watch WHERE book = %s GROUP BY status", (book,), ["status", "n"])},
+           "watches": watch_counts(conn, book),
            "settings": settings(b)}
     if store:
         import json
@@ -896,6 +840,18 @@ def scorecard(conn: psycopg.Connection, book: str, d: date | None = None, store:
                         (book, d, json.dumps(out, default=str)))
         conn.commit()
     return out
+
+
+def watch_counts(conn: psycopg.Connection, book: str) -> dict[str, int]:
+    """pending / triggered / expired / cancelled, as the web reads them: ml_confirm intents (armed = pending, fired = triggered)
+    plus the combo_watch history (without the rows that moved to intents)."""
+    rows = _rows(conn, """SELECT st, sum(n)::int AS n FROM (
+                            SELECT CASE WHEN status = 'armed' THEN 'pending' WHEN status = ANY(%s) THEN 'triggered' ELSE status END AS st, count(*) AS n
+                              FROM idx.order_intent WHERE book = %s AND kind = 'ml_confirm' GROUP BY 1
+                            UNION ALL
+                            SELECT status, count(*) FROM idx.combo_watch WHERE book = %s AND COALESCE(note, '') NOT LIKE 'moved to order_intent%%' GROUP BY 1) x
+                          GROUP BY st""", (list(FIRED), book, book), ["st", "n"])
+    return {r["st"]: r["n"] for r in rows}
 
 
 def render_scorecard(sc: dict[str, Any]) -> str:
