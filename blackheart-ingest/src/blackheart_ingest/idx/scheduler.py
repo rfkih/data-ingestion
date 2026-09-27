@@ -12,7 +12,9 @@ Schedule (WIB):
   15:50 Mon-Fri   gapfade_exit        intraday gap-fade books: sell everything into the closing auction
   every 10 min    token_guard         the Stockbit session must outlive today's close; renews, else nags the phone every run
   20:05 Mon-Fri   ara_watch           next session's likely ARA locks: study #146 model (bar + closing book, LightGBM + GRU, calibrated P)
-                                      + every held name's ARA price; runs `idx ara watch` in a subprocess
+                                      + every held name's ARA price; runs `idx ara watch` in a subprocess. First settles the
+                                     earlier runs: what today's session did to each stored score (idx.ara_watch next_*,
+                                     idx.ara_scorecard) - prediction vs actual, measurement only
   every 2 min     ara_touch           in-session: held/watched names at the ARA limit - locked / sellers queued / faded (study #101)
   20:25 Mon-Fri   risk_check          risk report of each real book holding names (idx/risk.py); one warning a day per book past risk.LIMITS
   20:40 Mon-Fri   ml_daily          self-learning prediction desk (idx/ml): realise, retrain the daily horizons, predict, score
@@ -446,6 +448,17 @@ def run_ara_watch() -> None:
     d = today_wib()
     if not is_trading_day(d):
         return
+    # prediction vs actual first (operator 2026-09-27): today's summary is in, so the earlier runs can be graded. Cheap SQL,
+    # in-process; a failure here never stops tonight's list.
+    try:
+        from . import ara
+        with get_connection() as conn:
+            done = [r for r in ara.settle(conn) if not r.get("pending")]
+        logger.info("idx ara settle: %s", ", ".join(f"{r['run_date']}->{r['next_date']} top10 {r['top10_locks']}" for r in done) or "nothing due")
+    except Exception as e:                                                  # noqa: BLE001
+        logger.exception("ara settle failed")
+        with get_connection() as conn:
+            runlog.alert(conn, "warning", "ara", f"ARA settle (prediksi vs aktual) gagal: {str(e)[:200]}")
     cmd = [sys.executable, "-m", "blackheart_ingest.idx.cli", "ara", "watch"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, encoding="utf-8", errors="replace")
@@ -1210,6 +1223,28 @@ def run_agent_settle() -> None:
         logger.info("idx agent settle %s: %s", d, r.status)
 
 
+def run_dt_watch(step: str) -> None:
+    """C1 forward paper watch (menu DT-3, #398): 16:20 WIB `pick` (the bars before 15:50 are final), 20:45 `settle` (after
+    the daily chain has the session's official prints). Measurement only - no orders, no pushes."""
+    from . import dt_watch
+    d = today_wib()
+    with get_connection() as conn:
+        if not is_trading_day(d, conn):
+            return
+        rid = runlog.start(conn, f"dt_watch:{step}", d.isoformat())
+        r = runlog.RunResult(f"dt_watch:{step}", d.isoformat())
+        try:
+            rep = dt_watch.pick(conn, d) if step == "pick" else dt_watch.settle(conn, d)
+            r.rows_out, r.detail = int(len(rep.get("picks", [])) if step == "pick" else rep.get("settled", 0)), rep
+        except Exception as e:
+            conn.rollback()
+            r.status, r.error = "failed", f"{type(e).__name__}: {e}"[:500]
+            logger.exception("dt_watch %s failed", step)
+        runlog.finish(conn, rid, r)
+        conn.commit()
+        logger.info("idx dt_watch %s %s: %s", step, d, r.status)
+
+
 def build() -> BlockingScheduler:  # noqa: F821
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -1293,6 +1328,10 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_logos, CronTrigger(day_of_week="sun", hour=10, minute=0, timezone=WIB), id="logos", misfire_grace_time=86400)
     s.add_job(run_agent_decide, IntervalTrigger(minutes=1), id="agent_decide", misfire_grace_time=30)
     s.add_job(run_agent_settle, CronTrigger(day_of_week="mon-fri", hour=16, minute=50, timezone=WIB), id="agent_settle",
+              misfire_grace_time=3600)
+    s.add_job(run_dt_watch, CronTrigger(day_of_week="mon-fri", hour=16, minute=20, timezone=WIB), args=["pick"], id="dt_watch_pick",
+              misfire_grace_time=3600)
+    s.add_job(run_dt_watch, CronTrigger(day_of_week="mon-fri", hour=20, minute=45, timezone=WIB), args=["settle"], id="dt_watch_settle",
               misfire_grace_time=3600)
     return s
 

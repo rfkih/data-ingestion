@@ -1175,6 +1175,21 @@ def cmd_intents(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dtwatch(a: argparse.Namespace) -> int:
+    import json as _json
+
+    from . import dt_watch
+    with get_connection() as conn:
+        if a.sub == "pick":
+            rep = dt_watch.pick(conn, _d(a.date) if a.date else _today())
+        elif a.sub == "settle":
+            rep = dt_watch.settle(conn, _d(a.date) if a.date else _today())
+        else:
+            rep = dt_watch.report(conn)
+    print(_json.dumps(rep, default=str, indent=1))
+    return 0
+
+
 def cmd_agent(a: argparse.Namespace) -> int:
     import json as _json
 
@@ -1196,6 +1211,10 @@ def cmd_agent(a: argparse.Namespace) -> int:
                     print(f"          {act:4s} {v['n']:4d} trades, avg {v['avg_reward'] * 100:+.2f} %")
             if not rep["agents"]:
                 print("no settled decisions yet")
+            j = rep.get("judgement") or {}
+            s = j.get("sprt") or {}
+            print(f"judgement: {j.get('verdict')} - paired sessions {j.get('paired_sessions')}, LLR {s.get('llr', 0):+.2f} "
+                  f"(accept H1 at +2.77, H0 at -1.56)")
             return 0
     print(_json.dumps(rep, default=str, indent=1))
     return 0
@@ -1301,6 +1320,20 @@ def cmd_ara(a: argparse.Namespace) -> int:
             return 0
         if a.sub == "touch":
             print(_json.dumps(ara.touch_check(conn, force=a.force), indent=1, default=str))
+            return 0
+        if a.sub == "settle":
+            for r in ara.settle(conn, _d(a.run_date) if a.run_date else None, force=a.force):
+                if r.get("pending"):
+                    print(f"{r['run_date']}: belum - {r['pending']}")
+                else:
+                    print(f"{r['run_date']} -> {r['next_date']}: {r['rows']} baris; top5 {r['top5_locks']} lock, top10 {r['top10_locks']}, "
+                          f"top20 {r['top20_locks']}; lock di pasar {r['universe_locks']} dari {r['universe']}")
+            return 0
+        if a.sub == "record":
+            print(ara.render_record(ara.record(conn, _d(a.run_date) if a.run_date else None, a.code, listed_only=not a.all)))
+            return 0
+        if a.sub == "scorecard":
+            print(ara.render_scorecards(ara.scorecards(conn, a.days)))
             return 0
         print(ara.render_touches(ara.touches_today(conn, _d(a.as_of) if a.as_of else None)))
         return 0
@@ -1505,7 +1538,11 @@ def cmd_ml(a: argparse.Namespace) -> int:
                 print(line)
             return 0
         if a.sub == "board":
-            print(_json.dumps(ml.board(conn, a.horizon, a.top), default=str, indent=1))
+            print(_json.dumps(ml.board(conn, a.horizon or "1d", a.top), default=str, indent=1))
+            return 0
+        if a.sub == "record":
+            rec = ml.record(conn, _d(a.as_of) if a.as_of else None, a.horizon, a.code, limit=max(a.top, 1000))
+            print(ml.render_record(rec, top=a.top))
             return 0
         for m in mlc.models(conn, a.top):
             v = m["val_metrics"] or {}
@@ -1918,6 +1955,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--book")
     p.add_argument("--events", action="store_true")
     p.set_defaults(fn=cmd_intents)
+    p = sub.add_parser("dtwatch", help="C1 forward paper watch (DT-3 #398; no orders): pick [--date D] | settle [--date D] | report")
+    p.add_argument("sub", choices=["pick", "settle", "report"])
+    p.add_argument("--date")
+    p.set_defaults(fn=cmd_dtwatch)
     p = sub.add_parser("agent", help="online learning agent, PAPER only: warmstart | settle [--date D] | decide | report")
     p.add_argument("sub", choices=["warmstart", "settle", "decide", "report"])
     p.add_argument("--date")
@@ -1952,22 +1993,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fee-sell", dest="fee_sell", default="0.20")
     p.add_argument("--owner", default=None, help="account e-mail the book belongs to (default IDX_AGENT_USER)")
     p.set_defaults(fn=cmd_gapfade)
-    p = sub.add_parser("ara", help="ARA watch: watch (evening list from today's bars) | show (latest list) | touch (check the feed now) | today (today's touches)")
-    p.add_argument("sub", choices=["watch", "show", "touch", "today"])
+    p = sub.add_parser("ara", help="ARA watch: watch (evening list from today's bars) | show (latest list) | touch (check the feed now) | today (today's touches) "
+                                   "| settle [--run-date D] [--force] (fill what the next session did) | record [--run-date D | --code X] [--all] "
+                                   "(prediction vs actual) | scorecard [--days N]")
+    p.add_argument("sub", choices=["watch", "show", "touch", "today", "settle", "record", "scorecard"])
+    p.add_argument("--run-date", dest="run_date", help="settle/record: one run (the evening the list was made)")
+    p.add_argument("--code", help="record: one name across runs")
+    p.add_argument("--all", action="store_true", help="record: every stored score of the run, not only the evening list")
+    p.add_argument("--days", type=int, default=60, help="scorecard: how many runs")
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--no-notify", dest="no_notify", action="store_true")
     p.add_argument("--no-dl", dest="no_dl", action="store_true", help="watch: LightGBM only, skip the GRU (faster, tree rank)")
-    p.add_argument("--force", action="store_true", help="touch: run even outside the session")
+    p.add_argument("--force", action="store_true", help="touch: run even outside the session; settle: redo settled runs")
     p.add_argument("--as-of")
     p.set_defaults(fn=cmd_ara)
-    p = sub.add_parser("ml", help="self-learning prediction desk: train [--kind daily|intraday|all] [--no-tune] [--horizons 1d,20d] [--placebo N] | predict [--kind] | eval | calibrate | scorecard [--as-of D] | status | show CODE | board [--horizon H] [--top N] | models [--top N]")
-    p.add_argument("sub", choices=["train", "predict", "eval", "calibrate", "scorecard", "status", "show", "board", "models"])
+    p = sub.add_parser("ml", help="self-learning prediction desk: train [--kind daily|intraday|all] [--no-tune] [--horizons 1d,20d] [--placebo N] | predict [--kind] | eval | calibrate | scorecard [--as-of D] | status | show CODE | board [--horizon H] [--top N] | models [--top N] | record [CODE] [--as-of D] [--horizon H] [--top N] (prediction vs actual)")
+    p.add_argument("sub", choices=["train", "predict", "eval", "calibrate", "scorecard", "status", "show", "board", "models", "record"])
     p.add_argument("--placebo", type=int, default=0, help="train: N label-shuffled refits per (horizon, task) on the newest block (slow)")
     p.add_argument("code", nargs="?")
     p.add_argument("--kind", choices=["daily", "intraday", "all"], default="all")
     p.add_argument("--no-tune", dest="no_tune", action="store_true", help="train: skip the perturbed-params challenger")
     p.add_argument("--horizons", help="train: comma-separated subset, e.g. 1d,20d")
-    p.add_argument("--horizon", default="1d")
+    p.add_argument("--horizon", help="board: default 1d; record: default every horizon")
     p.add_argument("--top", type=int, default=20)
     p.add_argument("--as-of")
     p.set_defaults(fn=cmd_ml)

@@ -36,8 +36,8 @@ from .card import _rows
 WIB = ZoneInfo("Asia/Jakarta")
 DECLARED = "2026-09-26"
 REFERENCE_STUDY = 386          # #348 re-run 2026-09-26 after the gap-fade look-ahead fix (#348 superseded)
-BACKTEST_STRATEGY = {"gap": "gapfade", "trend": "trend_small", "ml": "ml_rank"}      # idx.strategy_backtest_trade names
-EDGE_MIN_N = {"gap": 20, "trend": 15, "ml": 20}
+BACKTEST_STRATEGY = {"gap": "gapfade", "trend": "trend_small", "ml": "ml_rank", "c0w": None}      # idx.strategy_backtest_trade names  (c0w: no stored trade list yet -> no_reference)
+EDGE_MIN_N = {"gap": 20, "trend": 15, "ml": 20, "c0w": 30}
 EDGE_PCT = 5.0
 FILL_MIN_LINES, FILL_RATE_MIN = 10, 0.80
 SLIP_MIN_N, SLIP_MAX_BPS = 10, 50.0
@@ -57,7 +57,7 @@ ACTION = {"edge": "switch the sleeve off", "fills": "fix execution (fill every l
 #   confirmed         n >= target and t = mean / (sd / sqrt n) >= 2 (net of fees, live fills)
 #   inconclusive      n >= target, t < 2 -> keep collecting to CONFIRM_LONG x target
 #   not demonstrated  n >= CONFIRM_LONG x target and t < 2 -> review the sleeve (the kill rules handle outright failure)
-CONFIRM_N = {"gap": 92, "trend": 161, "ml": 85}
+CONFIRM_N = {"gap": 92, "trend": 161, "ml": 85, "c0w": 116}   # c0w: mean 20.6 % / sd 111 % per trade, 1,062 capped trades (explain_cap.py)
 CONFIRM_LONG = 4
 
 
@@ -165,6 +165,8 @@ def dd_check(navs: list[float]) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------------------------------------------- data
 def reference_returns(conn: psycopg.Connection, sleeve: str, study: int = REFERENCE_STUDY) -> np.ndarray:
+    if not BACKTEST_STRATEGY.get(sleeve):
+        return np.array([])
     rows = _rows(conn, "SELECT pnl / NULLIF(cost, 0) AS r FROM idx.strategy_backtest_trade WHERE study_id = %s AND strategy = %s",
                  (study, BACKTEST_STRATEGY[sleeve]), ["r"])
     return np.array([float(r["r"]) for r in rows if r["r"] is not None])
@@ -201,7 +203,14 @@ def evaluate(conn: psycopg.Connection, book: str, sc: dict[str, Any] | None = No
     sc = sc or cb.scorecard(conn, book, store=False)
     trades = closed_trades(book_fills(conn, book), cb.sleeve_of)
     checks: list[dict[str, Any]] = []
-    for s in cb.SLEEVES:
+    # only the sleeves this book runs or has traded (a sleeve added to the code later must not appear on older books' output)
+    from . import book as bk
+    p = bk.get_book(conn, book).get("params") or {}
+    if isinstance(p, str):
+        import json
+        p = json.loads(p) if p.strip() else {}
+    run = [s for s in cb.SLEEVES if s in (p.get("sleeves") or {}) or (sc["sleeves"].get(s) or {}).get("lines") or any(t["sleeve"] == s for t in trades)]
+    for s in run:
         p = sc["sleeves"].get(s) or {}
         checks.append(edge_check(s, [t["ret"] for t in trades if t["sleeve"] == s], reference_returns(conn, s)))
         checks.append(fill_check(s, int(p.get("lines") or 0), int(p.get("filled") or 0)))
@@ -211,7 +220,7 @@ def evaluate(conn: psycopg.Connection, book: str, sc: dict[str, Any] | None = No
     checks.append(dd_check(navs))
     for c in checks:
         c["action"] = ACTION[c["rule"].split(":")[0]]
-    confirm = [confirm_check(s, [t["ret"] for t in trades if t["sleeve"] == s]) for s in cb.SLEEVES]
+    confirm = [confirm_check(s, [t["ret"] for t in trades if t["sleeve"] == s]) for s in run]
     return {"book": book, "declared": DECLARED, "reference_study": REFERENCE_STUDY, "checks": checks, "confirm": confirm,
             "breaches": [c for c in checks if c["status"] == "breach"], "warnings": [c for c in checks if c["status"] == "warning"]}
 

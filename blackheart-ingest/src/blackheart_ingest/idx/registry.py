@@ -70,6 +70,20 @@ REGISTRY: list[dict[str, Any]] = [
                 "10 % trail.",
     },
     {
+        "key": "c0_radar", "label": "C0 radar: momentum multibaggers, wide", "family": "trend", "status": "paper",
+        "cadence": "daily", "roi": None,
+        "rule": "A name that closes at least 30 % above its close 60 sessions ago and at its 250-session high, on a day it traded and "
+                "rose less than 18 %, whose 20-day traded value is between Rp 1 bn and Rp 50 bn, on the main or development board. "
+                "Bought the next session in small slices (1.25 % of NAV, up to 40 names); sold after a close 15 % under the entry "
+                "day's close or 25 % under the peak close since. No profit target.",
+        "falsifier": "Consistently BELOW its backtest on the forward paper record (the K1 book), or the next locked holdout losing the "
+                     "liquidity cap's edge; its edge over the combined book is already not significant (#408).",
+        "books": None, "runs_in": "combo_book.py sleeve 'c0w' (paper K1 book), nightly plan", "evidence": [407, 405, 403, 408, 409, 404, 406],
+        "years": {"study": 409, "path": ["c0_book", "by_year"], "unit": "fraction"},
+        "note": "Built 2026-09-27 from the question of how to catch names like ANTM, BRIS, HRTA and PANI. On its own it is a 2025 "
+                "strategy (+2.3 %/yr without that year); it earns its place as a lowly correlated sleeve next to trend and ML.",
+    },
+    {
         "key": "regime_gate", "label": "Regime gate: no new entry under the 200-day average", "family": "overlay",
         "status": "overlay", "cadence": "daily", "roi": ("overlays", "regime_gate"), "catalog": "overlay:regime",
         "rule": "While the COMPOSITE closes below its own 200-day average, the trend books take no new entry; held names keep "

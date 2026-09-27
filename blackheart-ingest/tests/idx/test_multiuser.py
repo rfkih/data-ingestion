@@ -176,13 +176,18 @@ def test_notify_targets_the_owner(env, monkeypatch) -> None:
     monkeypatch.delenv(notify.OPS_ENV, raising=False)
     got = []
     monkeypatch.setattr(push, "broadcast", lambda t, b, d=None, sender=None, user_id=None: got.append((t, user_id)) or {"sent": 1})
+    # a paper book fills itself, so the alert policy (2026-09-26) never pushes it; the owner routing is tested as if it were real
+    assert notify.send("hello\nbody", book=bk) is False and got == []
+    monkeypatch.setattr("blackheart_ingest.idx.alert_policy.paper_book", lambda b: False)
     assert notify.send("hello\nbody", book=bk) and got[-1] == ("hello", uid_a)                          # the book's owner
     assert notify.send("direct", user_id="someone") and got[-1][1] == "someone"
     assert notify.send("nobody's", book="no-such-book") is False and len(got) == 2                     # no target: dropped
     monkeypatch.setenv(notify.OPS_ENV, EMAILS[1])
     assert notify.send("desk alert") and got[-1][1] == str(env["users"][EMAILS[1]]["id"])              # the ops account
     assert notify.on_alert("critical", f"book:{bk}", "stop hit") and got[-1][1] == uid_a
-    assert notify.on_alert("warning", "daily", "no bar") and got[-1][1] == str(env["users"][EMAILS[1]]["id"])
+    n = len(got)
+    assert notify.on_alert("warning", "daily", "no bar") is False and len(got) == n                    # policy: nothing to act on
+    assert notify.on_alert("critical", "feed", "feed down: no frames") and got[-1][1] == str(env["users"][EMAILS[1]]["id"])   # desk error -> ops
     book.archive(conn, bk)
 
 

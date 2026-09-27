@@ -7,8 +7,10 @@ answer says sell — the mid-year thesis-break check. Each line carries the reas
 (strict-gate fails, TTM warnings, the pack's stance/veto). Fills are captured back into ``idx.fill`` line by line.
 
 IDX market rules encoded here (verify against Peraturan II-A when they change): round lot 100 shares; price fractions
-Rp 1 / 2 / 5 / 10 / 25 for < 200 / < 500 / < 2,000 / < 5,000 / ≥ 5,000; symmetric auto-rejection 35 % / 25 % / 20 % for
-Rp 50-200 / 200-5,000 / > 5,000.
+Rp 1 / 2 / 5 / 10 / 25 for < 200 / < 500 / < 2,000 / < 5,000 / ≥ 5,000; auto-rejection ASYMMETRIC: the upper limit (ARA)
+35 % / 25 % / 20 % for Rp 50-200 / 200-5,000 / > 5,000, rounded down to the tick; the lower limit (ARB) 15 % flat, rounded UP
+to the tick (in force since 2025-04 and kept by the rules from 2026-09-28, Kep-00136/BEI/09-2026). JATS rejects an order
+priced outside the band, so a must-fill sell sits at the ARB price, never under it.
 """
 from __future__ import annotations
 
@@ -34,7 +36,12 @@ BAND = Decimal("0.01")              # ignore weight differences inside ±1 % of 
 MIN_TRADE = Decimal(5_000_000)      # and trades below Rp 5 M
 CASH_RESERVE = Decimal("0.01")      # keep 1 % of NAV in cash for fees/rounding
 TICKS = ((200, 1), (500, 2), (2000, 5), (5000, 10), (10**12, 25))
-BANDS = ((200, Decimal("0.35")), (5000, Decimal("0.25")), (10**12, Decimal("0.20")))
+BANDS = ((200, Decimal("0.35")), (5000, Decimal("0.25")), (10**12, Decimal("0.20")))   # the UPPER limit (ARA) by previous close
+# The LOWER limit (ARB): 15 % for every price. Checked on the tape 2026-09-25 (AGAR 2,370 -> 2,020, CSMI 236 -> 202, IRSX
+# 438 -> 374, SAFE 730 -> 625 all closed exactly there); the desk's realised worst day has been -15 % since 2025-04 (study #387).
+# Until 2026-09-27 this module used the symmetric 25 % / 20 % / 35 % below as well, which priced a must-fill stop under the
+# ARB - an order the exchange rejects.
+ARB_PCT = Decimal("0.15")
 LIVE_BOOKS = frozenset({"live"})     # kept for callers; the rule itself is is_live(): everything that is not paper/test is live
 
 
@@ -69,10 +76,12 @@ def snap(price: Decimal, side: str) -> Decimal:
 
 
 def reject_band(prev_close: Decimal) -> tuple[Decimal, Decimal]:
+    """(ARB, ARA) of a session whose previous close is ``prev_close``: the lowest and highest prices JATS accepts. ARB =
+    prev x 0.85 rounded UP to its tick (never below Rp 50); ARA = prev x (1 + 35/25/20 %) rounded down to its tick."""
     pct = next(p for lim, p in BANDS if prev_close <= lim)
-    lo = max(Decimal(50), (prev_close * (1 - pct)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    lo = max(Decimal(50), snap(prev_close * (1 - ARB_PCT), "buy"))
     hi = (prev_close * (1 + pct)).quantize(Decimal(1), rounding=ROUND_HALF_UP)
-    return snap(lo, "buy"), snap(hi, "sell")
+    return lo, snap(hi, "sell")
 
 
 def limit_price(ref_close: Decimal, side: str, ticks_through: int = 1) -> Decimal:
@@ -458,13 +467,19 @@ def set_status(conn: psycopg.Connection, ticket_id: int, status: str, actor: str
         raise ValueError(f"no ticket {ticket_id}")
     if is_live(t["book"]) and status in ("issued", "closed") and actor != "operator":
         raise PermissionError(TWO_KEY)
+    if t["status"] == "cancelled" and status != "cancelled":
+        # a cancelled ticket stays cancelled: a stale screen must not issue a draft the nightly re-plan has superseded
+        raise ValueError(f"ticket #{ticket_id} is cancelled and cannot move to {status}")
     checks = None
     if status == "issued":
         checks = validate(conn, ticket_id)
         if not checks["ok"]:
             raise ValueError(f"ticket #{ticket_id} cannot be issued: " + breaches_text(checks))
     with conn.cursor() as cur:
-        cur.execute("UPDATE idx.ticket SET status = %s, updated_at = now() WHERE id = %s", (status, ticket_id))
+        cur.execute("UPDATE idx.ticket SET status = %s, updated_at = now() WHERE id = %s AND status = %s", (status, ticket_id, t["status"]))
+        if cur.rowcount != 1:                                             # compare-and-set: someone moved it since it was loaded
+            conn.rollback()
+            raise ValueError(f"ticket #{ticket_id} changed status while being updated (was {t['status']}); reload and retry")
     journal.record(conn, t["book"], actor, "ticket_status", ticket_id=ticket_id, rationale=rationale or f"{t['status']} -> {status}",
                    refs={"from": t["status"], "to": status, "mode": t["mode"], "n_lines": len(t["lines"]),
                          "turnover": str(checks["turnover"]) if checks else None}, commit=False)

@@ -17,7 +17,7 @@ BOOK = {"book": "paper-c0mb0", "fee_buy_pct": Decimal("0.15"), "fee_sell_pct": D
 
 def test_settings_defaults_overlay_and_validate() -> None:
     s = cb.settings({"params": {}})
-    assert s["sleeves"] == {"trend": 0.05, "ml": 0.05, "gap": 0.10} and s["slots"] == 20 and s["ml"]["confirm"] == 0.05
+    assert s["sleeves"] == {"trend": 0.05, "ml": 0.05, "gap": 0.10, "c0w": 0.0} and s["slots"] == 20 and s["ml"]["confirm"] == 0.05
     s = cb.settings({"params": {"sleeves": {"trend": 0.025}, "slots": 10, "ml": {"margin": 1.5}}})
     assert s["sleeves"]["trend"] == 0.025 and s["sleeves"]["gap"] == 0.10 and s["slots"] == 10 and s["ml"]["margin"] == 1.5 and s["ml"]["ema"] == 3
     with pytest.raises(ValueError):
@@ -101,7 +101,7 @@ def test_ml_stop_sells_at_the_band_floor_and_is_off_by_default() -> None:
     s = sells["SSSS"]
     assert "ml:stop" in s["flags"] and "exit:must" in s["flags"] and "ML stop 5 %" in s["reason"]
     lo, _hi = cb.ticket.reject_band(Decimal(945))
-    assert s["limit_price"] <= lo + cb.ticket.tick_size(lo) and s["limit_price"] < Decimal(940)   # at the band floor, not close - 1 tick
+    assert lo == 805 and s["limit_price"] == lo            # at the ARB (945 x 0.85 = 803.25, up to the Rp 5 tick), not close - 1 tick
     assert s["notional"] == Decimal(10) * cb.ticket.LOT * s["limit_price"]
     exp = cb.compose(BOOK, S, Decimal(20_000_000), Decimal(5_000_000), pos, closes, [], [], ml, {"SSSS": 61}, set(), set(), date(2026, 9, 25))
     assert "expiry" in {ln["code"]: ln for ln in exp["lines"]}["SSSS"]["reason"]          # expiry is checked first
@@ -194,3 +194,67 @@ def test_in_session_and_plan_text() -> None:
            "regime": {"on": True}, "trend_signals": 2, "held_back": [], "ml_scored": True}
     txt = cb.render_plan(res, [{"code": "CCCC", "level_price": Decimal(316), "ref_price": Decimal(300), "until_date": date(2026, 10, 9), "e_bps": 500.0, "cost_bps": 90.0}], "Combo")
     assert "JUAL" in txt and "TTTT" in txt and "BELI" in txt and "AAAA" in txt and "AWASI" in txt and "316" in txt and "terbuka" in txt
+
+
+# ---------------------------------------------------------------------------------------------------------------- C0W sleeve (CB-1 #408)
+def _c0w_hist(code: str, closes: list[float], values: list[float], start: date = date(2025, 1, 1)) -> pd.DataFrame:
+    """``values`` = the traded value wanted per day; the frame carries volume = value / close (the sleeve reads close x volume)."""
+    days = pd.bdate_range(start, periods=len(closes)).date
+    return pd.DataFrame({"code": code, "trade_date": days, "adj": closes, "close": closes, "volume": [v / c for v, c in zip(values, closes, strict=True)]})
+
+
+def test_c0w_signals_flag_the_breakout_and_apply_every_filter() -> None:
+    c = cb.settings({"params": {}})["c0w"]
+    n = 260
+    base = [100.0] * (n - 61) + [100.0 + i for i in range(61)]                 # +60 % over the last 60 sessions, a new 1-year high
+    ok = _c0w_hist("GOOD", base, [5e9] * n)
+    d = ok["trade_date"].iloc[-1]
+    boards = {"GOOD": "--U-1------", "LIQD": "--U-1------", "BORD": "--U-7------", "JUMP": "--U-1------", "SLOW": "--U-1------"}
+    liqd = _c0w_hist("LIQD", base, [60e9] * n)                                 # the most traded: dropped by the Rp 50 bn cap (FL-2)
+    bord = _c0w_hist("BORD", base, [5e9] * n)                                  # watch-list board
+    jump = _c0w_hist("JUMP", base[:-1] + [base[-2] * 1.2], [5e9] * n)          # +20 % on the day: never an entry day
+    slow = _c0w_hist("SLOW", [100.0] * (n - 61) + [100.0 + 0.4 * i for i in range(61)], [5e9] * n)   # +24 %: under the 30 % jump
+    stale = _c0w_hist("STAL", base, [5e9] * (n - 1) + [0.0])                  # a no-trade day at the high: never a flag (research U1 volume > 0)
+    noboard = _c0w_hist("NOBR", base, [5e9] * n)                                # no readable remark -> not a main board
+    hist = pd.concat([ok, liqd, bord, jump, slow, stale, noboard])
+    sig = cb.c0w_signals(hist, d, {**boards, "STAL": "--U-1------", "NOBR": ""}, c)
+    assert [s_["code"] for s_ in sig] == ["GOOD"] and sig[0]["r60"] == pytest.approx(0.6) and sig[0]["v20_bn"] == pytest.approx(5.0)
+    assert cb.c0w_signals(ok.iloc[:150], ok["trade_date"].iloc[149], boards, c) == []   # too little history
+
+
+def test_c0w_exits_cut_at_minus_15_and_trail_25_from_the_peak() -> None:
+    c = cb.settings({"params": {}})["c0w"]
+    stop = _c0w_hist("STOP", [1000, 950, 900, 849], [5e9] * 4)
+    trail = _c0w_hist("TRAI", [1000, 1500, 2000, 1490], [5e9] * 4)
+    hold = _c0w_hist("HOLD", [1000, 1500, 2000, 1600], [5e9] * 4)
+    hist = pd.concat([stop, trail, hold])
+    d = stop["trade_date"].iloc[-1]
+    pos = {k: {"lots": Decimal(5), "entry_date": stop["trade_date"].iloc[0], "entry_price": Decimal(1000)} for k in ("STOP", "TRAI", "HOLD", "GONE")}
+    raw = {"STOP": Decimal(849), "TRAI": Decimal(1490), "HOLD": Decimal(1600)}
+    ex = {x["code"]: x for x in cb.c0w_exits(pos, hist, d, raw, c)}
+    assert set(ex) == {"STOP", "TRAI", "GONE"} and "cut loss" in ex["STOP"]["reason"] and "trailing" in ex["TRAI"]["reason"]
+
+
+def test_compose_buys_c0w_after_ml_watches_within_slots_and_floor_and_not_when_size_is_zero() -> None:
+    pos = {"gap": {}, "trend": {}, "ml": {}, "c0w": {}, "manual": {}}
+    ml = _ml([("MLAA", 0.05, 0.01, 300, 6e9)])
+    closes = {"MLAA": Decimal(300), "C0AA": Decimal(400), "C0BB": Decimal(500), "C0CC": Decimal(600)}
+    entries = [{"code": "C0AA", "attn": 5.0, "r60": 0.5, "v20_bn": 3.0}, {"code": "MLAA", "attn": 4.0, "r60": 0.4, "v20_bn": 3.0},
+               {"code": "C0BB", "attn": 3.0, "r60": 0.4, "v20_bn": 3.0}, {"code": "C0CC", "attn": 2.0, "r60": 0.4, "v20_bn": 3.0}]
+    S = cb.settings({"params": {"slots": 3, "sleeves": {"c0w": 0.0125}}})
+    res = cb.compose(BOOK, S, Decimal(30_000_000), Decimal(30_000_000), pos, closes, [], [], ml, {}, set(), set(), date(2026, 9, 25), None, entries, [])
+    buys = [ln for ln in res["lines"] if ln["side"] == "buy"]
+    assert [w["code"] for w in res["watches"]] == ["MLAA"]                           # the ML watch takes its slot first
+    assert [ln["code"] for ln in buys] == ["C0AA", "C0BB"] and res["free_slots"] == 0   # MLAA skipped (watched); 3 slots in all
+    assert all(ln["flags"][0] == "sleeve:c0w" for ln in buys) and all(ln["notional"] <= Decimal(375_000) for ln in buys)
+    off = cb.compose(BOOK, cb.settings({"params": {}}), Decimal(30_000_000), Decimal(30_000_000), pos, closes, [], [], ml, {}, set(), set(), date(2026, 9, 25),
+                     None, entries, [])
+    assert not [ln for ln in off["lines"] if ln["side"] == "buy"]                    # size 0 by default: the live book never trades it
+    fl = cb.compose(BOOK, cb.settings({"params": {"sleeves": {"c0w": 0.0125}, "cash_floor": 0.30}}), Decimal(30_000_000), Decimal(9_100_000), pos, closes,
+                    [], [], _ml([]), {}, set(), set(), date(2026, 9, 25), None, entries[:1], [])
+    assert fl["lines"] == [] and fl["floor_held"] == ["C0AA"]
+    held = {**pos, "c0w": {"C0ZZ": {"lots": Decimal(9), "entry_date": date(2026, 9, 1), "entry_price": Decimal(700)}}}
+    sold = cb.compose(BOOK, S, Decimal(30_000_000), Decimal(20_000_000), held, {**closes, "C0ZZ": Decimal(590)}, [], [], _ml([]), {}, set(), set(),
+                      date(2026, 9, 25), None, [], [{"code": "C0ZZ", "lots": Decimal(9), "reason": "C0 cut loss 15 %", "close": Decimal(590)}])
+    s_ = [ln for ln in sold["lines"] if ln["side"] == "sell"]
+    assert [ln["code"] for ln in s_] == ["C0ZZ"] and s_[0]["flags"] == ["sleeve:c0w", "c0w:exit"]

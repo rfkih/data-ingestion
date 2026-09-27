@@ -241,7 +241,14 @@ def _fire_ml_stop(conn: psycopg.Connection, b: dict[str, Any], it: dict[str, Any
                       f"ML stop {stop_pct:g} % (hari yang sama): harga {float(last):,.0f} <= {100 - stop_pct:g} % dari harga masuk "
                       f"{float(p['entry_price']):,.0f} - jual di sesi penutupan hari ini, limit di batas bawah ARB supaya terisi",
                       ["sleeve:ml", "ml:exit", "ml:stop", "exit:must", "stop:sameday", f"intent:{it['id']}"])
-    ln["limit_price"] = ticket.snap(ticket.reject_band(last)[0], "sell")
+    # the band is the SESSION's, set by yesterday's close - not by the price the stop fired at (a band around a price that has
+    # already fallen reaches under the day's ARB, which JATS rejects)
+    with conn.cursor() as cur:
+        cur.execute("SELECT close FROM idx.bar WHERE code = %s AND source = 'idx' AND trade_date < %s AND close > 0 "
+                    "ORDER BY trade_date DESC LIMIT 1", (code, d))
+        prev = cur.fetchone()
+    prev_close = Decimal(str((prev["close"] if isinstance(prev, dict) else prev[0]))) if prev else last
+    ln["limit_price"] = ticket.snap(ticket.reject_band(prev_close)[0], "sell")
     ln["notional"] = Decimal(p["lots"]) * ticket.LOT * ln["limit_price"]
     res = gapfade._ticket_res(book, d, cb.MODE, [ln], b, conn, targets=sorted(cb.held_codes(pos) - {code}))
     res["strategy"] = "combo"

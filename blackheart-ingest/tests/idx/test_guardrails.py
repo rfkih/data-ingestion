@@ -130,14 +130,16 @@ def test_round_trip_kill_switch_two_key_and_issue_gate(conn, monkeypatch) -> Non
         with pytest.raises(PermissionError, match="two-key"):
             ticket.set_status(conn, tid, "issued", actor="agent")
         ticket.set_status(conn, tid, "cancelled", actor="agent")                             # its own draft: fine
-        ticket.set_status(conn, tid, "draft", actor="operator")
+        with pytest.raises(ValueError, match="cancelled"):                                  # cancelled is terminal (2026-09-27 review):
+            ticket.set_status(conn, tid, "draft", actor="operator")                        # a stale screen cannot revive a superseded draft
+        tid = ticket.store(conn, res, actor="agent")                                        # a fresh draft instead
         r = ticket.set_status(conn, tid, "issued", actor="operator", rationale="operator issues")
         assert r["status"] == "issued" and r["checks"]["ok"]
         monkeypatch.setattr(ticket, "is_live", lambda b: b == "live")
 
         # journal: halt/resume are journaled by the routes/CLI; status changes by the module itself
         rows = journal.recent(conn, bk)
-        assert [r["action"] for r in rows] == ["ticket_status"] * 3                       # refused changes are not journaled
+        assert [r["action"] for r in rows] == ["ticket_status"] * 2                       # refused changes are not journaled
         assert rows[0]["actor"] == "operator" and rows[0]["refs"]["to"] == "issued" and rows[0]["rationale"] == "operator issues"
         assert rows[-1]["actor"] == "agent" and rows[-1]["refs"] == {**rows[-1]["refs"], "from": "draft", "to": "cancelled"}
         did = journal.record(conn, bk, "agent", "note", code="bbca", rationale="why", refs={"x": Decimal("1.5"), "d": date(2026, 1, 2)})

@@ -21,11 +21,17 @@ def test_tick_sizes_and_snapping() -> None:
 
 
 def test_auto_rejection_band_and_limits() -> None:
-    lo, hi = ticket.reject_band(Decimal(1000))                            # 25 % band
-    assert lo == 750 and hi == 1250
-    lo, hi = ticket.reject_band(Decimal(100))                             # 35 % band, floor Rp 50
-    assert lo == 65 and hi == 135
-    assert ticket.reject_band(Decimal(60))[0] == 50
+    lo, hi = ticket.reject_band(Decimal(1000))                            # ARB 15 % flat, ARA 25 %
+    assert lo == 850 and hi == 1250
+    lo, hi = ticket.reject_band(Decimal(100))                             # ARB 15 %, ARA 35 %
+    assert lo == 85 and hi == 135
+    assert ticket.reject_band(Decimal(60))[0] == 51 and ticket.reject_band(Decimal(55))[0] == 50   # never under Rp 50
+    lo, hi = ticket.reject_band(Decimal(6000))                            # ARA 20 % above Rp 5,000
+    assert lo == 5100 and hi == 7200
+    # the ARB rounds UP to the tick: the four names that closed at their floor on 2026-09-25
+    for prev, arb in ((2370, 2020), (236, 202), (438, 374), (730, 625)):
+        assert ticket.reject_band(Decimal(prev))[0] == arb, prev
+    assert ticket.limit_price(Decimal(1000), "sell", ticks_through=100) == 850     # a sell is clamped at the ARB
     assert ticket.limit_price(Decimal(595), "sell") == 590 and ticket.limit_price(Decimal(595), "buy") == 600
     assert ticket.limit_price(Decimal(8600), "sell") == 8575 and ticket.limit_price(Decimal(105), "buy") == 106
     assert ticket.limit_price(Decimal(1000), "buy", ticks_through=100) == 1250      # clamped to the band

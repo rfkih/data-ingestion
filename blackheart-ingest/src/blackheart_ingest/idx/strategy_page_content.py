@@ -157,6 +157,106 @@ PAGES: dict[str, dict[str, Any]] = {
                      "config": "As deployed: Rp 20 M book, 5 % of NAV per name, regime gate, 30 % cash floor (study #386)."},
         "fills": "The closing offer at entry and the closing bid at exit, one session after the signal; Stockbit fees.",
     },
+    "c0_radar": {
+        "family": "trend", "sleeve": "c0w",
+        "one": "Buys every liquid-enough name that rose 30 % in 60 days to a one-year high - but not the most-traded ones - in many small slices; cuts at -15 %, trails 25 %.",
+        "what": "The multibagger radar turned into a sleeve. It does not predict which name will run: it joins names that already proved "
+                "they move, spreads the money over many small positions because a few rockets carry the result, cuts the failures "
+                "quickly and lets the winners run with no profit target.",
+        "rules": ["After the close, find names at least 30 % above their close 60 sessions ago and at their 250-session high.",
+                  "Keep the ones that traded that day, rose less than 18 % on the day, and trade Rp 1-50 bn a day on average over 20 days.",
+                  "Buy the next session, 1.25 % of NAV each, up to 40 names; strongest attention (20-day over one-year value) first.",
+                  "Sell after a close 15 % under the entry day's close, or 25 % under the peak close since entry."],
+        "how": [("Universe", "Main and development boards, 20-day value Rp 1-50 bn, price at least Rp 50"), ("Signal", "Nightly plan after the close"),
+                ("Entry", "Next session"), ("Exit", "Cut loss -15 %, trailing -25 % from the peak"), ("Holding", "About {hold} sessions (winners {hold_w}, losers {hold_l})"),
+                ("Size", "1.25 % of NAV per name, up to 40 names")],
+        "detail": [
+            ("The idea", "Momentum lasts longer in names the crowd has not reached yet. The radar found that a C0 flag touches 2x within a "
+                         "year {prec} % of the time against {base} % for a random name on the same day, and more with context: {prec7} % "
+                         "after an exchange query, {prec8} % after a change of control or a restructuring."),
+            ("Why the liquidity cap", "The most-traded flags (Rp 50 bn a day or more: big commodity names, foreigners already buying, "
+                                      "a year already up) are the end of the story: on the locked 2024-26 holdout they earned "
+                                      "{cap_drop} % a trade against {cap_keep} % for the rest (t {cap_t}). It was the only filter of "
+                                      "{cands} candidates that survived; earnings, news, flows, crowding and the price path did not."),
+            ("Execution", "The signal exists only after the close, so the buy belongs to the next session - and waiting pays: from the "
+                          "signal close to the entry close the price moved {wait} % on average (median {wait_med} %), a small pullback "
+                          "after the breakout. A day that rose 18 % or more is never bought (it is usually locked at the upper limit "
+                          "and cannot be filled), nor a day the name did not trade. The round trip cost {cost} % on average (quoted "
+                          "spread {spread} % at the signal close); a Rp 375 k slice is a negligible share of a Rp {v20} bn day."),
+            ("Why no take-profit", "The {n100} trades that made +100 % or more add up to {share100} % of the net profit - more than all "
+                                   "of it; every other trade together nets slightly below zero. A target cuts exactly those. On the same entries a +20 % target lifts the hit rate to {tp20_win} % but the "
+                                   "average trade falls from {dep} % to {tp20} %; +50 % gives {tp50} %, +100 % {tp100} %, selling half "
+                                   "at +50 % {half} %. A 15 % trail gives {tr15} %, 20 % {tr20} %, 30 % {tr30} % - the 25 % trail sits "
+                                   "on the plateau. Winners keep {capture} % of their peak."),
+            ("Sizing and risk", "Many small slices, because the payoff is a lottery: the best 5 % of trades earned {top5} % of the "
+                                "profit, and a 10-slot book of the same signal was decided by one or two names (#404). On its own, "
+                                "Rp 20 M, 1.25 % x 40 from 2022: {bc} %/yr, Sharpe {bs}, max DD {bd} % - but only {bx} %/yr "
+                                "without 2025."),
+            ("When it struggles", "When small caps stop running: half the trades hit the cut loss (mean {stop_mean} %, worst {worst} % "
+                                  "through gaps); by entry year the average trade was {y22} % in 2022 and {y26} % in 2026 against "
+                                  "{y25} % in 2025. Two trades in three lose; skipping signals out of doubt is how the rockets get missed."),
+        ],
+        "figs": {"hold": S(409, V("trade_stats/hold_median", 0)), "hold_w": S(409, V("trade_stats/hold_win", 0)), "hold_l": S(409, V("trade_stats/hold_loss", 0)),
+                 "prec": S(403, PCT("F1_C0/precision", 0)), "base": S(403, PCT("F1_C0/base", 0)), "prec7": S(403, PCT("F7_C0_UMA/precision", 0)),
+                 "prec8": S(403, PCT("F8_C0_EVENT/precision", 0)),
+                 "cap_drop": S(407, PCT("holdout/liquidity_cap_50/dropped/mean", 1, sign=True)), "cap_keep": S(407, PCT("holdout/liquidity_cap_50/kept/mean", 1, sign=True)),
+                 "cap_t": S(407, V("holdout/liquidity_cap_50/welch_t", 1)), "cands": S(407, V("candidates", 0)),
+                 "wait": S(409, PCT("trade_stats/wait_mean", 1, sign=True)), "wait_med": S(409, PCT("trade_stats/wait_median", 1, sign=True)),
+                 "cost": S(409, PCT("trade_stats/cost_mean", 2)), "spread": S(409, PCT("trade_stats/spread_median", 2)), "v20": S(409, V("trade_stats/value20_median_bn", 1)),
+                 "n100": S(409, V("trade_stats/over100_n", 0)), "share100": S(409, PCT("trade_stats/over100_profit_share", 0)),
+                 "tp20_win": S(409, PCT("alternatives/tp20/win", 0)), "dep": S(409, PCT("alternatives/deployed/mean", 1, sign=True)),
+                 "tp20": S(409, PCT("alternatives/tp20/mean", 1, sign=True)), "tp50": S(409, PCT("alternatives/tp50/mean", 1, sign=True)),
+                 "tp100": S(409, PCT("alternatives/tp100/mean", 1, sign=True)), "half": S(409, PCT("alternatives/half50/mean", 1, sign=True)),
+                 "tr15": S(409, PCT("alternatives/trail15/mean", 1, sign=True)), "tr20": S(409, PCT("alternatives/trail20/mean", 1, sign=True)),
+                 "tr30": S(409, PCT("alternatives/trail30/mean", 1, sign=True)), "capture": S(409, PCT("trade_stats/capture_win", 0)),
+                 "top5": S(409, PCT("trade_stats/top5pct_profit_share", 0)),
+                 "bc": S(409, PCT("c0_book/cagr", 1, sign=True)), "bs": S(409, V("c0_book/sharpe", 2)), "bd": S(409, PCT("c0_book/mdd", 0)),
+                 "bx": S(409, PCT("c0_book/cagr_ex2025", 1, sign=True)), "stop_mean": S(409, PCT("trade_stats/stop_mean", 1, sign=True)),
+                 "worst": S(409, PCT("trade_stats/worst", 0)), "y22": S(409, PCT("by_entry_year/2022/mean", 1, sign=True)),
+                 "y26": S(409, PCT("by_entry_year/2026/mean", 1, sign=True)), "y25": S(409, PCT("by_entry_year/2025/mean", 1, sign=True))},
+        "research": [
+            {"study": 408, "title": "Inside the combined book", "tested": "The sleeve added to the live combined book (and replacing its trend sleeve), same engine.",
+             "found": "Added at 1.25 % a name: {k1c} %/yr, Sharpe {k1s}, max DD {k1d} % against {rc} %, {rs}, {rd} % as deployed; without "
+                      "2025 {k1x} % against {rx} %. Neighbouring sizes gain less and the excess is not significant.",
+             "figs": {"k1c": PCT("K1_ADD/cagr", 1, sign=True), "k1s": V("K1_ADD/sharpe", 2), "k1d": PCT("K1_ADD/mdd", 0),
+                      "rc": PCT("REF/cagr", 1, sign=True), "rs": V("REF/sharpe", 2), "rd": PCT("REF/mdd", 0),
+                      "k1x": PCT("K1_ADD/cagr_ex2025", 1, sign=True), "rx": PCT("REF/cagr_ex2025", 1, sign=True), "n": V("K1_ADD/trades", 0)},
+             "verdict": "Inconclusive", "n": "{n} trades"},
+            {"study": 407, "title": "Filter lab: which flags to buy", "tested": "Nine feature families searched on 2021-23 trades only, three adversarial checks per candidate, one locked 2024-26 holdout run once.",
+             "found": "{expr} expressions explored, {cands} candidates, {passed} passed - both the liquidity cap: kept flags {keep} % a trade against {drop} % for the most-traded (t {t}). "
+                      "The price-path rules that looked best on 2021-23 reversed on the holdout ({pp_k} % kept vs {pp_d} % dropped).",
+             "figs": {"expr": V("train_expressions", 0), "cands": V("candidates", 0), "passed": V("passed", 0),
+                      "keep": PCT("holdout/liquidity_cap_50/kept/mean", 1, sign=True), "drop": PCT("holdout/liquidity_cap_50/dropped/mean", 1, sign=True),
+                      "t": V("holdout/liquidity_cap_50/welch_t", 1), "pp_k": PCT("holdout/prior_uptrend/kept/mean", 1, sign=True),
+                      "pp_d": PCT("holdout/prior_uptrend/dropped/mean", 1, sign=True), "n": V("holdout_trades", 0)},
+             "verdict": "Adopted", "n": "{n} holdout trades"},
+            {"study": 406, "title": "News and earnings filters", "tested": "Keep names with rising earnings, no losses, substantive disclosures, or no attention-only news.",
+             "found": "Earnings did not separate the winners (t {t1}); names whose only news was an exchange query or a media clarification "
+                      "did better ({noise} % a trade) than the rest ({rest} %) - the run is speculative attention, not fundamentals.",
+             "figs": {"t1": V("K1_EARN_UP/t", 2), "noise": PCT("K4_NO_NOISE/dropped_mean", 1, sign=True), "rest": PCT("K4_NO_NOISE/kept_mean", 1, sign=True),
+                      "n": V("K1_EARN_UP/kept", 0)},
+             "verdict": "Rejected", "n": "4 filters"},
+            {"study": 405, "title": "Many small slices", "tested": "Every flag at 1.25 % of NAV, up to 40 names, from four start dates.",
+             "found": "Sharpe {w} against {r} for the deployed trend sleeve from 2022, above it from every start; all four exit neighbours "
+                      "and costs x 2 ({c2} vs {r2}) hold.",
+             "figs": {"w": V(("W1", "starts", "2022-01-03", "w", "sharpe"), 2), "r": V(("W1", "starts", "2022-01-03", "ref", "sharpe"), 2),
+                      "c2": V("W1/cost2/w", 2), "r2": V("W1/cost2/ref", 2)},
+             "verdict": "Adopted", "n": "4 starts"},
+            {"study": 404, "title": "A 10-slot book", "tested": "The radar's tiers traded as a book with 5-10 % slots, stops and vol targeting.",
+             "found": "One arm passed ({r2} Sharpe) and then failed every robustness check: without its best trade, at neighbouring stops, "
+                      "and from an earlier start. A few rockets decide a small book.",
+             "figs": {"r2": V("R2/book/sharpe", 2)}, "verdict": "Rejected", "n": "4 arms"},
+            {"study": 403, "title": "The multibagger radar", "tested": "Eight flags scored by whether the name touches 2x within a year, against random names on the same dates.",
+             "found": "The momentum flag touches 2x {p} % of the time against {b} % (lift {l}), every year; events alone do not (lift {le}).",
+             "figs": {"p": PCT("F1_C0/precision", 0), "b": PCT("F1_C0/base", 0), "l": V("F1_C0/lift", 2), "le": V("F5_RESTRUCT/lift", 2), "n": V("F1_C0/n", 0)},
+             "verdict": "Adopted", "n": "{n} flags"},
+        ],
+        "findings": {}, "headline": {"study": 409, "path": ["c0_book"]},
+        "backtest": {"study": 409, "file": "c0_book",
+                     "config": "The sleeve alone as deployed: Rp 20 M book, 1.25 % of NAV per name, up to 40 names, 20-day value Rp 1-50 bn, "
+                               "cut loss -15 %, trailing -25 % (study #409)."},
+        "fills": "The closing offer one session after the signal, the closing bid one session after the exit close; Stockbit fees; no fill on a day up 18 % or more, no sale on a locked lower limit.",
+    },
     "ml_rank": {
         "family": "ml", "sleeve": "ml", "model": {"kind": "ml_model", "horizon": "5d", "task": "ret"},
         "one": "A nightly model scores every name's next five days; a name is bought only after its price confirms the signal.",
@@ -668,6 +768,8 @@ ROBUSTNESS: dict[str, dict[str, Any]] = {
     "regime_damper": {"grade": "robust", "studies": [332], "why": "robust as a damper in 2008 and 2020: it cuts the drawdown and costs return"},
     "trend_small": {"grade": "partial", "studies": [23, 386, 395],
                     "why": "beats random entries and generalises to Thailand and Malaysia, but neighbours are fragile on the corrected data and without 2025 it earns +1.2 %/yr"},
+    "c0_radar": {"grade": "partial", "studies": [403, 405, 407, 408, 409],
+                 "why": "all four start dates and exit neighbours hold (#405), beats same-date random names every year (#403) and its liquidity cap held on a locked 2024-26 holdout (#407); but alone it earns +2.3 %/yr without 2025 (#409) and its gain inside the combined book is not significant (t 1.08, #408)"},
     "gapfade": {"grade": "partial", "studies": [77, 382, 386, 387],
                 "why": "placebo percentile 100, but almost all its money is 2025-26 and it can only trigger while the exchange's lower price limit is wide"},
     "regime_gate": {"grade": "partial", "studies": [332, 62], "why": "the drawdown effect holds; the return gain does not"},

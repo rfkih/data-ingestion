@@ -1134,6 +1134,27 @@ def make_router(require_token) -> APIRouter:
         return {"date": str(d) if d else (str(rows[0]["trade_date"]) if rows else None), "rows": rows,
                 "facts": {"locked": ara.FACT_LOCKED, "at_ara": ara.FACT_AT_ARA, "faded": ara.FACT_FADED}}
 
+    @router.get("/ara/record")
+    def ara_record(run_date: str | None = None, code: str | None = None, all_rows: bool = False, limit: int = 500,
+                   c: Caller = _CALLER) -> dict[str, Any]:
+        """Prediction vs actual: each score the evening model gave next to what the next session did (limit from IDX's
+        previous, touched / locked, close and high vs previous, outcome). One run (newest settled by default; ``all_rows``
+        = every stored score, not only the list) or one ``code`` across runs. Measurement only."""
+        from datetime import date as _date
+
+        from . import ara
+        with get_connection() as conn:
+            return _plain(ara.record(conn, _date.fromisoformat(run_date) if run_date else None, code, listed_only=not all_rows,
+                                     limit=min(max(limit, 1), 2000)))
+
+    @router.get("/ara/scorecard")
+    def ara_scorecard(days: int = 60, c: Caller = _CALLER) -> dict[str, Any]:
+        """One grade per evening run (top-5/10/20 locks, precision, recall of the market's locks, AUC and Brier when the
+        whole ranking was kept) and the pooled figures next to study #146's out-of-sample range."""
+        from . import ara
+        with get_connection() as conn:
+            return _plain(ara.scorecards(conn, min(max(days, 1), 500)))
+
     # ---- gap-fade, live (menu 29b; the intraday screen in the app polls this) -------------------------------------
     @router.get("/gapfade/live")
     def gapfade_live(book: str = "paper_gapfade", c: Caller = _CALLER) -> dict[str, Any]:
@@ -1472,5 +1493,18 @@ status();
         from .ml import loop as ml
         with get_connection() as conn:
             return _plain(ml.status(conn))
+
+    @router.get("/ml/record")
+    def ml_record(day: str | None = None, horizon: str | None = None, code: str | None = None, limit: int = 1000) -> dict[str, Any]:
+        """Forecasts next to what happened, each ok / void / pending: one WIB day of cuts with a per-horizon tally (newest
+        day by default), or one ``code`` newest first; ``horizon`` narrows either."""
+        from datetime import date as _date
+
+        from .ml import loop as ml
+        from .ml.spec import HORIZONS
+        if horizon is not None and horizon not in HORIZONS:
+            raise HTTPException(400, f"unknown horizon {horizon}; one of {', '.join(HORIZONS)}")
+        with get_connection() as conn:
+            return _plain(ml.record(conn, _date.fromisoformat(day) if day else None, horizon, code, min(max(limit, 1), 20000)))
 
     return router

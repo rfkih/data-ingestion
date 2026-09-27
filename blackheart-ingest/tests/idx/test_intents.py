@@ -140,7 +140,8 @@ def test_one_tick_arms_then_fires_the_same_day_stop_on_paper(conn, monkeypatch):
     r = it.tick_book(conn, BOOK, at(15, 41))
     assert [(f["code"], f["result"]) for f in r["fired"]] == [("AAAA", "filled")]
     ln = tickets[1]["lines"][0]
-    assert "stop:sameday" in ln["flags"] and "exit:must" in ln["flags"] and ln["limit_price"] < Decimal(945) * Decimal("0.85")
+    # the limit is the session's ARB (JATS rejects anything under it); AAAA has no bar, so the reference falls back to the firing price
+    assert "stop:sameday" in ln["flags"] and "exit:must" in ln["flags"] and ln["limit_price"] == it.ticket.reject_band(Decimal(945))[0] == 805
     assert fills == [(Decimal(10), Decimal(945))] and tickets[1]["status"] == "closed"   # paper: filled at the firing price
     with conn.cursor() as cur:
         cur.execute("SELECT id, status FROM idx.order_intent WHERE book = %s", (BOOK,))

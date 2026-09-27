@@ -17,6 +17,16 @@ Sleeves (book.params, defaults in DEFAULTS; a book with rule 'combo'):
           (closing offer/bid + fees); it is BOUGHT only when the price confirms at >= level = signal close x (1 + confirm) within
           confirm_days; SOLD when the score turns negative and a better name pays the swap, or after max_hold days; sized
           ml_pct x NAV
+  c0w     the multibagger radar as a WIDE sleeve (research menus SX-1 .. CB-1, studies #400-#408): every C0 flag - the close >=
+          1.3 x the close 60 sessions ago, at its 250-day high, the day's return < 18 %, 20-day traded value in [Rp 1 bn, Rp 50 bn)
+          (FL-2 #407: the one filter that survived its holdout), close >= Rp 50, main / development board on the day - bought at the
+          next session at c0w_pct x NAV (small: 1.25 % in the K1 paper book), strongest attention (20-day / 250-day value) first,
+          after the ML watches have taken their slots; SOLD after a close <= 85 % of the adjusted close on the entry day (stop) or
+          <= 75 % of the peak since (trail). Size 0 by default: only a book that sets it trades it (the frozen live book does not).
+          KNOWN DEVIATIONS from the #408 backtest (review 2026-09-27, kept by design, read the K1 record with them in mind):
+          one position per NAME across sleeves (#408 keyed (sleeve, code)); the next session's ML confirmations count held +
+          open lines (an exiting name counts twice until it sells); ML confirmations check the cash floor against pre-fill
+          cash, and paper fills of the nightly c0w lines do not re-check it.
 The ticket modes: 'combo' (the nightly plan: sells for tomorrow, trend buys for tomorrow; and the intraday ML confirmations, one
 line each), 'gapfade' / 'gapfade_exit' (the same-day gap sleeve, so the app's same-day handling applies). Every line carries
 `sleeve:<name>` in its flags - that is how positions are attributed to sleeves (sleeve_positions), nothing else is stored.
@@ -46,9 +56,9 @@ from .exchange_calendar import add_trading_days, is_trading_day
 logger = logging.getLogger(__name__)
 WIB = ZoneInfo("Asia/Jakarta")
 MODE = "combo"
-SLEEVES = ("gap", "trend", "ml")
+SLEEVES = ("gap", "trend", "ml", "c0w")
 DEFAULTS: dict[str, Any] = {
-    "sleeves": {"trend": 0.05, "ml": 0.05, "gap": 0.10},
+    "sleeves": {"trend": 0.05, "ml": 0.05, "gap": 0.10, "c0w": 0.0},
     "slots": 20,
     "gap_max_per_day": 5,
     "cash_floor": 0.0,          # share of NAV kept in cash: no NEW trade that would take the invested share above 1 - floor (menu 34: 0.30)
@@ -69,6 +79,9 @@ DEFAULTS: dict[str, Any] = {
     # makes the trend sleeve lose 25 % of its return near Rp 10 B without it). None = uncapped (ML: a cap cost more in skipped
     # signals than it saved). The gap sleeve keeps its own, tighter cap: 1 % of the 60-day median value (gapfade.PARTICIPATION).
     "adv_cap": {"trend": 0.05, "ml": None},
+    # the C0 radar sleeve (CB-1 #408); the thresholds are the research's, not tunables
+    "c0w": {"jump": 0.30, "lookback": 60, "high_n": 250, "high_min": 200, "day_cap": 0.18, "min_v20": 1e9, "max_v20": 50e9,
+            "min_price": 50.0, "stop": 0.15, "trail": 0.25},
 }
 ADV_DAYS = 20
 MAIN_BOARDS = "12"                    # daily_summary.remarks board digit: 1 Utama, 2 Pengembangan
@@ -80,13 +93,18 @@ CATALOG: dict[str, dict[str, str]] = {
               "line": "Nightly plan · entry at the next close · holds ~25 days"},
     "ml": {"name": "ML ranking", "one": "The 5-day score, cost-aware: signalled when the expected excess pays twice the round trip, bought only after the price confirms (one or several +x % within n days rules, each with a share of the slot).",
            "line": "Nightly plan + intraday confirmation · holds ~25 days"},
+    "c0w": {"name": "C0 radar (wide)", "one": "Buys every liquid-enough name that rose 30 % in 60 days to a 1-year high (not the most-traded ones), in many small slices; cuts at -15 %, trails 25 % from the peak.",
+            "line": "Nightly plan · entry at the next session · many small positions · holds ~27 days"},
 }
 # what the backtest says each sleeve does - the scorecard's yardstick: study #386 (#348 after the gap-fade look-ahead fix), the book AS DEPLOYED (10/5/10, ens4, same-day
 # stop 5 %, floor 0.30), per sleeve from its trade list (win share, mean net return per trade, median hold in trading days,
 # the sleeve run alone). The kill rules (idx/killrules.py) bootstrap the same trades.
 BACKTEST = {"ml": {"win": 0.31, "avg_net": 0.0653, "hold_days": 5, "cagr": 0.297, "study": 386},
             "trend": {"win": 0.42, "avg_net": 0.0452, "hold_days": 19, "cagr": 0.127, "study": 386},
-            "gap": {"win": 0.43, "avg_net": 0.0207, "hold_days": 0, "cagr": 0.110, "study": 386}}
+            "gap": {"win": 0.43, "avg_net": 0.0207, "hold_days": 0, "cagr": 0.110, "study": 386},
+            # C0W: every capped flag 2021-26 (1,062 trades, research-scratch/idx/filterlab/explain_cap.py); CAGR = the wide sleeve alone
+            # from 2022-01 at 1.25 % x 40 (#407 check), its K1 combo = #408
+            "c0w": {"win": 0.354, "avg_net": 0.206, "hold_days": 27, "cagr": 0.126, "study": 408}}
 # Phase 0 (operator 2026-09-26): the live book and its paper twin are FROZEN - no change to what the book trades or how much,
 # so the live record measures ONE configuration. Allowed while frozen: switching a sleeve OFF (a kill rule's action), cash,
 # fees, broker, label, note. Anything else needs an explicit override with a reason, which is journalled. Stored in
@@ -126,6 +144,7 @@ def settings(b: dict[str, Any]) -> dict[str, Any]:
     if not 0 <= out["cash_floor"] <= 0.9:
         raise ValueError(f"cash_floor {out['cash_floor']} must be within [0, 0.9]")
     out["adv_cap"] = {**DEFAULTS["adv_cap"], **(p.get("adv_cap") or {})}
+    out["c0w"] = {**DEFAULTS["c0w"], **(p.get("c0w") or {})}
     for k, v in out["adv_cap"].items():
         if v is not None and not 0 < float(v) <= 1:
             raise ValueError(f"adv_cap {k}={v} must be None or within (0, 1]")
@@ -202,10 +221,17 @@ def strategies_view(conn: psycopg.Connection, book: str) -> dict[str, Any]:
     S = settings(b)
     pos = sleeve_positions(conn, book)
     sleeves = []
+    raw_params = b.get("params") or {}
+    if isinstance(raw_params, str):
+        import json
+        raw_params = json.loads(raw_params) if raw_params.strip() else {}
+    configured = set((raw_params.get("sleeves") or {}).keys())
     for k in SLEEVES:
-        if k not in S["sizes"] or (k not in (b.get("params") or {}).get("sleeves", {}) and b.get("rule") != "combo"):
+        if k not in S["sizes"] or (k not in configured and b.get("rule") != "combo"):
             continue
-        sleeves.append({"k": k, **CATALOG.get(k, {"name": k, "one": "", "line": ""}), "size": S["sizes"][k], "on": k not in S["off"],
+        if k not in configured and not S["sizes"].get(k) and not pos.get(k):     # e.g. c0w on a book that never set it
+            continue
+        sleeves.append({"k": k, **CATALOG.get(k, {"name": k, "one": "", "line": ""}), "size": S["sizes"].get(k, 0.0), "on": k not in S["off"],
                         "open": sorted(pos.get(k, {})), "backtest": BACKTEST.get(k), "page": pages.get(k)})
     return {"book": book, "rule": b.get("rule"), "slots": S["slots"], "params": b.get("params") or {}, "sleeves": sleeves,
             "page": BOOK_PAGE if b.get("rule") == "combo" else None,
@@ -337,6 +363,58 @@ def trading_days_between(conn: psycopg.Connection, a: date, b_: date) -> int:
     return int(r[0]["n"]) if r else 0
 
 
+# ---------------------------------------------------------------------------------------------------------------- C0 radar sleeve
+def c0w_signals(hist: pd.DataFrame, d: date, boards: dict[str, str], c: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pure. C0 flags at the close of d from ``hist`` (code, trade_date, adj, close, volume; long, oldest first): adjusted close >=
+    (1 + jump) x the adjusted close ``lookback`` sessions earlier, at the high of the last ``high_n`` sessions (>= high_min bars),
+    the day's return < day_cap, volume > 0 on d, 20-day mean of close x volume in [min_v20, max_v20), close >= min_price, board digit in MAIN_BOARDS (``boards``:
+    code -> daily_summary.remarks of d). Ranked by attention = 20-day / 250-day mean value, strongest first."""
+    out = []
+    for code, g in hist.groupby("code"):
+        if len(g) < int(c["high_min"]) or g["trade_date"].iloc[-1] != d:
+            continue
+        digit = (boards.get(code) or "")[4:5]
+        if not digit or digit not in MAIN_BOARDS:                        # '' in '12' is True: an unreadable remark is not a main board
+            continue
+        adj, close, vol = g["adj"].to_numpy(float), g["close"].to_numpy(float), g["volume"].to_numpy(float)
+        if not vol[-1] > 0:                                               # research U1: volume > 0 on the flag day (a no-trade day keeps the
+            continue                                                      # stale close at the high and would dodge the day cap)
+        val = close * vol                                                 # research value = close x volume, not IDX's transacted value
+        lb = int(c["lookback"])
+        if len(adj) <= lb or not (adj[-1] > 0 and adj[-2] > 0 and adj[-1 - lb] > 0):
+            continue
+        v20 = np.nanmean(val[-20:]) if np.isfinite(val[-20:]).sum() >= 15 else np.nan
+        v250 = np.nanmean(val[-int(c["high_n"]):])
+        if not (np.isfinite(v20) and float(c["min_v20"]) <= v20 < float(c["max_v20"]) and close[-1] >= float(c["min_price"])):
+            continue
+        r1 = adj[-1] / adj[-2] - 1
+        if adj[-1] >= (1 + float(c["jump"])) * adj[-1 - lb] and adj[-1] >= np.nanmax(adj[-int(c["high_n"]):]) and r1 < float(c["day_cap"]):
+            out.append({"code": code, "attn": round(float(v20 / v250), 2) if v250 > 0 else 0.0, "r60": round(float(adj[-1] / adj[-1 - lb] - 1), 3),
+                        "v20_bn": round(float(v20) / 1e9, 2)})
+    out.sort(key=lambda x: -x["attn"])
+    return out
+
+
+def c0w_exits(pos: dict[str, dict[str, Any]], hist: pd.DataFrame, d: date, closes_raw: dict[str, Decimal], c: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pure. C0W holdings to sell tomorrow: no bar on d, or the adjusted close of d <= (1 - stop) x the adjusted close of the entry
+    day, or <= (1 - trail) x the highest adjusted close since the entry day."""
+    out = []
+    for code, p in pos.items():
+        g = hist[(hist["code"] == code) & (hist["trade_date"] >= p["entry_date"])] if p.get("entry_date") else hist.iloc[0:0]
+        if code not in closes_raw or not len(g) or g["trade_date"].iloc[-1] != d:
+            out.append({"code": code, "lots": Decimal(p["lots"]), "reason": "C0: tidak ada bar hari ini", "close": closes_raw.get(code)})
+            continue
+        adj = g["adj"].to_numpy(float)
+        a0, last, peak = adj[0], adj[-1], np.nanmax(adj)
+        if last <= (1 - float(c["stop"])) * a0:
+            out.append({"code": code, "lots": Decimal(p["lots"]), "close": closes_raw[code],
+                        "reason": f"C0 cut loss {float(c['stop']) * 100:g} %: {(last / a0 - 1) * 100:+.1f} % dari hari masuk"})
+        elif last <= (1 - float(c["trail"])) * peak:
+            out.append({"code": code, "lots": Decimal(p["lots"]), "close": closes_raw[code],
+                        "reason": f"C0 trailing {float(c['trail']) * 100:g} %: {(last / peak - 1) * 100:+.1f} % dari puncak"})
+    return out
+
+
 # ---------------------------------------------------------------------------------------------------------------- the plan (pure core)
 def adv_capped(budget: Decimal, adv: Decimal | None, cap: float | None) -> Decimal:
     """Pure. The budget, or cap x ADV20 when that is smaller. No ADV (a name with no traded value yet) leaves it alone."""
@@ -375,11 +453,14 @@ def size_line(code: str, side: str, ref: Decimal, lots: Decimal | None, slot: De
 
 def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, pos: dict[str, dict[str, dict[str, Any]]], closes_raw: dict[str, Decimal],
             trend_entries: list[dict[str, Any]], trend_exits: list[dict[str, Any]], ml: pd.DataFrame, ml_age: dict[str, int], open_codes: set[str],
-            pending_watch: set[str], d: date, adv: dict[str, Decimal] | None = None) -> dict[str, Any]:
+            pending_watch: set[str], d: date, adv: dict[str, Decimal] | None = None,
+            c0w_entries: list[dict[str, Any]] | None = None, c0w_exit_list: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Pure. Tomorrow's lines and tonight's new ML watches from what the sleeves say.
     Sells: trend exits (trail-10 / no bar) and ML exits (swap / expiry / no score). Buys: trend entries at trend_pct x NAV,
     never above adv_cap['trend'] x the name's ADV20 (``adv``).
-    Watches: ML candidates (e > margin x rt) up to the free slots, to be bought on confirmation."""
+    Watches: ML candidates (e > margin x rt) up to the free slots, to be bought on confirmation.
+    C0W: exits (stop / trail / no bar) with the other sells; buys at c0w_pct x NAV AFTER the ML watches took their slots (the
+    backtest #408 queued C0W after trend and ML), strongest attention first, within the free slots and the cash floor."""
     fee_b, fee_s = Decimal(b["fee_buy_pct"]) / 100, Decimal(b["fee_sell_pct"]) / 100
     m = S["ml"]
     lines: list[dict[str, Any]] = []
@@ -395,6 +476,16 @@ def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, p
             continue
         ref = x["close"] if x.get("close") is not None else Decimal(pos["trend"][x["code"]]["entry_price"])
         ln = size_line(x["code"], "sell", Decimal(ref), Decimal(x["lots"]), Decimal(0), cash_after, fee_s, nav, x["reason"], ["sleeve:trend", "trend:exit"])
+        lines.append(ln)
+        cash_after += ln["notional"] * (1 - fee_s)
+        exiting.add(x["code"])
+    for x in c0w_exit_list or []:
+        if x["code"] in open_codes or x["code"] in exiting:
+            continue
+        ref = x["close"] if x.get("close") is not None else Decimal((pos.get("c0w") or {}).get(x["code"], {}).get("entry_price") or 0)
+        if not ref:
+            continue
+        ln = size_line(x["code"], "sell", Decimal(ref), Decimal(x["lots"]), Decimal(0), cash_after, fee_s, nav, x["reason"], ["sleeve:c0w", "c0w:exit"])
         lines.append(ln)
         cash_after += ln["notional"] * (1 - fee_s)
         exiting.add(x["code"])
@@ -454,6 +545,7 @@ def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, p
         cash_after -= ln["notional"] * (1 + fee_b)
         free -= 1
     # ---- ML watches (no line tonight: the buy waits for the price to confirm)
+    free_before_watches = free
     watches = []
     slot_m = Decimal(str(S["sleeves"]["ml"])) * nav
     for r in cands.itertuples():
@@ -468,15 +560,42 @@ def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, p
             watches.append({"code": c, "signal_date": d, "ref_price": ref, "level_price": level, "until_date": add_trading_days(d, days),
                             "e_bps": float(r.e) * 1e4, "cost_bps": float(r.rt) * 1e4, "rule": rname, "size_frac": m["size_frac"]})
         free -= 1
+    # ---- C0W buys (after the ML watches). Slots: the watches armed tonight count, the ones armed on earlier nights do not - in
+    # #408 an ML name took a slot only once it confirmed; here an older watch still waiting for its level leaves its slot to C0W
+    new_watch_names = len({w["code"] for w in watches})
+    free_c = max(free_before_watches + len(pending_watch) - new_watch_names, 0) if S["sleeves"].get("c0w", 0.0) > 0 else 0
+    slot_c = Decimal(str(S["sleeves"].get("c0w", 0.0))) * nav
+    for e in c0w_entries or []:
+        if free_c <= 0 or slot_c <= 0:
+            break
+        c = e["code"]
+        if (c in held or c in exiting or c in open_codes or c in pending_watch or c not in closes_raw or any(w["code"] == c for w in watches)
+                or any(ln["code"] == c for ln in lines)):
+            continue
+        ln = size_line(c, "buy", closes_raw[c], None, slot_c, cash_after, fee_b, nav,
+                       f"C0 radar: +{e['r60'] * 100:.0f} % dalam 60 hari di high 1 tahun, atensi {e['attn']}x, nilai 20 hari Rp {e['v20_bn']} M",
+                       ["sleeve:c0w", "c0w:entry", f"attn:{e['attn']}x"])
+        if ln is None:
+            continue
+        if not invested_ok(nav, cash_after, ln["notional"] * (1 + fee_b), S["cash_floor"]):
+            floor_held.append(c)
+            continue
+        lines.append(ln)
+        cash_after -= ln["notional"] * (1 + fee_b)
+        free_c -= 1
+        free = max(free - 1, 0)
     targets = [ln["code"] for ln in lines if ln["side"] == "buy"] + sorted(held - exiting)
     return {"lines": lines, "watches": watches, "nav": nav, "cash": cash, "cash_after": cash_after, "n_targets": len(targets), "targets": targets,
             "free_slots": free, "ml_candidates": len(cands), "best_e_bps": (best * 1e4 if np.isfinite(best) else None), "floor_held": floor_held}
 
 
 # ---------------------------------------------------------------------------------------------------------------- the plan (shell)
-def _open_lines(conn: psycopg.Connection, book: str) -> set[str]:
+def _open_lines(conn: psycopg.Connection, book: str, exclude: set[int] | None = None) -> set[str]:
+    """Codes with an open line on a draft / issued ticket of the book, ignoring the tickets in ``exclude`` (the drafts tonight's
+    plan supersedes - their lines are about to be cancelled and re-planned, so they must not block the new plan)."""
     return {r["code"] for r in _rows(conn, """SELECT l.code FROM idx.ticket_line l JOIN idx.ticket t ON t.id = l.ticket_id
-                                               WHERE t.book = %s AND t.status IN ('draft', 'issued') AND l.status IN ('open', 'partial')""", (book,), ["code"])}
+                                               WHERE t.book = %s AND t.status IN ('draft', 'issued') AND l.status IN ('open', 'partial')
+                                                 AND NOT (t.id = ANY(%s))""", (book, sorted(exclude or ())), ["code"])}
 
 
 WATCH_COLS = ["id", "code", "signal_date", "ref_price", "level_price", "until_date", "e_bps", "cost_bps", "rule", "size_frac"]
@@ -507,7 +626,32 @@ def triggered_share(conn: psycopg.Connection, book: str, code: str, signal_date:
     return float(r[0]["s"]) if r else 0.0
 
 
-def build(conn: psycopg.Connection, book: str, d: date | None = None) -> dict[str, Any]:
+def c0w_inputs(conn: psycopg.Connection, d: date, S: dict[str, Any], held: dict[str, dict[str, Any]]):
+    """The C0W sleeve's data for the close of d: flags (c0w_signals), exits for ``held`` (c0w_exits), and raw closes of both."""
+    c = S["c0w"]
+    rows = _rows(conn, """SELECT b.code, s.remarks FROM idx.bar b LEFT JOIN idx.daily_summary s ON s.code = b.code AND s.trade_date = b.trade_date
+                           WHERE b.trade_date = %s AND b.source = 'idx' AND b.close > 0""", (d,), ["code", "remarks"])
+    boards = {r["code"]: r["remarks"] or "" for r in rows}
+    codes = sorted(set(boards) | set(held))
+    cols = ["code", "trade_date", "adj", "close", "volume"]
+    since = d - timedelta(days=int(int(c["high_n"]) * 1.6))
+    entries = [p["entry_date"] for p in held.values() if p.get("entry_date")]
+    if entries:                                                           # exits need the entry day and the peak since, however old
+        since = min(since, min(entries))
+    with conn.cursor() as cur:
+        cur.execute("""SELECT code, trade_date, close * adj_factor, close, volume FROM idx.bar
+                        WHERE code = ANY(%s) AND source = 'idx' AND trade_date <= %s AND trade_date >= %s ORDER BY code, trade_date""",
+                    (codes, d, since))
+        data = [tuple(r.values()) if isinstance(r, dict) else tuple(r) for r in cur.fetchall()]
+    hist = pd.DataFrame(data, columns=cols)
+    for k in ("adj", "close", "volume"):
+        hist[k] = pd.to_numeric(hist[k], errors="coerce")
+    last = hist[hist["trade_date"] == d]
+    raw = {r.code: Decimal(str(r.close)) for r in last.itertuples() if r.close and r.close > 0}
+    return c0w_signals(hist, d, boards, c), c0w_exits(held, hist, d, raw, c), raw
+
+
+def build(conn: psycopg.Connection, book: str, d: date | None = None, supersede: set[int] | None = None) -> dict[str, Any]:
     b = bk.get_book(conn, book)
     if b.get("rule") != "combo":
         raise ValueError(f"{book} is not a combo book")
@@ -520,7 +664,7 @@ def build(conn: psycopg.Connection, book: str, d: date | None = None) -> dict[st
     nav, cash = Decimal(snap["nav_now"]), Decimal(b["cash"])
     pos = sleeve_positions(conn, book)
     held = held_codes(pos)
-    open_codes = _open_lines(conn, book)
+    open_codes = _open_lines(conn, book, supersede)
     watching = {w["code"] for w in pending_watches(conn, book, d)}
     # trend sleeve: the deployed universe/signals; exits from its trail on the trend positions
     uni = trend_book.universe(conn, d, "small")
@@ -541,11 +685,18 @@ def build(conn: psycopg.Connection, book: str, d: date | None = None) -> dict[st
     ml = ml_scores(conn, b, d, S)
     ml_age = {c: trading_days_between(conn, p["entry_date"], d) for c, p in pos["ml"].items() if p.get("entry_date")}
     adv = adv20(conn, [e["code"] for e in entries], d) if S["adv_cap"].get("trend") is not None else None
-    res = compose(b, S, nav, cash, pos, raw, entries, trend_exits, ml, ml_age, open_codes, watching, d, adv)
+    c0w_in, c0w_out = [], []
+    if S["sleeves"].get("c0w", 0.0) > 0 or pos.get("c0w"):
+        c0w_in, c0w_out, c0w_raw = c0w_inputs(conn, d, S, pos.get("c0w") or {})
+        raw = {**c0w_raw, **raw}
+        if S["sleeves"].get("c0w", 0.0) <= 0:
+            c0w_in = []                                                   # an OFF sleeve still sells what it holds
+    res = compose(b, S, nav, cash, pos, raw, entries, trend_exits, ml, ml_age, open_codes, watching, d, adv, c0w_in, c0w_out)
     res.update({"book": book, "mode": MODE, "run_date": d, "ticket_date": d, "strategy": "combo", "size": S["slots"], "weights": {},
                 "held_back": held_back, "regime": {"index": regime["index_code"], "on": bool(regime["on"]), "close": str(regime["close"]),
                                                    "sma": str(regime["sma"]) if regime.get("sma") is not None else None},
                 "regime_filter": True, "entry_gate": False, "ml_scored": bool(len(ml)), "ml_universe": len(ml), "trend_signals": len(entries),
+                "c0w_signals": len(c0w_in),
                 "positions": {s: sorted(p) for s, p in pos.items() if p}, "settings": S})
     return res
 
@@ -561,7 +712,7 @@ def render_plan(res: dict[str, Any], watches: list[dict[str, Any]] | None = None
         o.append("JUAL besok di pembukaan:")
         o += [f"  {ln['code']} {int(ln['lots'])} lot, limit >= {float(ln['limit_price']):,.0f} - {ln['reason']}" for ln in sells]
     if buys:
-        o.append("BELI besok (trend, satu hari saja):")
+        o.append("BELI besok (satu hari saja):")
         o += [f"  {ln['code']} {int(ln['lots'])} lot, limit <= {float(ln['limit_price']):,.0f} (Rp {float(ln['notional']) / 1e6:,.2f} jt) - {ln['reason']}" for ln in buys]
     if watches:
         o.append("AWASI (ML): beli hanya kalau harga menyentuh level")
@@ -603,7 +754,32 @@ def _line_view(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def plan(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date | None = None) -> dict[str, Any]:
     """Tonight's plan: the ticket for tomorrow (sells + trend buys) and the ML watches. Idempotent per (book, day): a second run
     the same night replaces the draft only if it has not been issued. Live: draft + push. Paper: issued (fills at the next open)."""
-    res = build(conn, book, d)
+    # the unissued drafts this plan will supersede (cancelled below): their lines must not count as open while tonight's plan is
+    # built, or a second run the same night (21:10 then 21:40) would drop every name of the first draft and then cancel it
+    # (found 2026-09-27 on the K1 paper book; the live book had not issued a combo line yet)
+    d0 = d or _rows(conn, "SELECT max(trade_date) AS d FROM idx.bar WHERE source = 'idx'", (), ["d"])[0]["d"]
+    drafts = _rows(conn, "SELECT id, ticket_date FROM idx.ticket WHERE book = %s AND mode = %s AND status = 'draft' AND ticket_date <= %s ORDER BY id",
+                   (book, MODE, d0), ["id", "ticket_date"])
+    tonight = [r["id"] for r in drafts if r["ticket_date"] == d0]
+    tonight_lines = _rows(conn, "SELECT ticket_id, code, side, lots, limit_price, status FROM idx.ticket_line WHERE ticket_id = ANY(%s)",
+                          (tonight,), ["ticket_id", "code", "side", "lots", "limit_price", "status"]) if tonight else []
+    if any(r["status"] != "open" for r in tonight_lines):
+        # the operator already worked tonight's draft (a line skipped, filled or partial): it is final - a re-run must not undo that
+        return {"book": book, "date": str(d0), "lines": 0, "watches": 0, "ticket": tonight[-1], "status": "draft", "cancelled": [],
+                "why": "tonight's draft was edited by the operator; kept as is"}
+    supersede = {r["id"] for r in drafts}
+    res = build(conn, book, d, supersede)
+    if len(tonight) == 1:
+        key = lambda x: (x["code"], x["side"], Decimal(x["lots"]), Decimal(x["limit_price"]))  # noqa: E731
+        if sorted(map(key, tonight_lines)) == sorted(map(key, res["lines"])):
+            # the same plan as the draft already pushed at 21:10: keep it (no second ticket, no second push, nothing to double-issue)
+            from . import intents
+            for w in res["watches"]:
+                intents.create(conn, book, intents.ml_confirm_spec(w), actor, if_absent=True)
+            conn.commit()
+            return {"book": book, "date": str(res["run_date"]), "lines": len(res["lines"]), "watches": len(res["watches"]), "ticket": tonight[0],
+                    "status": "draft", "cancelled": [], "ml_scored": res["ml_scored"], "trend_signals": res["trend_signals"],
+                    "why": "tonight's draft is unchanged; kept"}
     d = res["run_date"]
     b = bk.get_book(conn, book)
     out: dict[str, Any] = {"book": book, "date": str(d), "lines": len(res["lines"]), "watches": len(res["watches"]), "ticket": None, "status": None,

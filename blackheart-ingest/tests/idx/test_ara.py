@@ -158,6 +158,77 @@ def test_watch_and_touch_texts_carry_the_facts_and_no_directive_words() -> None:
     assert one.startswith("AAA: terkunci") and "1,250" in one
 
 
+# ---- prediction vs actual -----------------------------------------------------------------------------------------------------
+def test_outcome_reads_the_next_session_with_the_limit_from_idx_previous() -> None:
+    lock = ara.outcome_of(1000, 1250, 1250, 5e5)
+    assert lock["next_ara_px"] == 1250 and lock["locked"] and lock["touched"] and lock["outcome"] == "lock"
+    assert lock["ret_close"] == pytest.approx(0.25) and lock["ret_high"] == pytest.approx(0.25)
+    touch = ara.outcome_of(1000, 1250, 1180, 5e5)                               # reached the limit, closed under it
+    assert touch["touched"] and not touch["locked"] and touch["outcome"] == "touch" and touch["ret_close"] == pytest.approx(0.18)
+    none = ara.outcome_of(1000, 1100, 1040, 5e5)
+    assert not none["touched"] and not none["locked"] and none["outcome"] == "none"
+    idle = ara.outcome_of(1000, 0, 1000, 0)                                     # no trade that session: labels false, marked
+    assert idle["outcome"] == "no_trade" and idle["locked"] is False and idle["ret_close"] == 0
+    gone = ara.outcome_of(None, None, None, None)                               # no usable bar: no label at all
+    assert gone["outcome"] == "no_trade" and gone["locked"] is None and gone["touched"] is None
+    # a corporate action moves IDX's previous: the limit follows it, not the run day's stored ara_px
+    assert ara.outcome_of(200, 270, 270, 1e6)["next_ara_px"] == 270 and ara.outcome_of(200, 270, 270, 1e6)["locked"]
+
+
+def test_outcome_labels_are_the_models_training_labels() -> None:
+    """The record grades the model by the labels it was trained on: LOCK1 / TOUCH1 of day t == outcome_of(next day)."""
+    tape = _tape()
+    F = ara_model.features(tape).set_index(["code", "d"])
+    a = tape[tape["code"] == "AAA"].reset_index(drop=True)
+    lab = F.loc["AAA"].reset_index()
+    for t in range(len(a) - 1):
+        o = ara.outcome_of(a.loc[t, "close"], a.loc[t + 1, "high"], a.loc[t + 1, "close"], a.loc[t + 1, "volume"])
+        assert float(o["locked"]) == lab.loc[t, "LOCK1"], t
+        assert float(o["touched"]) == lab.loc[t, "TOUCH1"], t
+
+
+def _run_rows(n: int = 40, whole: bool = True) -> list[dict]:
+    """A run of n ranked names: ranks 1, 3 and 12 lock, rank 2 touches only, rank 30 locks; the top 10 are listed."""
+    rows = []
+    for i in range(1, n + 1):
+        locked = i in (1, 3, 12, 30)
+        rows.append({"code": f"C{i:02d}", "rank": i, "listed": i <= 10, "p_lock": 0.30 - 0.007 * i, "score": 1 - i / n,
+                     "buyable": i % 2 == 0, "locked": locked, "touched": locked or i == 2})
+    return rows if whole else [r for r in rows if r["listed"]]
+
+
+def test_score_run_counts_precision_recall_and_ranks_the_whole_list() -> None:
+    sc = ara.score_run(_run_rows(), universe=800, universe_locks=8, universe_touches=12)
+    assert (sc["top5_locks"], sc["top10_locks"], sc["top20_locks"]) == (2, 2, 3)
+    assert (sc["top5_touches"], sc["top5_n"], sc["top20_n"]) == (3, 5, 20)
+    assert sc["prec5"] == pytest.approx(0.4) and sc["prec10"] == pytest.approx(0.2) and sc["prec20"] == pytest.approx(0.15)
+    assert sc["recall20"] == pytest.approx(3 / 8) and sc["base_rate"] == pytest.approx(8 / 800)
+    assert sc["listed_locks"] == 2 and sc["listed_buyable"] == 5 and sc["listed_buyable_locks"] == 0   # ranks 1 and 3 had no offer
+    assert sc["mean_p_top10"] == pytest.approx(np.mean([0.30 - 0.007 * i for i in range(1, 11)]))
+    assert sc["whole_ranking"] and 0.5 < sc["auc_lock"] <= 1 and sc["brier_lock"] > 0
+
+
+def test_score_run_on_a_list_only_run_has_no_auc_and_drops_names_without_a_bar() -> None:
+    rows = _run_rows(whole=False)
+    rows[0].update(locked=None, touched=None)                                   # rank 1 had no bar next session
+    sc = ara.score_run(rows, universe=None, universe_locks=None, universe_touches=None)
+    assert not sc["whole_ranking"] and sc["auc_lock"] is None and sc["brier_lock"] is None
+    assert sc["top5_n"] == 4 and sc["top5_locks"] == 1 and sc["prec5"] == pytest.approx(0.25)
+    assert sc["recall20"] is None and sc["base_rate"] is None
+
+
+def test_record_texts_render_pending_and_settled_rows() -> None:
+    base = {"run_date": date(2026, 9, 25), "bar_date": date(2026, 9, 25), "rank": 1, "p_lock": 0.21, "p_touch": 0.3, "buyable": False}
+    settled = {**base, "code": "AAA", "next_date": date(2026, 9, 28), "outcome": "lock", "ret_close": 0.25, "ret_high": 0.25,
+               "next_ara_px": 1250, "next_close": 1250}
+    pending = {**base, "code": "BBB", "rank": 2, "next_date": None, "outcome": None, "ret_close": None, "ret_high": None,
+               "next_ara_px": None, "next_close": None}
+    text = ara.render_record({"run_date": date(2026, 9, 25), "rows": [settled, pending], "scorecard": {"top5_locks": 1}})
+    assert "AAA" in text and "lock" in text and "+25.0%" in text and "BBB" in text and "belum" in text
+    one = ara.render_record({"code": "AAA", "rows": [settled, pending]})
+    assert one.startswith("AAA: prediksi ARA vs aktual (2 malam)")
+
+
 # ---- read-only against the desk's tables (skipped without a database) ------------------------------------------------------
 @pytest.fixture(scope="module")
 def conn():
@@ -182,3 +253,13 @@ def test_tables_exist_and_reads_work(conn) -> None:
     codes, held = ara.watched_codes(conn)
     assert isinstance(codes, list) and isinstance(held, dict)
     assert ara.prev_closes(conn, pd.Timestamp("2026-09-23").date(), ["BBRI"]).get("BBRI", 0) > 0
+
+
+def test_record_and_scorecard_reads(conn) -> None:
+    """Read-only: the prediction-vs-actual views answer whether or not anything has been settled yet."""
+    rec = ara.record(conn)
+    assert "rows" in rec and "scorecard" in rec
+    for r in rec["rows"]:
+        assert r["settled_at"] is not None and (r["outcome"] in ("lock", "touch", "none", "no_trade", "no_bar"))
+    s = ara.scorecards(conn, 10)
+    assert set(s) >= {"rows", "pooled", "pending_runs", "study"} and isinstance(ara.render_scorecards(s), str)

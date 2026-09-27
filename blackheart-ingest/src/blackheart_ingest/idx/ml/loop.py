@@ -385,18 +385,27 @@ def predict_intraday(conn: psycopg.Connection, now: datetime | None = None) -> d
 
 
 # ---- realisation --------------------------------------------------------------------------------------------------------
+VOID_INTRADAY_DAYS = 3       # an intraday forecast with no book or trade near its target this long after it: no price will come
+VOID_DAILY_SESSIONS = 5      # a daily forecast with no bar this many sessions after its target (suspension, delisting)
+VOID_ANY_DAYS = 30           # backstop for rows the calendar join cannot see (made on a day without a COMPOSITE close)
+
+
 def evaluate(conn: psycopg.Connection, now: datetime | None = None, batch: int = 50000) -> dict[str, Any]:
     """Fill realized_* on every prediction whose horizon has passed. Intraday: the mid of the end-of-minute book at or
     before the target minute (within 3 h, so the lunch break is bridged), the last trade when the book is one-sided.
     Daily: the bar ``steps`` trading days after the cut, on the COMPOSITE calendar, adjusted for corporate actions through
-    adj_factor; for an 'excess' prediction the realised return is net of the COMPOSITE's over the same window."""
+    adj_factor; for an 'excess' prediction the realised return is net of the COMPOSITE's over the same window.
+    Every forecast ends 'ok' (realised) or 'void' (no price will come, see VOID_*): a void row leaves the queue, so rows
+    that can never be realised stop taking the batch. ``UPDATE idx.ml_prediction SET realize_status = NULL WHERE
+    realize_status = 'void'`` re-queues them after a backfill."""
     now = now or datetime.now(UTC)
-    out: dict[str, Any] = {"intraday": 0, "daily": 0}
+    out: dict[str, Any] = {"intraday": 0, "daily": 0, "void": 0}
     with conn.cursor() as cur:
         cur.execute("""
             WITH due AS (
                 SELECT code, horizon, made_at, target_at FROM idx.ml_prediction
-                 WHERE realized_ret IS NULL AND target_at IS NOT NULL AND target_at <= %s - interval '1 minute'
+                 WHERE realized_ret IS NULL AND realize_status IS DISTINCT FROM 'void' AND target_at IS NOT NULL
+                   AND target_at <= %s - interval '1 minute'
                  ORDER BY made_at LIMIT %s),
             px AS (
                 SELECT d.code, d.horizon, d.made_at, COALESCE(k.mid, b.close) AS close, COALESCE(k.minute, b.minute) AS minute
@@ -410,7 +419,7 @@ def evaluate(conn: psycopg.Connection, now: datetime | None = None, batch: int =
                                       ORDER BY f.minute DESC LIMIT 1) b ON true
                  WHERE COALESCE(k.mid, b.close) IS NOT NULL)
             UPDATE idx.ml_prediction p
-               SET realized_price = px.close, realized_ret = ln(px.close / p.ref_price), realized_at = px.minute,
+               SET realized_price = px.close, realized_ret = ln(px.close / p.ref_price), realized_at = px.minute, realize_status = 'ok',
                    hit = CASE WHEN px.close = p.ref_price OR p.p_up IS NULL THEN NULL ELSE (p.p_up > 0.5) = (px.close > p.ref_price) END
               FROM px WHERE p.code = px.code AND p.horizon = px.horizon AND p.made_at = px.made_at""", (now, batch))
         out["intraday"] = cur.rowcount
@@ -424,7 +433,7 @@ def evaluate(conn: psycopg.Connection, now: datetime | None = None, batch: int =
                       FROM idx.ml_prediction p
                       JOIN cal c1 ON c1.trade_date = (p.made_at AT TIME ZONE 'Asia/Jakarta')::date
                       JOIN cal c2 ON c2.rn = c1.rn + %s
-                     WHERE p.horizon = %s AND p.realized_ret IS NULL
+                     WHERE p.horizon = %s AND p.realized_ret IS NULL AND p.realize_status IS DISTINCT FROM 'void'
                      LIMIT %s),
                 px AS (
                     SELECT d.*, b1.close AS c1,
@@ -434,12 +443,29 @@ def evaluate(conn: psycopg.Connection, now: datetime | None = None, batch: int =
                       JOIN idx.bar b1 ON b1.code = d.code AND b1.trade_date = d.target_date AND b1.source = 'idx' AND b1.close > 0
                       JOIN idx.bar b0 ON b0.code = d.code AND b0.trade_date = d.made_date AND b0.source = 'idx')
                 UPDATE idx.ml_prediction p
-                   SET realized_price = px.c1, realized_ret = px.r,
+                   SET realized_price = px.c1, realized_ret = px.r, realize_status = 'ok',
                        realized_at = (px.target_date::timestamp + interval '16 hours') AT TIME ZONE 'Asia/Jakarta',
                        target_at = (px.target_date::timestamp + interval '16 hours') AT TIME ZONE 'Asia/Jakarta',
                        hit = CASE WHEN px.r = 0 OR p.p_up IS NULL THEN NULL ELSE (p.p_up > 0.5) = (px.r > 0) END
                   FROM px WHERE p.code = px.code AND p.horizon = px.horizon AND p.made_at = px.made_at""", (h.steps, h.key, batch))
             out["daily"] += cur.rowcount
+        cur.execute("""UPDATE idx.ml_prediction SET realize_status = 'void'
+                        WHERE realized_ret IS NULL AND realize_status IS NULL AND horizon = ANY(%s)
+                          AND target_at < %s - make_interval(days => %s)""", ([h.key for h in of_kind("intraday")], now, VOID_INTRADAY_DAYS))
+        out["void"] += cur.rowcount
+        for h in of_kind("daily"):
+            cur.execute("""
+                WITH cal AS (SELECT trade_date, row_number() OVER (ORDER BY trade_date) AS rn FROM idx.index_daily WHERE index_code = 'COMPOSITE'),
+                     last AS (SELECT max(rn) AS m FROM cal)
+                UPDATE idx.ml_prediction p SET realize_status = 'void'
+                  FROM cal c1, last
+                 WHERE p.horizon = %s AND p.realized_ret IS NULL AND p.realize_status IS NULL
+                   AND c1.trade_date = (p.made_at AT TIME ZONE 'Asia/Jakarta')::date AND c1.rn + %s + %s <= last.m""",
+                        (h.key, h.steps, VOID_DAILY_SESSIONS))
+            out["void"] += cur.rowcount
+        cur.execute("""UPDATE idx.ml_prediction SET realize_status = 'void'
+                        WHERE realized_ret IS NULL AND realize_status IS NULL AND target_at < %s - make_interval(days => %s)""", (now, VOID_ANY_DAYS))
+        out["void"] += cur.rowcount
     conn.commit()
     return out
 
@@ -579,12 +605,81 @@ def board(conn: psycopg.Connection, horizon: str, top: int = 20) -> dict[str, An
             "up": rows[:top], "down": rows[-top:][::-1]}
 
 
+def record(conn: psycopg.Connection, day: date | None = None, horizon: str | None = None, code: str | None = None,
+           limit: int = 1000) -> dict[str, Any]:
+    """Forecasts next to what happened, each marked ok (realised) / void (no price will come) / pending (horizon not
+    passed). With ``code``: that name's forecasts newest first. Otherwise one WIB day of cuts (the newest by default),
+    with a per-horizon tally; ``horizon`` narrows either."""
+    cols = """made_at, code, horizon, basis, ref_price, p_up, pred_ret, pred_price, target_at, realized_price, realized_ret, realized_at, hit,
+              COALESCE(realize_status, CASE WHEN realized_ret IS NOT NULL THEN 'ok' ELSE 'pending' END) AS status"""
+    with conn.cursor(row_factory=dict_row) as cur:
+        if code:
+            cur.execute(f"""SELECT {cols} FROM idx.ml_prediction WHERE code = %s AND (%s::text IS NULL OR horizon = %s)
+                            ORDER BY made_at DESC, horizon LIMIT %s""", (code.upper(), horizon, horizon, limit))
+            return {"code": code.upper(), "horizon": horizon, "rows": [dict(r) for r in cur.fetchall()]}
+        if day is None:
+            cur.execute("SELECT max((made_at AT TIME ZONE 'Asia/Jakarta')::date) AS d FROM idx.ml_prediction")
+            day = cur.fetchone()["d"]
+            if day is None:
+                return {"day": None, "summary": [], "rows": []}
+        lo = datetime.combine(day, datetime.min.time(), WIB)
+        span = (lo, lo + timedelta(days=1), horizon, horizon)
+        cur.execute("""SELECT horizon, count(*) AS n, count(DISTINCT code) AS names, count(DISTINCT made_at) AS cuts,
+                              count(realized_ret) AS realized, count(*) FILTER (WHERE realize_status = 'void') AS void,
+                              count(*) FILTER (WHERE realized_ret IS NULL AND realize_status IS DISTINCT FROM 'void') AS pending,
+                              avg(hit::int) AS hit_rate, count(hit) AS hit_n,
+                              avg(abs(pred_ret - realized_ret)) FILTER (WHERE realized_ret IS NOT NULL) * 1e4 AS mae_bps,
+                              avg(abs(realized_ret)) FILTER (WHERE realized_ret IS NOT NULL) * 1e4 AS naive_mae_bps
+                         FROM idx.ml_prediction WHERE made_at >= %s AND made_at < %s AND (%s::text IS NULL OR horizon = %s)
+                        GROUP BY horizon""", span)
+        summary = [dict(r) for r in cur.fetchall()]
+        cur.execute(f"""SELECT {cols} FROM idx.ml_prediction WHERE made_at >= %s AND made_at < %s AND (%s::text IS NULL OR horizon = %s)
+                        ORDER BY made_at DESC, horizon, code LIMIT %s""", (*span, limit))
+        rows = [dict(r) for r in cur.fetchall()]
+    order = list(HORIZONS)
+    summary.sort(key=lambda r: order.index(r["horizon"]) if r["horizon"] in order else 99)
+    return {"day": day, "horizon": horizon, "summary": summary, "rows": rows, "truncated": len(rows) >= limit}
+
+
+def render_record(rec: dict[str, Any], top: int = 40) -> str:
+    def pct(v: Any) -> str:
+        return "-" if v is None else f"{float(v) * 100:+.2f}%"
+
+    def num(v: Any, fmt: str) -> str:
+        return "-" if v is None else format(float(v), fmt)
+
+    L = []
+    if rec.get("code"):
+        L.append(f"{rec['code']}: prediksi vs aktual ({len(rec['rows'])} baris, terbaru dulu)")
+    elif rec.get("day"):
+        L.append(f"prediksi dibuat {rec['day']} (WIB):")
+        L.append("horizon      n  nama  cut  aktual  void  tunggu   hit%   mae_bps naive_bps")
+        for s in rec["summary"]:
+            hr = None if s["hit_rate"] is None else float(s["hit_rate"]) * 100
+            L.append(f"{s['horizon']:>7} {s['n']:>6} {s['names']:>5} {s['cuts']:>4} {s['realized']:>7} {s['void']:>5} {s['pending']:>7} "
+                     f"{num(hr, '.1f'):>6} {num(s['mae_bps'], '.1f'):>9} {num(s['naive_mae_bps'], '.1f'):>9}")
+    else:
+        return "belum ada prediksi"
+    L.append("dibuat (WIB)  kode   hrzn   harga  P(naik) pred_ret  pred_px       target  aktual_px aktual_ret  benar  status")
+    for r in rec["rows"][:top]:
+        tgt = r["target_at"].astimezone(WIB).strftime("%m-%d %H:%M") if r["target_at"] else "-"
+        hit = "-" if r["hit"] is None else ("ya" if r["hit"] else "tdk")
+        pu = None if r["p_up"] is None else float(r["p_up"]) * 100
+        L.append(f"{r['made_at'].astimezone(WIB):%m-%d %H:%M}  {r['code']:<6} {r['horizon']:>4} {num(r['ref_price'], ',.0f'):>7} "
+                 f"{num(pu, '.1f'):>7}% {pct(r['pred_ret']):>8} {num(r['pred_price'], ',.0f'):>8} {tgt:>12} "
+                 f"{num(r['realized_price'], ',.0f'):>10} {pct(r['realized_ret']):>10} {hit:>6}  {r['status']}")
+    if len(rec["rows"]) > top:
+        L.append(f"... {len(rec['rows']) - top} baris lagi (pakai --top atau API /idx/ml/record)")
+    return "\n".join(L)
+
+
 def status(conn: psycopg.Connection) -> dict[str, Any]:
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("""SELECT horizon, task, model_id, trained_at, data_to, val_from, val_to, rows_fit, rows_val, val_metrics, origin, reason
                          FROM idx.ml_model WHERE status = 'champion' ORDER BY horizon, task""")
         champs = [dict(r) for r in cur.fetchall()]
-        cur.execute("""SELECT horizon, count(*) AS n, count(realized_ret) AS realized, max(made_at) AS last_made
+        cur.execute("""SELECT horizon, count(*) AS n, count(realized_ret) AS realized, count(*) FILTER (WHERE realize_status = 'void') AS void,
+                              max(made_at) AS last_made
                          FROM idx.ml_prediction WHERE made_at > now() - interval '7 days' GROUP BY horizon""")
         preds = {r["horizon"]: dict(r) for r in cur.fetchall()}
         cur.execute("SELECT * FROM idx.ml_scorecard WHERE score_date = (SELECT max(score_date) FROM idx.ml_scorecard) ORDER BY horizon, window_days")
@@ -615,7 +710,7 @@ def render_status(s: dict[str, Any]) -> str:
                  f"(in-sample) fitted {c['fitted_at']:%Y-%m-%d %H:%M}")
     L.append("predictions (7 d):")
     for h, p in s["predictions_7d"].items():
-        L.append(f"  {h:>4}: {p['n']:,} rows, {p['realized']:,} realised, last cut {p['last_made']:%Y-%m-%d %H:%M} UTC")
+        L.append(f"  {h:>4}: {p['n']:,} rows, {p['realized']:,} realised, {p.get('void') or 0:,} void, last cut {p['last_made']:%Y-%m-%d %H:%M} UTC")
     L.append("scorecard:")
     L.append(render_scorecard(s["scorecard"]))
     return "\n".join(L)

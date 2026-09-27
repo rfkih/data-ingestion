@@ -394,3 +394,15 @@ def test_db_registry_and_status_read() -> None:
         s = loop.status(c)
         ids = common.champion_ids(c)
     assert isinstance(s["champions"], list) and isinstance(ids, dict)
+
+
+def test_db_record_marks_every_forecast_ok_void_or_pending() -> None:
+    """Read-only: the prediction-vs-actual view gives each forecast a status and a per-horizon tally that adds up."""
+    with _conn() as c:
+        rec = loop.record(c, limit=500)
+    if rec["day"] is None:
+        pytest.skip("no forecasts on file")
+    assert {r["status"] for r in rec["rows"]} <= {"ok", "void", "pending"}
+    for s in rec["summary"]:
+        assert s["realized"] + s["void"] + s["pending"] == s["n"]
+    assert isinstance(loop.render_record(rec, top=5), str)

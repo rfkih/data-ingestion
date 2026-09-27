@@ -88,12 +88,19 @@ def _in_filter(conn: psycopg.Connection, key: str) -> set[str]:
 
 
 def _sleeve_active(b: dict[str, Any], sleeve: str) -> bool:
-    """A combined book runs a sleeve unless it was removed (size 0 AND off - the portfolio screen's 'remove')."""
+    """A combined book runs a sleeve it configures or sizes above 0, unless it was removed (size 0 AND off - the portfolio
+    screen's 'remove'). A sleeve added to the code later (c0w, default size 0) does not run on a book that never set it."""
     try:
         s = cb.settings(b)
     except ValueError:
         return False
-    return not (s["sizes"].get(sleeve, 0) == 0 and sleeve in s["off"])
+    p = b.get("params") or {}
+    if isinstance(p, str):
+        import json
+        p = json.loads(p) if p.strip() else {}
+    configured = sleeve in (p.get("sleeves") or {})
+    size = s["sizes"].get(sleeve, 0)
+    return (configured or size > 0) and not (size == 0 and sleeve in s["off"])
 
 
 def runs(conn: psycopg.Connection, key: str, books: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:

@@ -510,7 +510,39 @@ def report(conn: psycopg.Connection) -> dict[str, Any]:
         a["nav"] = CAPITAL + a["pnl"]
         a["win_rate"] = a["wins"] / a["trades"] if a["trades"] else None
         a["sessions"] = len(a["days"])
+    out["judgement"] = judge(conn, out)
     return out
+
+
+# Judgement (revised 2026-09-27, before the first live decision; see blackheart-ingest/CLAUDE.md). One observation per
+# session in which BOTH agents traded: mean reward of the ts agent's filled trades minus the random agent's. Wald SPRT,
+# H0 mean 0 vs H1 mean +1.0 pp, sd fixed at 3.28 pp (paired single-trade difference, 6,683 warm-start samples), alpha 0.05,
+# beta 0.20 -> about 60 such sessions if the edge is real, about 34 if it is not. +0.5 pp (the old bar) would need ~240.
+JUDGE_MU, JUDGE_SD = 0.010, 0.0328
+
+
+def judge(conn: psycopg.Connection, rep: dict[str, Any] | None = None) -> dict[str, Any]:
+    from .dt_watch import sprt
+    # a session enters the sequence only when EVERY decision of that day is settled (a multi-day hold still open would make the
+    # day's mean - and the SPRT path - provisional); once in, its value never changes
+    rows = _rows(conn, """SELECT d, agent, avg(reward) FROM idx.agent_decision
+                          WHERE settled_at IS NOT NULL AND exit_reason IS DISTINCT FROM 'no_fill' AND reward IS NOT NULL
+                            AND d IN (SELECT d FROM idx.agent_decision GROUP BY d HAVING bool_and(settled_at IS NOT NULL))
+                          GROUP BY 1, 2 ORDER BY 1""")
+    by_day: dict = {}
+    for d, agent, r in rows:
+        by_day.setdefault(d, {})[agent] = float(r)
+    diffs = [v["ts"] - v["random"] for _, v in sorted(by_day.items()) if "ts" in v and "random" in v]
+    test = sprt(diffs, mu=JUDGE_MU, sd=JUDGE_SD)
+    pnl = ((rep or {}).get("agents", {}).get("ts") or {}).get("pnl", 0.0)
+    if test["decision"].startswith("H1"):
+        verdict = "CANDIDATE (operator decides on real capital)" if pnl > 0 else "edge vs random confirmed, but paper P&L <= 0"
+    elif test["decision"].startswith("H0"):
+        verdict = "no - no edge over the random agent"
+    else:
+        verdict = test["decision"]
+    return {"paired_sessions": len(diffs), "mean_diff_pp": float(sum(diffs) / len(diffs) * 100) if diffs else None,
+            "sprt": test, "verdict": verdict}
 
 
 def in_decision_window(now: datetime, slack_min: int = 3) -> datetime | None:
