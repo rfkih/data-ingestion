@@ -1064,11 +1064,23 @@ def cmd_ledger(a: argparse.Namespace) -> int:
 
 
 def cmd_tca(a: argparse.Namespace) -> int:
-    """Execution report of a combo book (idx/tca.py); --push sends it like the Friday job."""
-    from . import combo_book, tca
+    """Execution report of a combo or trend book (idx/tca.py); --push sends it like the Friday job."""
+    from . import combo_book, tca, trend_book
     with get_connection() as conn:
-        for bk in [a.book] if a.book else combo_book.combo_books(conn):
+        for bk in [a.book] if a.book else [*combo_book.combo_books(conn), *trend_book.trend_books(conn)]:
             print(tca.weekly(conn, bk) if a.push else tca.render(tca.report(conn, bk)))
+    return 0
+
+
+def cmd_stops(a: argparse.Namespace) -> int:
+    """Recorded broker stop vs the trail10 rule per held name of each trend book (idx/stopcheck.py); --alert runs the nightly check."""
+    from . import stopcheck, trend_book
+    with get_connection() as conn:
+        for bk in [a.book] if a.book else trend_book.trend_books(conn):
+            if a.alert:
+                print(stopcheck.run(conn, bk))
+            else:
+                print(stopcheck.render(bk, stopcheck.check(conn, bk)))
     return 0
 
 
@@ -1918,10 +1930,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("sub", choices=["verify", "show"])
     p.add_argument("--n", type=int, default=10)
     p.set_defaults(fn=cmd_ledger)
-    p = sub.add_parser("tca", help="weekly execution report of combo books [--book B] [--push]")
+    p = sub.add_parser("tca", help="weekly execution report of combo and trend books [--book B] [--push]")
     p.add_argument("--book")
     p.add_argument("--push", action="store_true")
     p.set_defaults(fn=cmd_tca)
+    p = sub.add_parser("stops", help="recorded broker stop vs the trail10 rule per trend-book position [--book B] [--alert]")
+    p.add_argument("--book")
+    p.add_argument("--alert", action="store_true", help="raise the alerts like the nightly chain")
+    p.set_defaults(fn=cmd_stops)
     p = sub.add_parser("backup", help="database backup: run [--full] | restore-test | offsite --dest DIR")
     p.add_argument("sub", choices=["run", "restore-test", "offsite"])
     p.add_argument("--full", action="store_true")

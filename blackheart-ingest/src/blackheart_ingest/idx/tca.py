@@ -10,6 +10,12 @@ Per sleeve, for the week and since the book started:
   slippage vs plan               fill vs the line's reference price, bps and rupiah (buys paying more = cost)
   vs paper twin                  fill vs the twin's fill on the same name / side / day, bps and rupiah - the pure execution cost
   missed but the twin traded     how many, and the twin's realised P&L on those round trips = the rupiah the misses cost
+  vs the open                    fill vs that day's official open (``open_src = 'idx'`` only), bps and rupiah - what the
+                                 backtests assume for the trend rule (fill at the next open; a day late costs Sharpe 1.31 -> 0.91)
+  pre-open queue                 the line's shares as a share of the opposite side of the book at prices the fill could have
+                                 taken, in the last feed snapshot of the pre-opening (08:45-09:00 WIB) - how much of the
+                                 opening queue our order is (operator 2026-09-28: "catat slippage otomatis per fill")
+The Friday job also covers the live trend books (``trend_live``); their lines carry no sleeve flag and report as ``trend``.
 Nothing here trades or changes a setting.
 """
 from __future__ import annotations
@@ -33,25 +39,58 @@ LOT = 100
 def _lines(conn: psycopg.Connection, book: str) -> list[dict[str, Any]]:
     return _rows(conn, """
         SELECT t.id AS ticket, t.ticket_date, t.created_at AS issued_at, l.code, l.side, l.ref_close, l.status, l.skip_reason, l.flags,
-               l.filled_lots, f.price AS fill_price, f.created_at AS filled_at, f.trade_date AS fill_date
+               l.filled_lots, f.price AS fill_price, f.created_at AS filled_at, f.trade_date AS fill_date,
+               CASE WHEN b.open_src = 'idx' THEN b.open END AS day_open
           FROM idx.ticket t JOIN idx.ticket_line l ON l.ticket_id = t.id LEFT JOIN idx.fill f ON f.id = l.fill_id
+          LEFT JOIN idx.bar b ON b.code = l.code AND b.trade_date = f.trade_date AND b.source = 'idx'
          WHERE t.book = %s AND t.status <> 'cancelled' ORDER BY t.id, l.seq""", (book,),
         ["ticket", "ticket_date", "issued_at", "code", "side", "ref_close", "status", "skip_reason", "flags", "filled_lots", "fill_price",
-         "filled_at", "fill_date"])
+         "filled_at", "fill_date", "day_open"])
+
+
+def depth_within(side: str, price: Decimal | float, px: list | None, vol: list | None) -> float | None:
+    """Pure. Shares resting on the opposite side at prices a fill at ``price`` could have taken: offers at or below it for a
+    buy, bids at or above it for a sell. None when the snapshot has no levels."""
+    if not px or not vol:
+        return None
+    p = float(price)
+    ok = (lambda q: q <= p) if side == "buy" else (lambda q: q >= p)
+    return float(sum(v for q, v in zip(px, vol) if q is not None and v is not None and ok(float(q))))
+
+
+def preopen_books(conn: psycopg.Connection, lines: list[dict[str, Any]]) -> dict[tuple, dict[str, Any]]:
+    """(code, day) -> the last feed book snapshot of the pre-opening (08:45-09:00 WIB) for every filled line. The feed book
+    exists from 2026-09-22; earlier fills simply have none."""
+    keys = sorted({(r["code"], r["fill_date"]) for r in lines if r.get("fill_date") and r.get("fill_price")})
+    out: dict[tuple, dict[str, Any]] = {}
+    for code, d in keys:
+        t0 = datetime(d.year, d.month, d.day, 8, 45, tzinfo=WIB)
+        rows = _rows(conn, """SELECT bid_px, bid_vol, off_px, off_vol FROM idx.feed_book WHERE code = %s AND ts >= %s AND ts < %s
+                               ORDER BY ts DESC LIMIT 1""", (code, t0, t0 + timedelta(minutes=15)), ["bid_px", "bid_vol", "off_px", "off_vol"])
+        if rows:
+            out[(code, d)] = rows[0]
+    return out
 
 
 def summarize(lines: list[dict[str, Any]], twin: dict[tuple, Decimal], twin_pnl: dict[tuple, float],
-              since: date | None = None) -> dict[str, dict[str, Any]]:
+              since: date | None = None, books: dict[tuple, dict[str, Any]] | None = None,
+              default_sleeve: str = "manual") -> dict[str, dict[str, Any]]:
     """Pure. Ticket lines (live book) -> per-sleeve TCA. ``twin``: (sleeve, code, side, day) -> twin fill price;
-    ``twin_pnl``: (sleeve, code, entry day) -> the twin's realised P&L in rupiah on the round trip it opened that day."""
+    ``twin_pnl``: (sleeve, code, entry day) -> the twin's realised P&L in rupiah on the round trip it opened that day;
+    ``books``: (code, day) -> the pre-open feed snapshot (``preopen_books``); ``default_sleeve`` names lines without a sleeve
+    flag (a trend book's lines -> "trend")."""
+    books = books or {}
     out: dict[str, dict[str, Any]] = {}
     for r in lines:
         d = r["fill_date"] or r["ticket_date"]
         if since and d and d < since:
             continue
         s = cb.sleeve_of(r["flags"])
+        if s == "manual":
+            s = default_sleeve
         p = out.setdefault(s, {"lines": 0, "filled": 0, "missed": 0, "delay_h": [], "slip_bps": [], "slip_rp": 0.0,
-                               "twin_bps": [], "twin_rp": 0.0, "missed_twin": 0, "missed_twin_rp": 0.0})
+                               "twin_bps": [], "twin_rp": 0.0, "missed_twin": 0, "missed_twin_rp": 0.0,
+                               "open_bps": [], "open_rp": 0.0, "queue": []})
         p["lines"] += 1
         if r["status"] in ("filled", "partial") and r["fill_price"]:
             p["filled"] += 1
@@ -63,6 +102,16 @@ def summarize(lines: list[dict[str, Any]], twin: dict[tuple, Decimal], twin_pnl:
                 bps = float((fp / ref - 1) * sign) * 1e4
                 p["slip_bps"].append(bps)
                 p["slip_rp"] += bps / 1e4 * notional
+            if r.get("day_open"):
+                bps = float((fp / Decimal(r["day_open"]) - 1) * sign) * 1e4
+                p["open_bps"].append(bps)
+                p["open_rp"] += bps / 1e4 * notional
+            snap_ = books.get((r["code"], r["fill_date"]))
+            if snap_ and lots > 0:
+                px, vol = (snap_["off_px"], snap_["off_vol"]) if r["side"] == "buy" else (snap_["bid_px"], snap_["bid_vol"])
+                depth = depth_within(r["side"], fp, px, vol)
+                if depth:
+                    p["queue"].append(float(lots * LOT) / depth)
             tp = twin.get((s, r["code"], r["side"], r["fill_date"]))
             if tp:
                 bps = cb.twin_gap_bps(r["side"], fp, tp)
@@ -80,7 +129,9 @@ def summarize(lines: list[dict[str, Any]], twin: dict[tuple, Decimal], twin_pnl:
         p["delay_h_median"] = float(np.median(p["delay_h"])) if p["delay_h"] else None
         p["slip_bps_mean"] = float(np.mean(p["slip_bps"])) if p["slip_bps"] else None
         p["twin_bps_mean"] = float(np.mean(p["twin_bps"])) if p["twin_bps"] else None
-        for k in ("delay_h", "slip_bps", "twin_bps"):
+        p["open_bps_mean"] = float(np.mean(p["open_bps"])) if p["open_bps"] else None
+        p["queue_median"] = float(np.median(p["queue"])) if p["queue"] else None
+        for k in ("delay_h", "slip_bps", "twin_bps", "open_bps", "queue"):
             p[f"n_{k}"] = len(p.pop(k))
     return out
 
@@ -110,8 +161,11 @@ def report(conn: psycopg.Connection, book: str, end: date | None = None) -> dict
     tw = cb.twin_fills(conn, twin)
     tp = twin_round_trips(conn, twin)
     lines = _lines(conn, book)
-    return {"book": book, "twin": twin or None, "end": str(end), "week": summarize(lines, tw, tp, since=end - timedelta(days=6)),
-            "all": summarize(lines, tw, tp)}
+    books = preopen_books(conn, lines)
+    dflt = "trend" if b.get("rule") == "trend" else "manual"
+    return {"book": book, "twin": twin or None, "end": str(end),
+            "week": summarize(lines, tw, tp, since=end - timedelta(days=6), books=books, default_sleeve=dflt),
+            "all": summarize(lines, tw, tp, books=books, default_sleeve=dflt)}
 
 
 def render(rep: dict[str, Any]) -> str:
@@ -127,6 +181,10 @@ def render(rep: dict[str, Any]) -> str:
                 parts.append(f"slip {p['slip_bps_mean']:+.0f} bps (Rp {p['slip_rp']:,.0f})")
             if p["twin_bps_mean"] is not None:
                 parts.append(f"vs twin {p['twin_bps_mean']:+.0f} bps (Rp {p['twin_rp']:,.0f})")
+            if p["open_bps_mean"] is not None:
+                parts.append(f"vs open {p['open_bps_mean']:+.0f} bps (Rp {p['open_rp']:,.0f}, n {p['n_open_bps']})")
+            if p["queue_median"] is not None:
+                parts.append(f"antrean pre-open median {p['queue_median'] * 100:.1f} %")
             if p["missed_twin"]:
                 parts.append(f"{p['missed_twin']} miss yang twin eksekusi = Rp {p['missed_twin_rp']:,.0f}")
             if p["delay_h_median"] is not None:

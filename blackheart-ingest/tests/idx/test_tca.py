@@ -38,3 +38,21 @@ def test_week_window_and_render() -> None:
     assert s["gap"]["lines"] == 1
     text = tca.render({"book": "live-x", "end": "2026-10-09", "week": s, "all": tca.summarize(lines, {}, {})})
     assert "[TCA mingguan] live-x" in text and "gap: 1/1 terisi" in text and "Sejak awal" in text
+
+
+def test_vs_open_and_preopen_queue() -> None:
+    a = line("AAAA", "buy", "filled", "trend", 1000, 1010, lots=10) | {"day_open": Decimal(1000)}     # paid 100 bps over the open
+    b = line("BBBB", "sell", "filled", "trend", 500, 495, lots=20) | {"day_open": Decimal(500)}       # sold 100 bps under the open
+    books = {("AAAA", date(2026, 10, 6)): {"off_px": [1005, 1010, 1015], "off_vol": [1000, 3000, 9999], "bid_px": [], "bid_vol": []},
+             ("BBBB", date(2026, 10, 6)): {"bid_px": [500, 495, 490], "bid_vol": [5000, 5000, 5000], "off_px": [], "off_vol": []}}
+    s = tca.summarize([a, b], {}, {}, books=books)["trend"]
+    assert abs(s["open_bps_mean"] - 100.0) < 1e-9 and s["n_open_bps"] == 2
+    # AAAA: 1,000 shares vs 4,000 offered at <= 1010 = 25 %; BBBB: 2,000 vs 10,000 bid at >= 495 = 20 %; median 22.5 %
+    assert abs(s["queue_median"] - 0.225) < 1e-9 and s["n_queue"] == 2
+    assert "vs open +100 bps" in tca.render({"book": "trend_live", "end": "2026-10-09", "week": {}, "all": {"trend": s}})
+
+
+def test_unflagged_lines_take_the_default_sleeve() -> None:
+    ln = line("AAAA", "buy", "filled", "x", 1000, 1000) | {"flags": ["trend:entry"]}
+    assert set(tca.summarize([ln], {}, {}, default_sleeve="trend")) == {"trend"}
+    assert tca.depth_within("buy", 100, None, None) is None

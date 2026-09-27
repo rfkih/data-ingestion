@@ -64,6 +64,7 @@ from . import (
     publish,
     runlog,
     scores,
+    stopcheck,
     ticket,
     trend_book,
 )
@@ -186,6 +187,11 @@ def run_daily_chain(yahoo_dir: Path | None = None) -> None:
                 logger.info("idx trend %s: %s", bk, rep)
             except Exception as e:
                 runlog.alert(conn, "warning", f"ticket:{bk}", f"trend ticket failed: {type(e).__name__}: {e}")
+            try:                                                        # the recorded broker stop vs trail10 (idx/stopcheck.py)
+                logger.info("idx stopcheck %s: %s", bk, stopcheck.run(conn, bk))
+            except Exception as e:
+                conn.rollback()
+                runlog.alert(conn, "warning", f"levels:{bk}", f"stop check failed: {type(e).__name__}: {e}")
         try:                                                                # the public scores for the day (spec §04); fails soft
             rep = scores.build(conn)
             logger.info("idx scores: %s", rep)
@@ -1099,10 +1105,11 @@ def run_combo_expire() -> None:
 
 
 def run_tca_weekly() -> None:
-    """Friday 20:50 WIB: the weekly execution (TCA) report of each live combo book, pushed (idx/tca.py, Track A5)."""
+    """Friday 20:50 WIB: the weekly execution (TCA) report of each live combo book and live trend book, pushed (idx/tca.py,
+    Track A5; trend books added 2026-09-28 for the vs-open / pre-open-queue read). ``weekly`` skips paper books."""
     from . import combo_book, tca
     with get_connection() as conn:
-        for bk in combo_book.combo_books(conn):
+        for bk in [*combo_book.combo_books(conn), *trend_book.trend_books(conn)]:
             try:
                 tca.weekly(conn, bk)
             except Exception:
