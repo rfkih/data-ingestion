@@ -1,30 +1,18 @@
-# blackheart-ingest — Macro / Market-Data Ingest + Feature Compute
+# blackheart-ingest - IDX desk worker + crypto-era macro ingest
 
-Python/FastAPI service that pulls macro, options, and market data from free external sources into Postgres and computes macro `feature_values`; called over HTTP by the Trading JVM's `BackfillMl*` handlers and scheduled by `MlIngestScheduleRefresher`.
+Python/FastAPI worker, one package `src/blackheart_ingest`, two halves. `idx/` is the live IDX (Indonesian equities) desk:
+primary-source data plane into schema `idx` of the same `trading_db`, books and tickets, the Stockbit feed, ML, research;
+self-scheduled and independent of the trading JVM. The rest is the crypto-era macro/market-data ingest + feature compute:
+`/pull` and `/compute`, called over HTTP by the Trading JVM's `BackfillMl*` handlers and scheduled by
+`MlIngestScheduleRefresher` (CRYPTO_LEGACY.md). This file: map + always-on rules; detail: table at the end.
 
 > Part of the Blackheart workspace — topology + repo map in C:/Project/CLAUDE.md.
 
-## What it does
-- **Sources in** (all free, mostly no-auth): FRED + ALFRED vintages, Deribit DVOL + Deribit option-surface skew (`deribit_options`), Binance spot (`binance_spot`), Binance futures macro (funding / OI / L-S / taker), Binance forceOrder liquidation stream, Binance orderbook, CoinMetrics, DefiLlama, CoinGecko, alternative.me Fear&Greed, ForexFactory.
-- **Tables out:** raw rows → `macro_raw` (+ source-health rows); computed macro features → `feature_values` (keyed to `feature_registry`). PIT-rejected rows are counted, not silently dropped.
-- **Consumers:** the Trading/Research JVMs read `feature_values`; the inference sidecar (`inference/`, separate worker) reads features and writes `signal_history`.
+**Stack:** Python 3.12 · FastAPI + uvicorn · Pydantic v2 / pydantic-settings · httpx + tenacity · structlog · psycopg 3 (sync)
+· pandas + numpy · fredapi · websockets · lightgbm (inference). Extras `kafka`, `html-scrape`. IDX desk:
+`curl_cffi` (idx.co.id transport), `pypdf[crypto]` (annual reports), `cryptography` (FCM JWT).
 
-## Tech stack
-Python 3.12, FastAPI + uvicorn, Pydantic v2 / pydantic-settings, httpx + tenacity, structlog, psycopg 3 (sync), pandas + numpy, fredapi, websockets, lightgbm (inference). Optional extras: `kafka` (aiokafka + python-snappy, used in the Docker image), `html-scrape` (bs4 + lxml, ForexFactory HTML fallback, currently unused).
-
-## Layout (`src/blackheart_ingest/`)
-- `workers/server.py` — **the SERVED FastAPI app (`workers.server:app`)**; entry point `blackheart-ingest-server`. This is what Docker runs.
-- `workers/compute_features.py` — `blackheart-ingest-compute` one-shot/loop feature compute CLI.
-- `workers/inference_backfill.py` — `blackheart-ingest-inference` sidecar backfill (loads model artifacts, writes `signal_history`).
-- `workers/bar_event_consumer.py`, `feature_stream.py` — Kafka bar-close → feature-compute pipeline.
-- `sources/` — one module per source; `server._KNOWN_SOURCES` maps `/pull/{source}` names to modules. `binance_liquidation.py` is a lifespan worker (not a `/pull` source).
-- `features/` — `definitions.py` (declarative `FeatureDef`s), `compute.py`, `persistence.py`.
-- `inference/` — ML sidecar (registry / artifacts / persist / api).
-- `shared/` — `settings.py`, `db.py`, `pit_guards.py`, `binance_http.py`, `logging_setup.py`.
-- `schemas/` — Kafka event models. `api/` — **DEAD** (no live modules; the old unused app factory lived here).
-- `tests/` — pytest suite incl. `test_server_app.py` (boots the served app with its lifespan).
-
-## Build / test / run
+## Run / test / restart
 ```powershell
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"          # CI installs ".[dev,kafka]"
@@ -32,289 +20,141 @@ ruff check src                    # lint
 mypy src                          # type-check
 pytest                            # tests
 python -m blackheart_ingest.workers.server   # run server (or: blackheart-ingest-server)
+python -m blackheart_ingest.idx.cli <verb>   # IDX CLI; local wrapper C:/Project/scripts/idx.sh / idx.ps1 (loads idx-local.env)
 ```
-Copy `.env.example` → `.env` and set `INGEST_FRED_API_KEY`. Server listens on `127.0.0.1:8001` (loopback) by default; the Docker image forces host `0.0.0.0` + port `8001` internally.
-Key routes: `GET /health` (and `/healthz`), `GET /sources`, `GET /features`, `POST /pull/{source}`, `POST /compute/{feature}/v/{version}`, `POST /compute/incremental`, `GET /liquidation/status`.
+- Copy `.env.example` → `.env` and set `INGEST_FRED_API_KEY`. Listens on `127.0.0.1:8001` by default.
+- Feed collector: restart ONLY with `C:/Project/scripts/idx-feed-task.ps1 -Restart`. Scheduler task:
+  `C:/Project/scripts/idx-scheduler-task.ps1`. Both tasks: a logon trigger + a 10-minute watchdog (FEED.md).
+- Safety net: `idx watchdog`, `idx backup run|restore-test|offsite`, `idx tca`, `idx combo kill`,
+  `python -m blackheart_ingest.idx.snapshot verify|drift <study>` (OPS.md).
+- Stream check: `GET /idx/stream/status`, `curl -sN 'http://127.0.0.1:8001/idx/stream?kinds=ops'` (ALERTS.md).
 
-## Deploy
-Has its **own CI** (`C:/Project/.github/workflows/blackheart-ingest-ci.yml`, root workspace — not inside this repo): push to `master` runs pytest + a served-app smoke-boot, builds/pushes the GHCR image, then auto-deploys to the VPS (gated by `vars.DEPLOY_ENABLED`) with a healthcheck + auto-rollback.
-**Docker-run-managed on the VPS — NOT compose.** The container is created via `docker rm -f` + `docker run -d --name blackheart-ingest --network blackheart_default --env-file /home/starsky/blackheart/ingest.env -p 127.0.0.1:8001:8001 -p 100.112.13.126:8001:8001` (loopback + Tailscale only). A `docker compose up` would create a conflicting container — recreate by hand with the same `docker run` + env_file if you must touch it live. CI pulls the image BEFORE removing the old container (a pull-then-rm ordering bug once caused a 53-min outage + lost unbackfillable liquidation events).
+## Always-on rules and hazards
+**Money, books, strategies**
+- Before changing any live parameter or quoting a strategy number, read `docs/MODEL_INVENTORY.md`: binding change control
+  (pre-registered study + independent spec-only replication + journal); combo books `live-fae554` / `paper-edbb01` frozen to
+  2027-03-26.
+- Live books are two-key: a live ticket is a draft; nothing fills one automatically. Live fills are recorded by hand
+  (`idx ticket fill`, `idx book fill`); after a back-dated fill re-run `idx book mark --rebuild` (cash is anchored on the live
+  `book.cash`). `fillmatch` only proposes; the write goes through `ticket.fill_line`. Paper tickets fill themselves. Respect a
+  halted book.
+- Paper-only engines stay paper: gap-fade book `paper_gapfade`, the online agent (`idx/agent.py`), the C1 watch
+  (`idx/dt_watch.py`, no orders, no pushes). Real money is the operator's call (declared judgement rules), via draft tickets.
+- Forecasts, never tickets: no book reads an `idx/ml` daily horizon until it shows a positive realised IC for months; a
+  1-minute hit rate above base is worth less than the spread; never build a book on the 1d horizon. The combo `ml` sleeve's 5d
+  score is under the change control above.
+- The ARA watch is information, never a ticket; ARA prediction-vs-actual is measurement only, inside the operator's ARA freeze
+  (no ARA books, entry rules, new screens or research menus: ARA.md). The chart screen gets nothing that forecasts a price.
+- Never hand-type a performance number into the registry: a strategy with no study shows no figure.
+- Daily board: bookless (never invents a position), entries only; an engine that throws shows `error` - silence and "nothing
+  today" must never look the same.
+- One implementation, research == live: `candidates.rank_pool`, `strategies.pick`, trend thresholds imported from `trend_book`,
+  `idx/metrics.py` (the one PIT evaluator, cutoff 16:00 WIB), `ml/intraday.py` minute features (same path live and settled).
+  Never fork them.
+- IDX rules in `ticket` (lot 100, tick fractions, `ticket.reject_band`): verify against Peraturan II-A on change. ARB = 15 %
+  flat rounded UP to the tick; a same-day/must-fill stop bands on yesterday's close, never the firing price (JATS rejects a
+  stop priced under the ARB).
+- Open window: no live feed for tomorrow's buy list; the feed appears only at the open (08:55-09:30) for names that already
+  have a ticket; `unsubscribe()` removes only `reason='ticket'` rows, never the standing liquid set.
+- `line_message` quotes the side of the book the read points at: the wrong side is a number somebody might type in.
+- Gap-fade: nothing held overnight; no offer = skip (a name locked at the lower band cannot be bought); < 50 opening prints =
+  no trading + alert; one entry + one exit ticket per day under the paper filler's advisory lock.
+- The daily summary's "open" is the first trade, not the opening auction (AALI 2026-09-22 printed at 10:45): the live
+  gap-fade trades only a first print inside 08:55-09:10.
+- `/idx/books` `capital` is reconstructed from cash + every fill; the first NAV point is NOT the capital (no returns from it).
 
-## IDX data plane (`src/blackheart_ingest/idx/`, phase 0 — 2026-09-12)
-
-Primary-source Indonesian equities (idx.co.id) → schema **`idx`** in the same `trading_db`; self-scheduled,
-**independent of the trading JVM**. Spec: `C:/Project/docs/superpowers/specs/2026-09-12-idx-data-platform-design.md`;
-build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
-
-**Before changing any live parameter or quoting a strategy number, read `docs/MODEL_INVENTORY.md`**: the live models, their
-reference study (#386), validation status, known limitations and the binding change-control rule (pre-registered study +
-independent spec-only replication + journal; combo books frozen to 2027-03-26). Ops safety net (2026-09-26): `idx watchdog`
-(own Windows task, `scripts/idx-watchdog-task.ps1`), `idx backup run|restore-test|offsite`, `idx tca`, `idx combo kill`,
-`python -m blackheart_ingest.idx.snapshot verify|drift <study>`.
-
-- **Layers:** bronze = every response archived (`INGEST_IDX_BRONZE_DIR/<endpoint>/<key>/<fetched_at>.json.gz` + `idx.bronze_index`)
-  → silver = `idx.*` tables via pure ETL (`idx/etl.py`) → gold = `public.market_data` rows `<CODE>.JK / 1d` (IDX reference-price basis =
-  splits + rights/bonus via `Previous` resets, never cash dividends; `idx/publish.py` re-bases the Yahoo pre-2020 segment onto it). Silver/gold are derived; `idx replay` rebuilds them from bronze with no network.
-- **CLI:** `python -m blackheart_ingest.idx.cli` — `migrate | status | universe | daily --date | index --date |
-  backfill --from --to [--index] | replay | publish [--full] | announce | features [--publish] | fin discover|download|parse |
-  dividends | card CODE | candidates [--as-of D] | answers [--score] | crosscheck | run-scheduler`. Local wrapper:
-  `C:/Project/scripts/idx.sh` / `idx.ps1` (loads `idx-local.env`, gitignored).
-- **Annual reports (`idx/annual.py`, migration 0018 `idx.annual_excerpt`, 2026-09-14):** IDX lists laporan tahunan under the same endpoint with `reportType=ar` (client `financial_report(..., report_type='ar')`; rows in `idx.financial_report` with report_type 'ar'). `idx annual discover --years | download --list|--codes|--universe | extract | status | show CODE`: the main PDF (most pages) goes to `data/idx/annual/<code>/<code>_<year>.pdf`, the plan pages (prospek, proyeksi/target, strategi, rencana/capex, risiko, dividen; uppercase headings after the first fifth of the report) are stored as excerpts and appended to the thesis card (web, phone, pack). Scheduler job `annual` on the 6th, 10:00 WIB, for today's lists and holdings, at most 8 reports per run at 0.2 rps (the rest wait for the next run). Needs `pypdf[crypto]` (some issuers, e.g. SRTG, publish AES-encrypted PDFs). Known IDX-side corrupt uploads (2026-09-16): DEWA FY2025 (truncated), GPRA FY2025 (all-zero file) — issuer sites only.
-- **Yahoo fallback for the day's closes (2026-09-14):** `jobs/daily.fallback_yahoo` writes `idx.bar` rows with source 'yahoo' and quality_flags {fallback} (never over an 'idx' row; the IDX upsert replaces them later); scheduler `daily_fallback` 19:40 WIB weekdays when the IDX bar is missing, then marks the books. Desk readers (book, candidates, card, overlay, pack, publish, ticket) accept source IN ('idx','yahoo'); `daily.latest_bar_date` and crosscheck stay IDX-only so the chain keeps trying IDX and the no-bar alert still fires. Client: a 403 is retried once (a transient challenge), a second 403 stops the call (`cf-mitigated: challenge` is Cloudflare, not an IP block; retrying feeds it). `INGEST_IDX_PROXY` routes calls through an HTTP CONNECT proxy for recovery only.
-- **Cloudflare (2026-09-24, the third tightening):** the challenge is on the **connection fingerprint**, not the IP and not
-  the headers - the whole site answered 403 to both curls on this host while Chrome loaded it. Neither curl had HTTP/2
-  compiled in, which no browser can be; `curl_cffi` (libcurl-impersonate) speaks Chrome's TLS **and** HTTP/2 and returned
-  all 963 rows over HTTP/3 for the very day plain curl could not fetch. It is now the default transport
-  (`INGEST_IDX_TRANSPORT=impersonate|curl|urllib|auto`, `INGEST_IDX_IMPERSONATE` = profile, default `chrome`). **The
-  profile ages**: `chrome` and `safari` passed, the pinned `chrome124` and `edge101` were still challenged - so if
-  challenges return, try a newer profile before assuming an IP block. Escalation order when a day cannot be fetched:
-  newer impersonation profile -> `INGEST_IDX_PROXY` (different egress) -> wait, because `bar_backfill` retries twice a
-  day on its own and heals the hole without anyone watching.
-- **Many users, each with their own desk (`idx/who.py`, migration 0026, 2026-09-17):** `idx.book.owner_id/label/rule/trend_variant/archived_at`, `idx.decision.user_id`, `idx.watchlist (user_id, code)`, `idx.push_device.user_id`, `idx.app_user.plan/accepted_terms_at`. Every personal `/idx/*` route takes a `Caller` (`who.caller_of`): a signed-in account (the app's proxy forwards the session JWT as `Authorization: Bearer`; verified with `IDX_JWT_SECRET`) is scoped to its own books/tickets/journal/watchlist/phones (`own_book` -> 404 for anyone else's); a service holding the ingest token (CLI, scheduler, agent) is unscoped, or scoped to one account with `X-Idx-User: <email>` (the nightly agent sends `IDX_AGENT_USER`); with no ingest token configured (this box, tests) a credential-less loopback caller counts as an unscoped service. Research reads stay open; research writes (pack build/answer, evidence, macro pull, overlay check) are `service_only` (403 for an account). New: `POST /idx/books {label, kind paper|live, rule annual|trend, cash, broker, fees, strategy, max_names, trend_variant}` -> id `<kind>-<6hex>` (`ticket.is_paper` = id starts with `paper`), `DELETE /idx/book/{book}` archives (open tickets cancelled, out of every list and job), `GET /idx/books` lists the caller's. `book.create_book/list_books/owner_of/archive`. Notifications go to a person: `notify.send(user_id= | book=)` -> the book's owner's phones, alerts `book:X`/`ticket:X` -> X's owner, desk alerts -> `IDX_OPS_NOTIFY_EMAIL`'s phones (unset = dropped); `journal.record(user_id=)` defaults to the book's owner. Existing books (`live`, `paper`, `trend_live`, `paper_trend`) were assigned to the first account (the operator). Test books stay ownerless. Tests: `tests/idx/test_multiuser.py`.
-- **Phone push (`idx/push.py`, migration 0025 `idx.push_device`, 2026-09-17):** the operator's notification channel is the Blackridge Android app (`blackheart-idx-web`; renamed from Papan on 2026-09-17 - older notes below say Papan), not Telegram. `notify.send(text, title=, data=)` fans out to every configured channel: the app (`push.broadcast` -> Firebase Cloud Messaging HTTP v1, bearer from a service-account JWT signed with `cryptography`, cached; `IDX_FCM_SERVICE_ACCOUNT` = path of the Firebase service-account JSON placed by the operator, never through chat or git) and Telegram (only if `IDX_TELEGRAM_*` are set). A text's first line is the push title; `data.route` is the app screen a tap opens (`notify.ticket_data(t)` -> `/m/ticket?book=`; alerts -> `/m/more`). Device tokens come from the app (`POST /idx/push/register {token, platform, label}` + `X-Idx-User` from the app's proxy; `DELETE /idx/push/{token}`; `GET /idx/push/devices`; `POST /idx/push/test`); a token FCM reports gone (404 / UNREGISTERED) is disabled until the app registers again. Nothing here raises into the job that notified. CLI `idx push devices | test [--text]`, `idx notify --status` lists the channels. `GET /idx/books` lists every book (kind live|paper, rule annual|trend, nav, open ticket) for the phone's selectors.
-- **Price levels (`idx/levels.py`, migration 0024 `idx.price_level`, 2026-09-17):** per book+code+kind (stop | take_profit | warn) a level and a note saying what to do. `levels.check` runs after every mark in the daily chain and the Yahoo-fallback path: stop/warn fire at close <= level, take_profit at close >= level; alert critical (stop, take_profit) / warning (warn) through `runlog.alert` (Telegram when `IDX_TELEGRAM_TOKEN`/`_CHAT` are set, see notify.py), stamped `triggered_at` so it fires once until `idx levels reset CODE`. Index codes (COMPOSITE) read `idx.index_daily`. CLI `idx levels set CODE [--stop L] [--tp L] [--warn L] [--note] | list | clear CODE [--kind] | reset CODE | check`. Live book 2026-09-17: satellite SSIA stop 1,030 / tp 3,440 / warn 1,250, LPKR 35 / 118 / 45; core names warn -25 % and stop -40 % vs avg; COMPOSITE warn 5,800 / stop 5,150.
-- **Research store (`idx/research_store.py`, migration 0020 `idx.study` / `idx.study_name` / `idx.evidence`, 2026-09-17):** research results as rows. A study run (`record_study`: name, as_of, params, summary, the names it surfaced with their figures, screens, score, rank and the screens' historical hit rates), and evidence per name (`add_evidence`: kind news | announcement | annual | web | analyst | note, deduplicated on (code, kind, url, title); `collect_evidence` pulls material disclosures, press items and the annual-report plan sections the data plane already holds). `name_view` assembles one name: studies that flag it, evidence by kind, pack answers, consensus, latest candidate row. CLI `idx study list|show [--name N|--id I]|name CODE`, `idx evidence collect CODE[,CODE] [--days N] [--study I] | add CODE --kind K --title T [--url --summary --tags --ts] | show CODE`. API `GET /idx/study?name=`, `/idx/study/latest?name=`, `/idx/study/{id}`, `/idx/name/{code}`, `POST /idx/name/{code}/evidence`. `research/idx_doublers.py --store` writes its run (study `doublers`).
-- **News + analyst consensus (`idx/news.py`, `idx/consensus.py`, migration 0019 `idx.consensus`, 2026-09-14/16):** `idx news pull|show [--codes]` collects the public RSS feeds of Kontan, Bisnis, CNBC Indonesia, Antara, IDX Channel into `idx.news_article` (titles + summaries only, deduplicated by text hash, tagged with the codes mentioned via ticker or `idx.company_alias`); collection only, no scoring — the history the desk never had. `idx consensus pull|show [--codes]` snapshots Yahoo's analyst consensus per name (target mean/low/high, n, recommendation, forward/TTM P/E, upside) into `idx.consensus` (code, snapshot_date), so revisions can be tested in a year. Scheduler: `news` 06:10/12:10/18:10/22:10 WIB, `consensus` Sat 11:00 WIB (universe + holdings), `fin_backlog` Tue-Sat 05:30 WIB (2021-2023 quarterly workbooks, 60 a day, skips the day when IDX challenges the client).
-- **Macro series (`idx/macro.py`, migration 0017 `idx.macro`, 2026-09-14):** BI-Rate (Bank Indonesia's page via `curl`; Python's TLS is reset by the site; OECD history via FRED to 2023-12), USD/IDR, GDP q/q and annual, CPI (OECD, lags), US 10y, Fed funds, VIX, Brent, gold, CPO, **Indonesia inflation y/y from BPS** (`id_inflation_yoy`, source `bps`, variable 2263, national row; 2024-01 onward, the live replacement for the OECD CPI index that stops 2025-04). Scheduler jobs `macro` 07:30 and `macro_pm` 14:00 WIB Mon-Sat - the afternoon run exists because BPS publishes the monthly reading around midday on the 1st (measured 2026-09-01 12:26 WIB), so the morning pull would miss it by a day; it also retries whatever failed in the morning. CLI `idx macro pull [--keys a,b] [--full] | show | bps-find [--keys KEYWORD]`; API `/idx/macro`. Needs INGEST_FRED_API_KEY and INGEST_BPS_API_KEY (the BPS App ID is the `key` parameter; idx-local.env). No free source for the ID 10-year yield. Tested as stress-detector inputs and rejected (`research/IDX_MACRO_STRESS_2026-09-14.md`): the board is for reading.
-- **Desk accounts (`idx/accounts.py`, migration 0015 `idx.app_user`, 2026-09-13):** the Papan app's users. Anyone can register; scrypt password hashes; 30-day HS256 sessions signed with `IDX_JWT_SECRET` (base64, `idx-local.env`; the app holds the same value as `JWT_SECRET`); failed sign-ins throttled per email. Served at `/api/v1/users/register|login|me|logout` in the trading JVM's user-API shape (ResponseDto envelope, `blackheart-token` cookie), so the app's `INTERNAL_TRADING_URL` points at this worker and would work unchanged against the JVM. These routes are open by design (loopback bind + the app in front); they are not under `/idx` and never need `X-Ingest-Token`.
-- **Value/quality book (phase 2 verdict, `research/IDX_VALUE_QUALITY_2026-09-12.md` rev. 3; review
-  `research/IDX_REVIEW_2026-09-12.md`):** `idx/metrics.py` is the one PIT evaluator (latest audited + latest quarterly → TTM,
-  loose/strict gates, warnings; information cutoff = 16:00 WIB of the as-of day; prior-period comparatives come from the report
-  (`net_profit_prior`, migration 0009) — the YoY ratio is only inverted when its sign is certain). `idx/candidates.py` applies
-  the rule: board Utama/Pengembangan **on the day** (`board_from_remarks`: 5th char of the day-dump notation string, 1 Utama
-  2 Pengembangan 3 Akselerasi 4 Pemantauan Khusus 5 Ekonomi Baru) → traded that day → liquid ≥ Rp 5 bn/day → loose gate →
-  composite **average** rank E/P+B/P+DY → top fifth, min 10, only when the pool has ≥ 20 names. `rank_pool(rows, gate=,
-  keys=, sector_cap=)` is the single implementation — `research/idx_value_quality.py` calls `candidates.build()`/`rank_pool()`
-  per rebalance date, so backtest and live list cannot drift. Rows carry `data_error_ratio` (ratio > 50×), `no_trade_on_date`,
-  `scale_mismatch` warnings. `idx/card.py` is the per-name thesis card. `GET /idx/candidates[?all=1&as_of=]`. Gates are
-  evaluated on the **audited** year; TTM and quarterly warnings are shown for judgment, never used to exclude automatically.
-  `idx answers --score` = forward returns per pack stance / veto vs COMPOSITE (21/63/126/252 trading days).
-- **Book overlays (`idx/overlay.py`, migration 0012, `research/IDX_TREND_OVERLAY_2026-09-13.md`):** per-book flags
-  `regime_filter` (cash while COMPOSITE < its 200-day average; monthly check on the first trading day of the month inside
-  the daily chain -> `cash` ticket when it turns off, `rebalance` ticket when it turns on; an annual rebalance while off
-  becomes a cash ticket) and `entry_gate` (listed names under their own SMA200 are held back at a rebalance, bought with an
-  `entry` ticket at the monthly check they cross). Checks recorded in `idx.regime_check`; `idx overlay status | check
-  [--dry-run]`; `/idx/overlay`, `POST /idx/overlay/check`. Plus `take_profit_pct` (NULL = off): at the monthly check, held names at or above purchase x (1 + pct) go into an exits ticket (`research/IDX_SELL_RULES_2026-09-13.md`). Plus `trend_exit` (migration 0014): at the monthly check, a held name that crossed under its 200-day average since the previous check goes into an exits ticket, and the entry gate also buys a held-back name when its 14-day RSI is at or under 30 (the asymmetric rule, `research/IDX_ASYMMETRIC_2026-09-13.md`). Plus the cash buffer (migration 0016): `cash_floor_pct` of NAV kept in cash, `stress_cash_pct` while the stress detector (`stress_rule` ma | any2; four signals recorded in `idx.stress_check` at the monthly check) is on; the ticket builder uses it as the plan's cash reserve and the monthly check issues a rebalance ticket when the target moves 5+ points (`research/IDX_CASH_BUFFER_2026-09-14.md`). All OFF by default (paper book: the four trend overlays on since 2026-09-13). On a TREND book `regime_filter` is the regime gate: no NEW entry while the COMPOSITE closes under its 200-day average, held names untouched (`trend_book.hold_back`, `overlay.index_regime`; the ticket carries `regime` + `held_back`; validated in `research/IDX_REGIME_VALIDATE_2026-09-22.md` and `IDX_ROBUSTNESS_SCORECARD_2026-09-22.md`); on `paper_trend` and `trend_live` since 2026-09-22; CLI `idx book set --book X --regime-filter on|off`. Signals are computed at the check close; tickets are meant to be worked at the next open (delay cost measured in `research/idx_execution_delay.py`). `ticket.min_trade_for(nav)` scales the minimum line with the book (NAV/20, floor Rp 1M, cap Rp 5M).
-- **Strategy catalog (`idx/strategies.py`, migrations 0010 + 0011):** families `rule` (baseline) · `strict` (deployed since
-  2026-09-12, the operator's call ahead of the pre-registered May 2027 date) · `strict_cash` (tested: passes its criterion on
-  one name, ENRG; not the default) · `value` · `momentum` · `momentum_rank` · `growth`, each `{gate, order, weight[, keys]}`;
-  `strategies.deployed()` is the API's default strategy; a choice = family + size (None = natural
-  fifth, 10, 15). `strategies.pick(key, rows, size=, weight=)` is the ONE implementation of "which names, what weights"
-  (composite families order their gate pool; feature families order the rule's fifth by ep / mom / np_yoy); the research
-  scripts call it too (`research/idx_top10.py <10|15>`), so tested == deployed. `candidates.build` now stores `mom` (12-1
-  month momentum, `momentum_at`). `idx.book.strategy` + `max_names` say what a book follows; `ticket.build(strategy=,
-  max_names=)` defaults to them and `ticket.plan` takes `{code: weight}` targets. `idx.strategy_history (strategy, size,
-  month)` holds the research record (`idx strategies import-history <rev3 json> <top10 json> <top15 json>`, `idx strategies
-  list`). Routes: `GET /idx/strategies`, `GET /idx/strategies/{key}?size=`, `GET /idx/candidates?strategy=&size=&all=`,
-  `PUT /idx/book/{b}` accepts `strategy`/`max_names`, `POST /idx/ticket/build?strategy=`.
-- **Analysis pack (manual Claude chat, no API):** `idx pack` → `idx/pack.py` builds one markdown (pinned prompt `pack_v1` +
-  market + candidate table + a compact section per name: valuation, gates, 4 quarters + 3 FY, flow, disclosures since the previous
-  pack) for selected candidates + next 10 + `idx.watchlist`; stored in `idx.nightly_pack` and written to
-  `research-scratch/idx-pack/<date>/pack.md` (~13k tokens for 32 names). The operator pastes it into Claude chat and saves the
-  JSON block; `idx pack-import answer.json` validates (codes must be in the pack, stance buy|hold|avoid|sell, conviction 1-5,
-  veto needs a reason) and writes `idx.sentiment_score` rows (`doc_type='pack'`, `model='claude-chat-manual'`) +
-  `nightly_pack.answer_json`. `idx answers`, `idx watch list|add|rm`. Routes: `GET /idx/pack/latest|{date}`, `POST /idx/pack/build`,
-  `POST /idx/pack/{date}/answer`, `GET /idx/answers`, `GET|PUT /idx/watchlist`.
-- **Position book (`idx/book.py`, migration 0007):** `idx.book` (live | paper; cash, fee %, dividend tax), `idx.fill` (buy | sell |
-  split; average cost, fees in the basis) → `idx.position` rebuilt from fills; `idx book mark` writes `idx.book_mark` + `idx.book_nav`
-  per trading day (net dividends credited on the ex-date, splits become `split` fills; cash anchored on the live `book.cash`, so a
-  back-dated fill needs `--rebuild`); `idx book check` raises deduplicated `idx.alert` rows (`job='book:<name>'`) for held names:
-  material disclosures (last 3 days), a new report breaking the book rule or with TTM warnings, unrealized loss ≥ 25 %, liquidity
-  below half the floor. `idx book fill --date --code --side --lots --price [--fee]` is how the operator records broker fills;
-  `idx book paper-seed --book paper --as-of <candidate run date> --amount N` buys the selected list at the next open. Both books
-  are marked + checked at the end of the daily chain. Routes: `GET /idx/book/{book}`, `POST /idx/book/{book}/fills`, `PUT /idx/book/{book}`.
-  `research/idx_book.py` (CSV ledger) is superseded; `idx book import --file fills.csv` reads its format.
-- **Rebalance ticket (`idx/ticket.py`, migration 0008):** `idx ticket build --book live [--mode rebalance|exits] [--as-of run_date]
-  [--max-names N]` → `idx.ticket` + `idx.ticket_line`. `rebalance` = hold the selected candidates equal-weight: sell what is no
-  longer selected, trim/add beyond ±1 % of NAV (min Rp 5 M), buy new entrants, whole lots, limit = one tick through the reference
-  close clamped inside the auto-rejection band, buys capped by cash + expected sale proceeds − 1 % reserve (`cash-limited` flag).
-  `exits` = sells only, for held names whose newest report breaks the book rule or whose latest pack answer is `sell`. Lines carry
-  rank, strict-gate fails, TTM warnings and the pack stance/veto as flags. Paper tickets fill themselves at the next day's open inside the daily chain (`idx ticket paper-fill --dry-run` previews; sells first, buys trimmed to cash, unfillable lines skipped, ticket closed); live fills are captured by hand: `idx ticket fill --line ID --lots --price
-  [--fee]` (→ `idx.fill`, book re-marked; partial fills tracked), `idx ticket skip --line ID --reason`, `issue|close|cancel`.
-  IDX rules encoded (verify against Peraturan II-A on change): lot 100; fractions 1/2/5/10/25 below 200/500/2,000/5,000/above;
-  auto-rejection ASYMMETRIC (`ticket.reject_band`): ARA 35/25/20 % for 50–200/200–5,000/>5,000 rounded down to the tick, ARB 15 % flat rounded UP to the tick (since 2025-04; kept by the 2026-09-28 rules, Kep-00136/BEI/09-2026) - until 2026-09-27 the lower side was the symmetric 25/20/35 %, which priced must-fill stops (combo ML stop, same-day intent stop) under the ARB where JATS rejects them; the same-day stop now bands on yesterday's close, not the firing price. Scheduler: May 1–10 alert if the live book has no rebalance
-  ticket yet. Routes: `GET /idx/ticket/latest?book=`, `GET /idx/ticket/{id}`, `POST /idx/ticket/build`, `POST /idx/ticket/{id}/status`,
-  `POST /idx/ticket/lines/{id}/fill|skip`.
-- **Workbook scaling gotchas (`idx/fin_parse.py`):** (a) the FY2023 vintage (published Jan-Apr 2024) is labelled "in millions"
-  but holds full rupiah — `_effective_rounding` overrides the label when total assets would exceed 50,000 T (IDR) / 3 T (USD),
-  and scales up when a "full amount" label yields < Rp 1 bn; (b) ~27 % of USD-filer reports carry no conversion rate —
-  `fin_store.fx_table` supplies the median reporting-date rate other filers reported for that period end (`FX_SEED` for a fresh
-  DB), `Parsed.fx_source` says which; (c) a company whose *every* report is mis-scaled (PGEO, 1000×) is invisible to the
-  neighbour cross-check, and some filers scale the EPS row too (BBNI FY2024 EPS 0.0006) — `fin_store._eps_reconcile` compares
-  `net_profit` with `eps × listed shares`; a clean power-of-1000 gap is resolved by the publication-day price (the side whose
-  earnings yield could belong to a company wins): `report_rescaled` re-parses the whole workbook, `eps_rescaled` fixes EPS only,
-  `scale_mismatch` / `eps_mismatch` are stored in `fundamental.flags` (`scale_mismatch` surfaces as a candidate warning).
-  All unit-tested; `fin parse --reparse` re-derives everything from the archived files (safe to run in parallel by code chunks).
-- **Company logos (`idx/logos.py`, 2026-09-25; operator: "buat semua saham memiliki logo nya masing2 ... dari stockbit"):**
-  Stockbit's public CDN `https://assets.stockbit.com/logos/companies/{CODE}.png` (no login, ~5-7 KB), downloaded ONCE into
-  `<data>/idx/logos/{CODE}.png` and served by `GET /idx/logo/{code}` (PNG, `Cache-Control: public, max-age=604800`; 404 = no
-  logo -> the web shows a two-letter monogram). The CDN answers **403, not 404,** for a logo it lacks: one 403 is recorded as
-  `{CODE}.missing` (not asked again until `--refresh`), five in a row stop the run as pushback (and the false misses are
-  forgotten). CLI `idx logos [--codes A,B] [--refresh]` (PowerShell: quote the comma list); job `logos` Sunday 10:00 WIB takes
-  new listings. The web proxy (`blackheart-idx-web/src/app/idx/[...path]/route.ts`) passes `image/*` through as bytes.
-- **C1 forward paper watch (`idx/dt_watch.py`, migration 0059 `idx.dt_watch`, 2026-09-27):** research rule C1 from menu DT-3 (#398): at 16:20 WIB (`dt_watch_pick`) the top 5 eligible feed-list names by prev close -> 15:49 return (first hour also up, not at the upper band) that WOULD be bought in the closing auction and sold at the next opening auction, plus 5 date-seeded random names as placebo; `dt_watch_settle` 20:45 fills prices from `daily_summary` (net at 0.15/0.25 and 0.10/0.20 fees + 5 bps impact). Prints from `feed_bar_1m`, names the feed lacks from Yahoo hourly. No orders, no pushes. **Judgement rule (revised 2026-09-27, before the first row; the first cut had 6 % power):** Wald SPRT on the daily SELECTION edge d = pick gross - eligible-universe gross (one `kind='universe'` row per session, migration 0060), H0 0 vs H1 +27.5 bps, sd 153 bps (the 2025+ backtest sessions; review 2026-09-27), alpha 0.05 / beta 0.20, first 500 sessions only (bootstrap: true edge accepted 80 %, median 101 sessions; zero edge rejected 97 %, median 84); the universe list is frozen at pick (migration 0061); candidate = H1 accepted AND live mean net at 0.10/0.20 % fees > 0; a real-money pilot is the operator's call. CLI `idx dtwatch pick|settle [--date D] | report`. Tests `tests/idx/test_dt_watch.py`.
-- **Online learning agent (`idx/agent.py`, migrations 0042 `idx.agent_sample` / `idx.agent_decision` / `idx.agent_model` + 0043
-  `exit_at`, 2026-09-25; operator: "kalau untung dapet reward, kita kasih modal" -> trade the live feed and learn from each session).
-  PAPER ONLY, virtual Rp 20 M, Rp 2 M a position, <= 3 per decision, <= 10 open. Decision minutes Mon-Thu 09:15 10:00 11:00 13:45
-  14:30, Fri 09:15 10:00 11:00 14:15 14:45 (job `agent_decide`, every minute, acts once per decision minute). Actions (TP, stop,
-  sessions held after entry): TP1 1/1/0, TP2 2/2/0, H1 3/3/1, H2 4/4/2, H5 6/5/5 (operator: "akhir hari ga harus menjual"); exit at
-  the bracket or at the bid of the last grid minute of the last holding session; an overnight gap through the stop sells at
-  the open. Fill model: offer at the decision minute + 0.10 %, TP when a later minute's high reaches it, stop one tick below
-  (both in one minute = stop), 0.20 % sell fee, lots. Learner: full-feedback counterfactual samples (every feed name x decision
-  minute x action, from the tape; a multi-day row is stored only once its holding time is over - early bracket hits alone
-  would bias it) -> per-action Bayesian linear posterior (ridge 10, rewards clipped +-5 %) whose covariance is inflated by the
-  SESSION design effect 1 + (m - 1) rho (same-day names share the market move: 4 sessions gave deff 47-90) and an action needs
-  samples from >= 3 sessions; a name is bought only when the PESSIMISTIC reward (posterior mean - 1 sd) clears +0.3 %.
-  (Thompson sampling was the first design and was dropped the same day: with full feedback, exploring buys no information,
-  and the walk-forward replay showed it betting the book on a one-day-old action.) Features = ml/intraday.py minute features
-  (same code path live and settled) + yesterday's broker tape (top-3 net-buy share, buyer HHI) + the desk's tools (intraday ML
-  10/30/60m P(up) at the minute, daily ML 1d/5d from the evening before, yesterday's stock_state, ARA p_lock). Placebo agent
-  'random' takes the same number of names at random. Job `agent_settle` 16:50: samples (today + matured multi-day of the last
-  7 sessions), paper fills of every open decision, refit. CLI `idx agent warmstart [--resample]|settle [--date]|decide|report`.
-  State 2026-09-25: model #5 on 6,683 samples; unconditional mean reward -1.3 % for every action; replay 09-23..25 -> no trade
-  (best lower bound -2.5 %). Expect weeks of abstaining before the evidence supports a trade.
-  **JUDGEMENT RULE (declared 2026-09-25, before any live decision): after >= 20 settled sessions and >= 30 ts trades, the agent
-  is a candidate for real capital only if ALL: its cumulative paper P&L > 0; its mean reward per trade beats the random agent's
-  by >= 0.5 pp; the t-stat of the daily P&L difference (ts - random, sessions with trades) >= 2; positive P&L on >= 60 % of
-  its trading sessions. Otherwise it stays paper.** **REVISED 2026-09-27 (before the first live decision): that rule had
-  9-32 % power for a +0.5 pp edge at 20 sessions. Now: Wald SPRT on per-session (ts - random) mean reward over sessions where
-  both traded, H0 0 vs H1 +1.0 pp, sd 3.28 pp (warm-start paired difference), alpha 0.05 / beta 0.20 (~60 paired sessions
-  if real, ~34 if not); candidate = H1 accepted AND cumulative paper P&L > 0 (`agent.judge`, in `idx agent report`).** Real money is the operator's call and goes through draft tickets.
-- **One name on one screen (`idx/chart.py`, routes `GET /idx/chart/{code}`, `/chart/{code}/depth`, `/chart/codes`,
-  2026-09-24):** adjusted daily candles from `idx.bar`, one-minute candles from `idx.feed_bar_1m` (subscribed names only,
-  history starts when the collector first ran), the ten levels each side from `idx.feed_book`, and `trend_state` - the
-  deployed trend rule's READING of the name. Every threshold is imported from `trend_book` (HI_N, MA_N, VOL_N, VOL_X,
-  TRAIL) rather than restated, so the screen cannot drift away from the book; a test asserts that. Nothing here forecasts
-  a price and nothing should be added that does: the queue imbalance is returned next to `spread_bps` because study #74
-  measured its lead at about half a tick against a ~79 bps round trip, which makes it a fill-timing readout and not a
-  signal. A name outside the tick feed returns empty intraday and depth with a `why`, never an error.
-  `GET /idx/chart/index` is the same for the market itself (COMPOSITE daily + the feed's `IHSG` minute bars + the
-  200-day average and `regime_on`). An index has **no open** in the IDX payload - `open` is NULL on all 1,618 COMPOSITE
-  rows - so it is passed through as null and the screen draws a line; filling it with the close would put a candle on
-  the page claiming the market opened where it closed.
-- **Schema:** own migrations `idx/migrations/NNNN_*.sql` + `idx.schema_history` (sha256-checked, never edit an applied file).
+**Database and data**
+- Migrations: `idx/migrations/NNNN_*.sql` + `idx.schema_history` (sha256-checked): never edit an applied file, add a new one.
   Not Flyway. JVM/equity roles get SELECT only.
-- **Jobs (WIB):** `universe` 16:15 · `daily` every 15 min 16:30–20:00 until today's bar lands → `index` → `publish --since`
-  → `features --since -45d` → `candidates` · 18:00 alert if no bar · `announce_recent` 20:30 (all-emiten feed, last 3 days,
-  one request per day) · `fundamentals` 21:00 Mon–Fri (discover current FY → download pending workbooks for
-  `metrics.universe_codes` → parse) and Sat 09:00 with the previous FY too · `dividends` 1st of month 09:30 (Yahoo) ·
-  Sunday `crosscheck` · `bar_backfill` 07:30 + 21:30 · `alert_sweep` 06:00.
-- **Gap healing (`scheduler.bar_gaps` / `run_bar_backfill`, 2026-09-24):** the chain only ever chases TODAY, so a day IDX
-  refuses leaves a permanent hole - a Cloudflare challenge on 2026-09-23 cost 758 of 963 names (the Yahoo fallback covers
-  only `universe_codes`) and nothing but a human running `idx backfill` would have filled it. Twice a day the backfill
-  re-fetches recent weekdays that have **no `source='idx'` bar and whose last `daily` run failed or never ran**; a public
-  holiday answers empty with status 'ok', so it is never re-asked. Features are left to the next chain (45-day lookback).
-- **A partial day must never blank the desk:** `candidates.build` and `pack.build` anchor on `max(idx.daily_summary.trade_date)`,
-  the last COMPLETE day - not on `max(idx.bar)`. The Yahoo fallback writes `idx.bar` only, so anchoring on the bar picked a
-  day whose inner join to `daily_summary` matched nothing: on 2026-09-23 candidates, scores, the screener and `/pub` all
-  returned zero rows until IDX answered again.
-- **Alert lifecycle:** alerts are rows in `idx.alert`, shown by the app (`/equities/ops` via `GET /idx/ops` on this server);
-  warning/critical ones also go out through `notify` (below). Three rules, learned from a desk that woke up with 38 open
-  alerts covering two incidents: (1) a check that runs on a schedule raises `runlog.alert_once`, never `runlog.alert` -
-  `alert` is for one-off events; (2) the message must be **stable for the whole incident** (a timestamp, not "53367s ago",
-  or dedup can never match); (3) whatever raises an alert resolves it when the condition clears - `runlog.resolve(conn, job,
-  like=...)` - because an alert only a human can close is one nobody reads. `runlog.sweep_info` acknowledges 'info' rows
-  older than 3 days (the ARA watch writes two a night); warnings and criticals are never swept.
-- **Gotchas:** (1) idx.co.id is Cloudflare-fronted and **fingerprints TLS — `httpx`/`requests` get 403; `urllib` passed until
-  2026-09-14 and is challenged since; `curl` (Schannel on Windows) passes**. `idx/client.py` therefore runs through a `curl`
-  subprocess when one is installed (`INGEST_IDX_TRANSPORT=auto|curl|urllib`; the first call gets one 403 and the retry with the
-  cookie jar passes). A challenge shows `cf-mitigated: challenge` on every path incl. robots.txt and is NOT an IP block —
-  a different IP/proxy does not help, a different TLS stack does. (2) Use `127.0.0.1`, not `localhost`, in the local DSN (IPv6 `::1` hangs on the Docker
-  port proxy). (3) idx.co.id serves **2020-01-02 onward only**; pre-2020 comes from the Yahoo split-only cache
-  (`research/idx_ohlc_loader.py`, `yf_fetch(adjust=False)`). (4) Backfill uses the whole-market day-dump
-  (`GetStockSummary?date=`) so delisted names are included; per-stock `GetTradingInfoSS` is only a cross-check.
-  (5) `OpenPrice=FirstTrade=0` (2020-03-13..09-04, no pre-opening) → `open` NULL + `open_missing`, never fabricated.
-  (6) Corporate actions come from IDX's `Previous` reset vs prior close; exact split ratios from listed-shares change;
-  `idx.bar.adj_factor` is rewritten for earlier rows, raw prices never change. (7) A code in the day-dump but not in Daftar Saham
-  (e.g. GOTOM multiple-voting shares) is `listing.status='NOT_IN_DAFTAR'`, not delisted.
-  (8) **Opens before 2025 exist only for LQ45** in IDX's own data (`open_missing` on ~80 % of 2020-24 rows is the source, not a bug).
-- **Datafeed collector (`idx/feed/`, migration 0029, 2026-09-21):** real-time prints + order books from the operator's OWN
-  Stockbit session (`wss://wss-jkt.trading.stockbit.com/ws`, subprotocol `web`, protobuf envelope with a plain
-  `#O|CODE|BID|price;orders;volume|…` body — `feed/proto.py` documents the message shapes; no protobuf dependency).
-  Personal data: **never into `/pub`, never into Blackridge.** History starts the day it first ran. Tables: `idx.feed_trade`
-  (every print; hypertable, compressed after 3 days) · `idx.feed_book` (top-10 each side, ≤ 1 sample/s/name, only on change)
-  · continuous aggregates `idx.feed_bar_1m`, `idx.feed_book_1m` (refresh every minute) · `feed_symbol` (subscription, re-read
-  every 5 min) · `feed_token` (24 h session JWT) · `feed_status` heartbeat · `feed_event` log · `feed_day` coverage audit
-  (Σqty vs the official daily volume). Process: `idx feed run` (ONE websocket; asyncio receive loop + writer thread with its
-  own connection and a bounded retry queue; idles outside Mon–Fri 08:40–16:20 WIB). Dead-connection detection: transport
-  errors, app-level ping after 15 s silence / pong grace 13 s, and a data watchdog in continuous phases (no data 90 s →
-  resubscribe, 180 s → reconnect); reconnect = backoff 1…30 s forever, fresh key + auth + re-read symbols; advisory-lock
-  singleton; token-expiry warning 45 min ahead. Raw frames archived by default to `logs/idx/feed/<date>.frames.gz` (sync-flushed
-  each second, 7 days) — `idx feed replay --file F` re-ingests a day after a DB outage or parser fix. Windows task **"Blackheart
-  IDX feed"** (`scripts/idx-feed-task.ps1`; `-Restart` is the only correct restart — Stop-ScheduledTask leaves the python child
-  alive holding the lock). It carries **two triggers: at logon and a 10-minute watchdog** (daily 00:00 + `PT10M` repetition —
-  Task Scheduler cannot express "repeat forever" through `New-ScheduledTaskTrigger`). The watchdog is not optional: this box is
-  never logged out, so before it existed a collector killed after the close (2026-09-23 18:50, a stray kill of the python
-  processes) stayed dead and the desk woke up blind — no opening prints, so the gap-fade scan refused and ARA watch saw
-  nothing. A start while it is already running is ignored (`MultipleInstances=IgnoreNew`) and a second collector that finds
-  the advisory lock held **exits 0** (a no-op, not a failure — a non-zero exit would arm restart-on-failure every 2 minutes).
-  The same watchdog is on **"Blackheart IDX scheduler"** (`scripts/idx-scheduler-task.ps1`), which had the same logon-only
-  defect. **Token:** the operator
-  logs in to stockbit.com and pastes the `credentialStorage` cookie at `http://127.0.0.1:8001/idx/feed/relay` — needed
-  only if the laptop was off for 7+ days: **headless renewal works**
-  (verified 2026-09-22: `POST exodus.stockbit.com/login/refresh`, refresh token as `Authorization: Bearer`, body `{}`;
-  access 24 h, refresh 7 d, both rotate). `broker.refresh_and_persist(conn=)` / `idx broker refresh` takes the newest refresh
-  token (the relay row `idx.feed_token`; env only as a fallback, by JWT `iat`) and stores the new pair in `idx.feed_token`.
-  **Since 2026-09-25 the tokens live ONLY in `idx.feed_token`** (operator: "token nya ditaruh di db aja"): `broker.config()`
-  reads the access token from the DB, the relay route no longer writes the env file, and `idx-local.env` holds no Stockbit
-  token. The env file is written only as an EMERGENCY copy when the DB write fails after a refresh (the refresh token
-  rotates, so a lost pair is a lost session). Three
-  places renew: scheduler job `token_renew` every 30 min (`broker.renew_if_needed`, when < 3 h remain), the collector
-  itself 45 min before expiry (worker thread, then `load_token`), and the 20:20 broker snapshot (`config_fresh(conn=)`).
-  ★ **`token_guard` every 10 min (2026-09-22) is the one that guarantees a session for the trading day**: off-session it keeps
-  the 3-hour freshness rule; on a weekday up to 16:30 it demands enough validity to reach the close **16:15 + 30 min**
-  (`broker.minutes_needed`, `renew_if_needed(need_until=)`) and renews from the refresh token. When the session cannot be made
-  to last that long (no refresh token, or Stockbit refused it) it raises ONE critical alert (`runlog.alert_once`) and then
-  **pushes the operator's phone on every run — every 10 minutes — until it is fixed**; without a session the tick feed goes
-  dark and the gap-fade jobs are blind. The refresh token's own 7-day horizon is watched too (warning under 2 days), so the
-  paste is asked for days ahead, never mid-session. The guard passes its own clock into `token_status` (mixing clocks was a
-  real bug in the first cut).
-  The relay page shows the token status and has a "Renew now" button (`POST /idx/feed/token/refresh`); pasting a bare
-  *refresh* JWT (7-day lifetime) is exchanged for a full pair on the spot, and any paste carrying a refresh token is
-  mirrored into `idx-local.env`. A re-login in the browser invalidates older refresh tokens — paste the cookie again if
-  renewal answers 401 (alert `feed`: "token renewal failed").
-  CLI `idx feed status|symbols [--liquid N|--set A,B|--disable A,B]|token [--paste FILE|-]|audit [--date]`;
-  routes `GET /idx/feed/status`, `GET|PUT /idx/feed/symbols`, `POST /idx/feed/token` (service/loopback only). Scheduler:
-  `feed_watch` every 5 min in-session (stale heartbeat / expired token → warning alert), `feed_audit` 20:10 (coverage < 95 %).
-- **Checking the stream (hardening, 2026-09-24):** `GET /idx/stream/status` -> `{connected, subscribers, last_id, dropped}`; `connected` is false until the first subscriber arrives (the listener starts lazily), so open a stream before reading it. `curl -sN 'http://127.0.0.1:8001/idx/stream?kinds=ops'` shows the raw frames. `ops/stream_load.py [clients] [rows]` is the load check: it opens N connections, writes M rows and reports delivery and latency, then deletes its own rows - measured 2026-09-24 on this box, **20 clients x 25 rows = 500/500 delivered, p50 2 ms, p95 5 ms, 0 dropped**. Two failure modes are verified rather than assumed: killing the listener's Postgres backend (`pg_terminate_backend` on the `LISTEN idx_alert` pid) reconnects within ~3 s and the **already-open browser connection keeps receiving** - no client reconnect needed; and a client that falls `QUEUE_MAX` rows behind gets `event: gap` rather than a quietly short stream. ⚠ **httpx's ASGI transport collects a response body before returning it**, so a FastAPI `TestClient` hangs forever on this route - the tests call the route coroutine directly and read its `body_iterator` with a timeout (`tests/idx/test_stream.py`).
-- **The open window (`idx/openwindow.py`, 2026-09-24):** the half hour when the live tape is streamed, and the only one - the operator's boundary is *no live feed for tomorrow's buy list; the feed appears at the open, as a placement read for names that already have a ticket*. Two jobs: `open_window_subscribe` **08:55 WIB** puts today's open ticket names on the tick feed (`feed_symbol.reason='ticket'`, additive - the standing liquid set is untouched), and `open_window` **09:00** loops until 09:30, re-reading `execwatch.read` for every open line every `POLL_S` (5 s) and putting a `kind='exec'` row on the bus **only when a line's read changes** (or every `MIN_REPEAT_S` 30 s), deduped `exec:{ticket}:{line}` so a repeat updates in place, with `valid_until` 20 s so a screen drops a stale read by itself; then `unsubscribe()` takes only the `reason='ticket'` rows off the feed. It stops on its own: no open line, a halted book, a feed quieter than `STALE_FEED_S`, 09:30, or a `pg_try_advisory_lock` already held by another process (one writer). `line_message` quotes **the side of the book the read points at** - resting at the bid quotes the bid, taking the offer quotes the offer; the wrong one is a number somebody might type in. The exec rows never go to a phone (`notify.on_alert` drops `kind='exec'`): they are true for seconds, which is useless as a notification. `registry.detail()` gained `today` (the last run's `strategy_signal` rows + that strategy's open alerts) so the strategy pages can show what it is saying right now. Tests: `tests/idx/test_openwindow.py`.
-- **The daily board (`idx/signalboard.py`, 2026-09-24):** one screen answering "what does each strategy want today", so the operator picks the one they run instead of opening five pages. Five cards, the top of the registry's ROI rank restricted to **equity-only engines that can speak on any day**: `gapfade` (1), `trend_small` (3), `combined_book` (4), `value_strict` (6), `trend_liq` (7). `book_gold` (5), `ew3` and `gem_idr` are left out because they price gold and foreign indices the desk does not trade; `trend_small_base_rate` is a yardstick; the overlays are written into a row's reason, never shown as a sixth strategy. **Bookless**: no cash, no lots, no ticket - only what the rule saw, so the board never invents a position. **Entries only**: an exit depends on what a book holds, which is the ticket's job. `trend_rows` keeps a gate refusal visible as `action='hold_back'` rather than dropping it; `value_rows` emits `action='hold'` outside the May 1-10 window, because calling an annual target list a buy order would misread the rule, and `buy` inside it; `combined_rows` halves each sleeve and tags the row with which one it came from. An engine that throws is reported as `error` on its own card - silence and "nothing today" must never look the same. `build()` ~1.2 s, so **`GET /idx/board[?as_of=]`** computes live (defaults to the newest bar date). CLI `idx board [--as-of D] [--record]`. Job `signal_board` **20:15 WIB** Mon-Fri records the rows into `idx.strategy_signal` under `book=''` (a book's own rows are written by that book's run and untouched) and raises one `kind='signal'` alert per strategy. Screens: `/signals` and `/m/signals` in `blackheart-idx-web`. Tests: `tests/idx/test_signalboard.py`.
-- **The alert bus and its stream (`idx/stream.py`, `idx/prefs.py`, `idx/signals.py`, migration 0035, 2026-09-24):** a producer INSERTs into `idx.alert` and never picks a channel - the phone push, Telegram and the browser all consume that one table. `runlog.alert(...)` now takes `kind` (signal|ticket|exec|regime|ara|risk|feed|ops), `strategy`, `code`, `book`, `user_id`, `payload`, `dedupe_key`, `valid_until` and returns the id; **all optional**, so every free-text caller is untouched and its rows read as `kind IS NULL`. A `dedupe_key` updates the open row in place (what makes a five-second execution read safe to repeat) and `valid_until` drops a stale row from `open_alerts` unless `include_expired`. A trigger fires `pg_notify('idx_alert', id)`; **`GET /idx/stream`** (SSE, `?since=`/`Last-Event-ID` replay, `?kinds=` filter) fans it out - one listener per worker, bounded per-client queues, an `event: gap` when a page falls behind, a heartbeat comment every 15 s. ⚠ **The listener is a thread, not a coroutine**: psycopg's async mode refuses to run on Windows' ProactorEventLoop, so a daemon thread holds the sync LISTEN connection and hands rows over with `call_soon_threadsafe` - same behaviour on both platforms. `GET /idx/stream/status` says whether it is connected. Scoping: a service sees everything, a person sees the desk's rows plus their own books (the legacy `book:X`/`ticket:X` job convention is read too). Mutes and quiet hours (`idx.alert_pref`, `GET|PUT /idx/alerts/prefs`) are applied **at the phone channel only** - an open page is somebody looking on purpose - and `kind='exec'` is never pushed. `idx.strategy_signal` (`idx/signals.py`) records what each strategy said on a day, ticket or no ticket; `trend_book` writes it nightly (buy / sell / hold_back) and raises one `kind='signal'` summary. New job `regime_watch` 17:10 WIB (`overlay.regime_change_alert`) puts the gate on the bus the day it turns, and only then.
-- **The desk registry (`idx/registry.py`, migration 0034, 2026-09-24):** one entry per edge the desk runs - value, trend, overlays, the gap-fade event book, execution timing, the growth filter, allocation - plus the families research closed. Two halves on purpose: the STATIC half (in code, reviewed in a commit) is what a strategy IS - rule, falsifier (what would close it), cadence, `runs_in`, a `books` filter over `idx.book` resolved live, and its evidence study ids; the IMPORTED half is what it EARNED - `registry.refresh_scorecard(conn)` reads the newest `roi_scorecard` study from `idx.study` and writes `idx.strategy_state` (status, scorecard JSON, evidence, source_study, refreshed_at). **A strategy with no study shows no performance figure** - that is the rule that keeps the page honest as research moves, so never hand-type a number into the registry. Routes `GET /idx/registry`, `GET /idx/registry/{key}` (adds the study rows and, for an annual family, its per-size history), `POST /idx/registry/refresh` (service_only); nightly job `registry_refresh` 20:05 WIB; CLI `idx registry [list|show KEY|refresh]`. The older `/idx/strategies*` routes are untouched - they serve the annual book's family picker (`strategies.CATALOG`, `pick()`), a different question. Phase 0 of `docs/superpowers/plans/2026-09-24-blackridge-strategies-and-alert-stream-plan.md`. Tests: `tests/idx/test_registry.py`.
-- **Broker distribution capture, widened (migration 0033, 2026-09-24):** the free Stockbit `order-trade/broker/distribution` endpoint serves four rolling windows (`period` = LAST_1_DAY / LAST_1_MONTH / LAST_3_MONTHS / LAST_1_YEAR, always ending on the last trading day - it cannot be moved into the past; the per-window `marketdetectors` history is Pro-only, HTTP 402), three investor splits (ALL / FOREIGN / DOMESTIC), three boards (REGULER / ALL incl. negotiated / TUNAI) and value or lots, and every payload carries the buyer->seller matrix. `broker.capture(conn, codes, matrix)` walks a matrix of those views (`MATRIX_CORE` = the 4 windows, `MATRIX_DETAIL` = 48 views), stores per-broker totals in `idx.broker_summary` (value and lots merged into one row, `period` column, board stored as `MARKET_BOARD_REGULER|ALL|TUNAI`), the matrix in `idx.broker_flow` (one row per side/broker/counterparty), the payload in `idx.broker_summary_raw` (key now includes `data_type` + `period`; pre-0033 rows carry `period = 'LEGACY'`); resumable per (name, window, view, day), one request/second. **Throttling looks like success**: after roughly a thousand requests the endpoint answers 200 with an empty payload (blank `date_info`, no matrix) and serves data again after about a minute of rest - there is no 429. `capture()` counts empties, reads three in a row as pushback, rests `empty_backoff` (60 s) and retries, and stops the run after two fruitless rests; empty answers are never stored, so the next run retries them rather than resuming over a hole. So a night takes a slice, not the whole matrix - ask for the core views first, they are the ones that cannot be recovered later. Also stops on 401/402/429. CLI `idx broker capture [--codes A,B] [--detail --min-v60 5e9] [--max N]`; the 20:20 job `broker_snapshot` now runs the core capture over the whole market (`broker.all_codes`, ~760 names) then the 48-view detail matrix over the whole market too (~36k views, far more than one night's budget - it takes the next slice each night, operator's call 2026-09-24); `--min-v60` narrows either to the liquid names (`broker.detail_codes`). Why it matters: broker history cannot be bought back, only accumulated forward - this is the panel the breakout-vs-accumulation question (study #131) is waiting for. Tests: `tests/idx/test_broker.py` (wide capture section).
+- Local DSN: `127.0.0.1`, never `localhost` (IPv6 `::1` hangs on the Docker port proxy). Postgres port: C:/Project/CLAUDE.md.
+- Never fabricate prices: a missing open stays NULL + `open_missing`; an index has no open (never fill it with the close); raw
+  prices never change, only `idx.bar.adj_factor`.
+- Opens before 2025 exist only for LQ45 (`open_missing` on ~80 % of 2020-24 rows is the source, not a bug); idx.co.id serves
+  2020-01-02 onward only (pre-2020 = Yahoo split-only cache); `NOT_IN_DAFTAR` is not delisted.
+- Reference-price basis = splits + rights/bonus, never cash dividends. Silver/gold are derived: `idx replay` rebuilds them.
+- A partial day must never blank the desk: `candidates.build` and `pack.build` anchor on `max(idx.daily_summary.trade_date)`,
+  not `max(idx.bar)`. Yahoo fallback rows (source 'yahoo') never overwrite 'idx' rows; `daily.latest_bar_date` and
+  crosscheck stay IDX-only.
+- idx.co.id gives `httpx`/`requests` a 403 and the BI-Rate page resets Python's TLS: a new fetcher goes through
+  `idx/client.py` (`curl_cffi`) or `curl`, never plain httpx/requests.
+- idx.co.id (Cloudflare) fingerprints the connection: a second 403 stops the call - never hammer (retrying feeds it). If a day
+  fails: newer `INGEST_IDX_IMPERSONATE` profile -> `INGEST_IDX_PROXY` -> wait for `bar_backfill`.
+- Keep Cloudflare quiet: annual reports <= 8 per run at 0.2 rps; `fin_backlog` skips the day when IDX challenges the client.
+- The logos CDN answers 403, not 404, for a missing logo; five 403s in a row stop the run as pushback.
+- Gates are evaluated on the audited year; TTM/quarterly warnings are for judgment, never an automatic exclusion.
+- Macro series were tested as stress-detector inputs and rejected: the macro board is for reading only.
+- ML labels and reference price are the book MID, not the last trade (last trade: 84 % 1-minute hit rate vs a real 70 %).
+  No sklearn in the venv: metrics are scipy/numpy.
+- Survivorship: names delisted 2021-2024 are largely absent from `idx.bar`; discount 120d/250d numbers.
+- Accumulate-forward data cannot be bought back: feed history starts the day the collector ran, broker history only grows
+  nightly (`broker_snapshot`). Don't break either.
+- Broker capture: core views first (they cannot be recovered later), one request/second, stop on 401/402/429. An empty 200
+  from the broker-distribution endpoint is throttling: never store empty answers.
+- Crypto PIT (`shared/pit_guards.py`): rows validated before insert, rejects counted (`rows_rejected_pit`), not dropped;
+  feature compute refuses a forward-filled value older than `max_ffill_age_hours`.
 
-- **Self-learning prediction desk (`idx/ml/`, migration 0036 `idx.ml_model` / `idx.ml_prediction` / `idx.ml_scorecard`, 2026-09-24; operator: "continuous improving learning, training setiap hari, prediksi arah + harga, 1 menit .. 1 tahun"):** ten horizons (1m 10m 30m 60m on the tick feed; 1d 5d 20d 60d 120d 250d on bars), two LightGBM models each - `dir` = P(higher), `ret` = log return -> price on the tick. `ml/daily.py` builds the daily panel from everything the desk holds, PIT-safe (bars + adj_factor, daily_summary foreign legs / closing book / frequency / float / index weight, COMPOSITE, 9 macro series as-of, fundamentals by published_at, 1-day broker-flow concentration + foreign share, sentiment, consensus as-of, disclosure-event flags, sector, cross-sectional ranks); `ml/intraday.py` builds the minute panel on the session grid (Mon-Thu 09:00-11:59 + 13:30-15:59, Fri 09:00-11:29 + 14:00-15:59) from `feed_bar_1m` + `feed_book_1m` (best level = array index 1) - **labels and reference price are the book MID, not the last trade** (the last trade alternates bid/offer; on the last trade the 1-minute "hit rate" was 84 %, on the mid it is the real 70 %/AUC 0.81, i.e. menu 28's queue-imbalance lead). `ml/loop.py`: `train(kind)` refits every (horizon, task) on the matured rows with the last N days held out (daily 40, intraday 1) and judges champion / refresh (champion's params, more data) / tune (two params moved one notch) on that same out-of-sample window; `common.choose` promotes: clear winner > TOL 0.005, refresh wins ties (newer data), a champion > 45 d old is replaced unless the challenger is worse by > 0.03; losers keep metrics, lose the artifact after 30 d. `predict_daily` (every name with 20-day value >= Rp 200 M, cut = bar close 16:00 WIB), `predict_intraday` (every live name at the last grid minute; target minute per horizon, none across the close), `evaluate` fills `realized_*`/`hit` once the horizon passed (intraday: mid at the target minute within 3 h; daily: the bar `steps` COMPOSITE trading days later, adj-factor consistent), `scorecard` = per horizon and 1/5/20/60-day window the realised hit rate vs the majority base, AUC, IC, MAE bps vs "no change". Scheduler: `ml_daily` 20:40 Mon-Fri (evaluate -> train daily ~15-25 min -> predict -> scorecard -> purge), `ml_intraday_train` 16:30, `ml_intraday_predict` every minute in session (champions cached per process, reloaded when the registry ids change), `ml_evaluate` every 10 min. CLI `idx ml train [--kind daily|intraday|all] [--no-tune] [--horizons 1d,20d] | predict | eval | scorecard | status | show CODE | board [--horizon] | models`. API `GET /idx/ml/predictions/{code}`, `/idx/ml/board?horizon=&top=`, `/idx/ml/scorecard`. Forecasts, never tickets: a 1-minute hit rate above base is worth less than the spread (menus 28-33), and the daily horizons must show a positive realised IC for months before any book reads them. **Menu 35 (study #178, 2026-09-25)** put a number on that for the 1d model: its biggest feature `bo_imb` (closing bid/offer volume imbalance) carries 15.4 % of the gain and 0.023 of the 0.136 daily rank IC, 5/5 years - real information (dropping it costs IC every year; a shuffled version does worse) - but trading the imbalance directly loses 45-83 bps a DAY net (gross close-to-close +29 %/yr, net -84 %/yr; K 10, LIQ, IDX costs). So the 1d IC is partly a spread the desk would have to pay: keep the feature, and never build a book on the 1d horizon. **Second pass (same evening, migration 0038):** validation is K purged blocks (daily 3 x 40 d, intraday up to 3 x 1 d), each block's fit set cut `steps` trading days before the block (`common.blocks`, `purge_cut`; Lopez de Prado embargo), `primary` = mean over blocks and `primary_min` stored; the 20d/60d/120d/250d labels are EXCESS log return over the COMPOSITE (`Horizon.basis='excess'`, `ml_prediction.basis`; evaluate subtracts the index's return over the same window; the CLI/API say 'vs IHSG'); probabilities are calibrated per horizon by an isotonic curve fitted on the last 60 d of realised predictions (`common.isotonic` PAV, `idx.ml_calibration`, applied at predict time, `p_up_raw` kept; needs 400 realised rows and a non-flat curve; `idx ml calibrate`, run before every training in the scheduler); `idx ml train --placebo N` refits the refresh contender N times with labels shuffled within each day and stores the percentile of the real metric (`val_metrics.placebo`; slow, not nightly). **Macro by RELEASE date (third pass):** `daily.MACRO_RELEASE` / `release_date` re-date every reading to when it is known at the 16:00 WIB cut (BI-Rate same day; US close, Brent, gold, CPO, Yahoo FX = next day; FEDFUNDS / OECD monthly / BPS CPI = first business day of the next month; BPS GDP = quarter start +4 months +5 days); `id_cpi` -> `id_cpi_yoy` (log y/y; the OECD index stops 2025-04, so the feature is stale-but-honest), `id_gdp_qoq` added; `bi_rate` = RDG event rows on top of the OECD monthly history, with the 2024-01..2025-11 gap filled from the public RDG decisions (`idx.macro` rows source `manual-rdg`: 2024-04-24 6.25, 2024-09-18 6.00, 2025-01-15 5.75, 2025-05-21 5.50, 2025-07-16 5.25, 2025-08-20 5.00, 2025-09-17 4.75). Tests `tests/idx/test_ml.py` (32). Params: `common.BASE_PARAMS` / `TUNE_SPACE`; no sklearn in the venv, metrics are scipy/numpy. **`ret` primary = per-cut rank IC (fourth pass, 2026-09-25, menu ML-7 study #173):** `common.cut_ic` / `metrics_for(..., cuts, mask)` - the mean Spearman WITHIN each cut (a day for the daily models over LIQ names = value60 >= Rp 5 bn & close >= 100, `loop._cuts`; a minute for the intraday ones, all names), its t (`ic_t`) and the cuts counted; the block-pooled Spearman is kept as `ic_pooled` (printed by `idx ml train`). Reason: the pooled number also rewards getting each day's LEVEL right, which a within-day name picker cannot monetise (ML-7: the two metrics disagreed by up to 0.06 on the same model). The realised scorecard's `ic` is the same per-cut mean (`loop._realised_ic`, grouped by `made_at`, pooled fallback when a cut is thinner than 20 rows). `dir` primary = the per-cut AUC likewise (`common.cut_auc`, `auc_pooled` kept; cuts with one class are skipped, pooled fallback). **Seed ensemble:** `common.ENSEMBLE_SEEDS` = {('5d','ret'): 3} - `common.fit(..., n_seeds)` returns a `common.Ensemble` (boosters that differ by seed, predictions averaged, one artifact string joined by `ENS_SEP`; `Model.load` detects it); ML-7 (#173) found seed averaging never hurt and is worth ~+0.01 IC at 5d for 3x the fit time. **Macro source `bps` (LIVE 2026-09-25):** `macro.fetch_bps` / `bps_find`, series `id_inflation_yoy` = BPS variable **2263** "Inflasi Tahunan (Y-on-Y) 38 Provinsi (2022=100)", national row (vervar 9999), monthly, 32 points 2024-01..2026-08 (3.19 % in Aug 2026); the App ID from webapi.bps.go.id is the `key` parameter (`INGEST_BPS_API_KEY` in idx-local.env). GOTCHAS: `model=var` needs `keyword=` to search; `model=th` rows carry `th`/`th_id` (not label/val); a datacontent key is vervar+var+turvar+th+turtahun (turtahun 13 = "Tahunan", a year figure, skipped). `daily.load_macro` converts it to the same `id_cpi_yoy` log y/y feature and prefers it over the OECD index on overlap - the two agree within 0.0-0.3 pp on their 16 common months - so the feature now runs to today instead of stalling at 2025-04. The nightly `run_macro` job pulls it with everything else. **Survivorship (checked 2026-09-25):** idx.bar keeps 989 names; only 24 are dead (6 end 2020, 15 end 2025 - the July-2025 delisting batch), i.e. names delisted 2021-2024 are largely ABSENT (history was backfilled from the current listing) - a modest upward bias in the 2020-24 training rows, mostly illiquid names below the LIQ floor; discount 120d/250d numbers, and backfilling the delisted names' bars from the IDX archive is the fix. Champions registered before this date carry the pooled `ic` in `val_metrics`; the nightly loop re-scores them on the current blocks with the new metric before comparing. **Every forecast ends ok or void (migration 0063, 2026-09-27):** `ml_prediction.realize_status` - `evaluate` sets 'ok' when it realises a row and 'void' when no price will come (intraday: no book/trade near the target 3 days later, `VOID_INTRADAY_DAYS`; daily: no bar 5 COMPOSITE sessions after the target, `VOID_DAILY_SESSIONS`; backstop 30 days past `target_at`); void rows leave the realisation queue, which is `ORDER BY made_at LIMIT 50000`, so rows that can never be realised (feed gap, suspension, delisting) no longer eat the batch. Re-queue after a backfill: `UPDATE idx.ml_prediction SET realize_status = NULL WHERE realize_status = 'void'`. No retention policy exists on `ml_prediction` (a Timescale hypertable) - every forecast is kept. `loop.record` = forecasts next to actuals, one WIB day with a per-horizon tally (n / realised / void / pending / hit / MAE vs naive) or one code; CLI `idx ml record [CODE] [--as-of D] [--horizon H] [--top N]`, API `GET /idx/ml/record?day=&horizon=&code=&limit=`.
-- **Combined book (`idx/combo_book.py`, migration 0039 `idx.book.params` / `idx.combo_watch` / `idx.combo_scorecard`, 2026-09-25; operator: live Rp 20 M on the top-3 strategies, 5 % / 5 % / 10 % of NAV per trade, to measure Stockbit execution for a year):** one book (rule `combo`), one cash pool, 20 slots, three sleeves sized from `params.sleeves`: `gap` (the deployed gap-fade scan, <= 5/day, tickets in 'gapfade'/'gapfade_exit' mode), `trend` (the deployed trend rule on `small`, trail-10, regime gate; entry at the next close), `ml` (idx.ml_prediction 5d score, cost-aware: signalled when EMA-3 excess > 2x the name's round trip, bought only when the price confirms >= signal close x 1.05 within 10 d, sold on score swap / 60-day expiry). Every line carries `sleeve:<name>` in flags; positions per sleeve are derived from filled lines. Jobs: `combo_plan` 21:10/21:40 (after `ml_daily`), `combo_preopen` 08:30, `combo_gap_entry` 09:00/09:05, `combo_confirm` every 2 min in session (watch level hit on the last feed trade -> one-line buy ticket; live draft + push, paper filled at the limit), `combo_gap_exit` 15:50, `combo_nudge` 16:30/19:30, `combo_expire` 20:30 (unexecuted live lines -> skipped 'missed' + nightly scorecard: per sleeve fills / misses / slippage bps vs ref_close / delay / P&L vs the backtest yardstick). Live tickets are two-key drafts; the paper twin (`paper-edbb01`) is the yardstick for `live-fae554`. CLI `idx combo create|set|plan|preopen|confirm|gap-entry|gap-exit|expire|nudge|scorecard|status`. Backtest: studies #166-#168 (`research/idx_combo_rupiah.py`): Rp 20 M -> 96.5 M 2022-26, CAGR 39.8 %, Sharpe 1.86, mDD -21.5 %, median calendar year +20 %. **2026-09-25 (operator: 'coba a dan b'):** `params.cash_floor` (0.30 on both books; menu 34 #177: mDD -21 -> -15 % for -3.6 pp CAGR) - `invested_ok` holds back any NEW buy (trend line, ML confirmation, gap line) that would take the invested share above 1 - floor (`floor_held` in the plan / gap result; an ML watch blocked by the floor stays pending); and `params.ml.confirm_rules` = [[0.05,10],[0.08,10],[0.10,10],[0.08,5]] (ML-8 #175 ens4) - one `combo_watch` row per rule (migration 0041: `rule`, `size_frac`, unique (book, code, signal_date, rule)), each rule's fill tops the name up to the cumulative share of the rules that fired (`triggered_share`; a dust share is marked triggered and rolls into the next rule), a second rule on a name already held from the SAME signal adds to it without a new slot. CLI `idx combo set --cash-floor 0.30 --ml-confirm '5/10,8/10,10/10,8/5'|single`. Watches pending from before the switch keep rule '+5/10' / share 1 until they expire. Tests `tests/idx/test_combo_book.py` (11).
-- **ARA watch (`idx/ara.py`, migration 0032 `idx.ara_watch` / `idx.ara_touch`, 2026-09-23; research menus 16, ML-3, 34 = studies #56, #57, #101):** tomorrow's ARA touches are predictable from today's bars (walk-forward AUC 0.86-0.92, top-5/day precision 7-18 %) but not buyable (the names that keep going open locked) - so this is information, never a ticket. Scheduler `ara_watch` 20:05 WIB: LightGBM P(touch next session) on bar-only features (ret1/5/20, lock streak, days since the last touch, volume ratio, value, band, range position, age), top-10 + every held name with its ARA price (35/25/20 % over the close, rounded down to the tick) -> `idx.ara_watch`, one info alert + push. Scheduler `ara_touch` every 2 min 08:58-16:01: held/watched names in the feed whose day high reached the limit -> state `locked` (no offer) / `at_ara` (sellers queued) / `faded` (trading under it) -> `idx.ara_touch`, one warning alert per state change (a held name's alert is `book:<book>`, so it reaches the owner's phone) carrying the study-#101 numbers: a locked close is followed by +431 bps next day vs the ARA price (liquid, n 440), a faded touch closes -661 bps under it (n 231). CLI `idx ara watch|show|touch|today`; API `GET /idx/ara/watch`, `GET /idx/ara/touch`. Tests `tests/idx/test_ara.py`. **Prediction vs actual (migration 0062, 2026-09-27; operator: "pencatatan lengkap dari prediksi dan aktualnya"; measurement only, inside the ARA freeze):** `ara.settle` runs first in the 20:05 job (in-process, before the model subprocess; a failure alerts and never stops the list) and fills, for every stored score of every earlier run whose next session's official summary is in (>= 80 % of the run day's rows), `ara_watch.next_date / next_prev / next_ara_px` (the limit from IDX's `previous` that session, so corporate actions are followed) `/ next_open / high / low / close / volume / offer_volume / touched / locked / ret_close / ret_high / outcome` (lock | touch | none | no_trade | no_bar) - labels identical to the model's LOCK1/TOUCH1 (test `test_outcome_labels_are_the_models_training_labels`) - and one `idx.ara_scorecard` row per run: top-5/10/20 locks + touches + settled counts, precision@k, recall20 of the universe's locks (universe = `coverage()`'s scoring mask on the bar day), base rate, listed / buyable locks, mean P of the top 10 (calibration check), AUC + Brier only for whole-ranking runs (2026-09-25 on). Runs 09-23 (old list, model NULL, not pooled) and 09-24 stored only the list, so they have precision but no AUC; no reconstruction was backfilled. CLI `idx ara settle [--run-date D] [--force] | record [--run-date D | --code X] [--all] | scorecard [--days N]`; API `GET /idx/ara/record?run_date=&code=&all_rows=`, `GET /idx/ara/scorecard?days=`.
-- **Gap-fade book (`idx/gapfade.py`, research menu 29b, 2026-09-22)** — the desk's first intraday book, PAPER ONLY (`paper_gapfade`,
-  Rp 100 M, K=5, `rule='gapfade'`). Rule: a name whose **opening print** is <= -7 % against the previous close is bought at the open
-  + 1 tick (deepest gaps first, slot = NAV/K) and sold into the **same** closing auction (close - 1 tick); nothing is ever held
-  overnight. Jobs: `gapfade_entry` 09:00 + 09:05 retry (the opening auction prints reach the feed at ~08:58 and are the official
-  open for ~90 % of names), `gapfade_exit` 15:50 (sell ticket), and `gapfade.settle` inside the evening daily chain (fills the
-  exit at the official close). CLI `idx gapfade scan|entry|exit|settle|books|init`. Guards: feed coverage (>= 50 opening prints,
-  else no trading + alert), stale bars, **no offer = skip** (a name locked at auto-rejection down cannot be bought — the mirror of
-  the ARA trap), leftover positions swept at the next open with a warning, one entry + one exit ticket per day under the paper
-  filler's advisory lock, halt respected, live books drafted not filled (two-key). ★ **The daily summary's "open" is the first
-  trade of the day, not the opening auction** — on 2026-09-22 AALI's "open" printed at 10:45 — so the live book trades a stricter
-  subset than the backtest (first print inside 08:55-09:10 only); the paper record measures that difference. Tests `tests/idx/test_gapfade.py`.
+**Feed, tokens, secrets**
+- Feed data is the operator's personal data: never into `/pub`, never into Blackridge.
+- Stockbit tokens live ONLY in `idx.feed_token`; `idx-local.env` holds no Stockbit token (written only as an emergency copy
+  when the DB write fails). Refresh tokens rotate, so a lost pair is a lost session; a browser re-login kills older ones.
+- `token_guard` passes its own clock into `token_status` (mixing clocks was a real bug); the refresh token's 7-day horizon
+  warns under 2 days.
+- Killing the collector blinds the desk (no opening prints: gap-fade refuses, ARA watch sees nothing). `Stop-ScheduledTask`
+  leaves the python child holding the advisory lock. A second collector that finds the lock held exits 0 on purpose: a
+  non-zero exit would arm restart-on-failure every 2 minutes.
+- Firebase service-account JSON (`IDX_FCM_SERVICE_ACCOUNT`): placed by the operator, never through chat or git. `idx-local.env`
+  (`IDX_JWT_SECRET`, `INGEST_BPS_API_KEY`, ...) is gitignored.
 
-- **One-tap fill (`idx/fillmatch.py`, 2026-09-22)** — recording fills by hand is the desk's biggest daily chore. For each
-  still-open line of an **issued** ticket the tape says what the market actually traded inside that line's limit today
-  (`idx.feed_trade`, from 09:00): `propose()` returns lots + price (VWAP snapped the conservative way — a buy rounds up, a sell
-  down — and never worse than the limit) with a confidence (high = the flow was >= 10x the line, medium >= 3x, low under that),
-  the eligible volume, the print count and the window. It cannot know which prints were the operator's (the feed carries no
-  account), so it only ever proposes; the write still goes through `ticket.fill_line` (two-key, journal, book mark). A draft,
-  closed or cancelled ticket proposes nothing. Route `GET /idx/ticket/{id}/suggest`, CLI `idx suggest [--ticket N | --book B]`,
-  phone: the card under the line being worked on `/m/ticket`. Tests `tests/idx/test_fillmatch.py`.
+**Alerts and notifications**
+- Producers INSERT into `idx.alert`, never pick a channel. Scheduled checks use `runlog.alert_once` (never `runlog.alert`), a
+  message stable for the whole incident, and resolve their own alert (`runlog.resolve`) when it clears.
+- The alert sweep never sweeps warnings or criticals. A price level fires once until `idx levels reset CODE`.
+- Book alerts reach the book owner's phones; desk alerts `IDX_OPS_NOTIFY_EMAIL`'s (unset = dropped). `kind='exec'` is never
+  pushed; mutes and quiet hours apply at the phone channel only. Nothing in push raises into the job that notified.
+- The SSE listener stays a thread, not a coroutine (psycopg's async mode refuses Windows' ProactorEventLoop).
+  `/idx/stream/status` says `connected` false until the first subscriber: open a stream before calling it DOWN.
 
-## Gotchas
-- **`api/` is dead.** The served app is `workers.server:app`; the old `api/` app factory was unused. CI's `test_server_app.py` exists precisely because the old suite tested the dead app while the served app shipped broken ("CI green, served app broken").
-- **Mutation routes are unauthenticated** unless `INGEST_AUTH_TOKEN` is set — never publish `/pull` or `/compute` on a public interface (the loopback+Tailscale bind is the safeguard).
-- **Liquidations are not backfillable** — the `binance_liquidation` lifespan worker is the only source of those rows; don't interrupt it carelessly. Default OFF (`INGEST_LIQUIDATION_STREAM_ENABLED`).
-- **`deribit_options` has no free history** — each hourly snapshot is the only copy ever captured (plant-and-accumulate). Default OFF (`INGEST_DERIBIT_OPTIONS_ENABLED`).
-- **PIT discipline** (`shared/pit_guards.py`): every row is validated before insert — future event_time, inverted publisher timestamp, and out-of-window backfill are rejected and counted as `rows_rejected_pit`. FRED uses lag-aware windows so monthly series keep streaming. Feature compute refuses to carry a forward-filled value older than `max_ffill_age_hours`.
+**Service, routes, deploy**
+- Push to `master` (C:/Project repo) runs CI + auto-deploy to the VPS (gated by `vars.DEPLOY_ENABLED`, false since 2026-09-24:
+  the VPS stack is off on purpose, pushes run test + build only; the desk runs on the local PC). The VPS container is
+  Docker-run-managed, NOT compose: `docker compose up` creates a conflicting container (OPS.md).
+- The CI deploy pulls the image BEFORE removing the old container (pull-then-rm caused a 53-min outage + lost unbackfillable
+  liquidation events). To touch the live container, recreate it by hand with the same `docker run` + env_file.
+- Mutation routes are unauthenticated unless `INGEST_AUTH_TOKEN` is set: never publish `/pull` or `/compute` on a public
+  interface; the loopback+Tailscale bind is the safeguard, so never widen it. Research writes are `service_only`. With no
+  ingest token configured (this box, tests) a credential-less loopback caller counts as an unscoped service.
+- Every personal `/idx/*` route takes a `Caller` (`who.caller_of`): an account is scoped to its own
+  books/tickets/journal/watchlist/phones (`own_book` -> 404). A route without it leaks one user's data to another.
+- Test books stay ownerless.
+- Desk-account routes `/api/v1/users/*` are open by design and outside `/idx`: they never need `X-Ingest-Token`.
+- The served app is `workers.server:app`; `api/` is dead. Keep `test_server_app.py`: the old suite tested the dead app while
+  the served app shipped broken.
+- Liquidation stream and `deribit_options` snapshots cannot be backfilled: don't interrupt them.
+- `/idx/stream` hangs a FastAPI `TestClient` forever: tests call the route coroutine directly.
+- PowerShell: quote the comma list (e.g. `idx logos --codes A,B`).
 
-- Web routes for the v3 screens: `GET /idx/tickets?book=&days=`, `/idx/combo/{watch,scorecard,positions,strategies}`,
-  `/idx/combo/catalog` (bookless: the Add-strategy sheet and the New-portfolio modal), `/idx/search`, `/idx/stock/{code}`.
-  `/idx/books` also returns `capital` (what was put in, reconstructed from cash + every fill - the first NAV point is
-  NOT the capital), `halted_at`, `halt_reason` and `strategies` (a combined portfolio's live sleeve count).
+## Module map (`src/blackheart_ingest/`)
+- `workers/server.py` served app; `sources/`, `features/`, `inference/`, `schemas/` crypto-era
+- `idx/` (`<name>.py`): cli, scheduler (CLI, jobs) · client, etl, publish, jobs/, migrations/ (bronze→silver→
+  `market_data`) · fin_parse, fin_store, annual, macro, news, consensus, logos (fundamentals, macro, news) · feed/, broker
+  (feed, tokens, broker capture) · book, ticket, fillmatch, levels, openwindow (books, tickets, fills) · combo_book,
+  gapfade, trend_book · metrics, candidates, strategies, overlay, registry, signalboard (strategies) · ml/, agent, ara ·
+  runlog, stream, notify, push, prefs, signals (alerts, SSE, push) · who, accounts, chart · research_store, pack, card,
+  dt_watch, snapshot (research) · killrules, risk, regime_monitor, intents (MODEL_INVENTORY.md)
+
+## Where the detail lives (`docs/agent-context/`)
+| file | read it when |
+|---|---|
+| [ARCHITECTURE.md](docs/agent-context/ARCHITECTURE.md) | layout, routes, IDX CLI, callers/scoping, accounts, chart, v3 web routes |
+| [OPS.md](docs/agent-context/OPS.md) | deploy, restarts, env settings, safety net, tests |
+| [JOBS.md](docs/agent-context/JOBS.md) | a scheduled job; what runs when (WIB) |
+| [DATA.md](docs/agent-context/DATA.md) | idx.co.id client/Cloudflare, backfill, Yahoo fallback, schema, workbooks, annual, macro, news, logos |
+| [FEED.md](docs/agent-context/FEED.md) | tick feed, its Windows task, Stockbit tokens, broker capture |
+| [ALERTS.md](docs/agent-context/ALERTS.md) | alerts, the SSE stream, phone push |
+| [BOOKS_TICKETS.md](docs/agent-context/BOOKS_TICKETS.md) | books, tickets, tick/ARA/ARB rules, levels, fills, open window, combo, gap-fade |
+| [STRATEGIES.md](docs/agent-context/STRATEGIES.md) | candidates, overlays + regime gate, strategy catalog, registry, daily board |
+| [ML.md](docs/agent-context/ML.md) | prediction desk (`idx/ml/`), online agent |
+| [ARA.md](docs/agent-context/ARA.md) | ARA watch, touches, prediction vs actual, the ARA freeze |
+| [RESEARCH.md](docs/agent-context/RESEARCH.md) | study store, evidence, pack, C1 watch, study/menu index |
+| [CRYPTO_LEGACY.md](docs/agent-context/CRYPTO_LEGACY.md) | crypto-era sources, features, inference, PIT guards |
+| [docs/MODEL_INVENTORY.md](docs/MODEL_INVENTORY.md) | before changing a live parameter or quoting a strategy number |

@@ -12,6 +12,8 @@ superpowers/
 logs/
 tmp/
 docs/
+# ...but a service's own docs are source: the agent-context topic files CLAUDE.md points to (phase 1, 2026-09-28)
+!/blackheart-ingest/docs/
 .research_run_state.json
 screenshot/
 

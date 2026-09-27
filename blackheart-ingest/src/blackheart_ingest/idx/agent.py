@@ -514,7 +514,7 @@ def report(conn: psycopg.Connection) -> dict[str, Any]:
     return out
 
 
-# Judgement (revised 2026-09-27, before the first live decision; see blackheart-ingest/CLAUDE.md). One observation per
+# Judgement (revised 2026-09-27, before the first live decision; see docs/agent-context/ML.md "Judgement rule"). One observation per
 # session in which BOTH agents traded: mean reward of the ts agent's filled trades minus the random agent's. Wald SPRT,
 # H0 mean 0 vs H1 mean +1.0 pp, sd fixed at 3.28 pp (paired single-trade difference, 6,683 warm-start samples), alpha 0.05,
 # beta 0.20 -> about 60 such sessions if the edge is real, about 34 if it is not. +0.5 pp (the old bar) would need ~240.

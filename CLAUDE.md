@@ -18,12 +18,12 @@ then jump to the specific repo's `CLAUDE.md`.
 | `blackheart-trading-engine/` (research profile) | — | Research/backtest JVM (same codebase, `research` profile) | Java | 8081 | (same repo) |
 | `blackheart-research-orchestrator/` | yes | Agent-facing research API (tick loop, gates, queue) | Python / FastAPI | 8082 | ✅ |
 | `blackridge-frontend/` | yes | Operator dashboard | Next.js 14 / TS | 3000 | ✅ + `docs/agent-context/` (5 files) |
-| `blackheart-ingest/` | no (this repo) | Macro/sentiment + market-data ingest, feature compute; **IDX data plane** (`idx/`, schema `idx`, self-scheduled) | Python | 8001 | ✅ |
+| `blackheart-ingest/` | no (this repo) | Macro/sentiment + market-data ingest, feature compute; **IDX data plane** (`idx/`, schema `idx`, self-scheduled) | Python | 8001 | ✅ map + `docs/agent-context/` (12 files) |
 | `blackheart-inference/` | no (this repo) | ML inference sidecar (reads model_registry, writes signal_history) | Python / FastAPI | 8000 | ✅ |
 | `blackheart-train/` | yes | ML training worker (feature_values → LightGBM artifacts) | Python | — | ✅ |
 | `blackheart-exchange-gateway/` | yes | Binance/exchange connectivity gateway (`blackheartjs`) | Node / TS | 8088 | ✅ |
 | `blackheart-equity/` | yes | Equity paper/live executor — Alpaca, reach-target book loop | Java 21 / Spring Boot | 8090 | ✅ + `docs/agent-context/` |
-| `blackheart-idx-web/` | yes | **Blackridge** (the IDX desk app, formerly Papan; not `blackridge-frontend`) — standalone operator app + Android shell for the IDX value desk (proxies `/idx/*` to ingest; platform accounts via the trading JVM); public `https://a8.tailbf9662.ts.net/blackridge` | Next.js 14 / TS | 3010 | ✅ + `docs/agent-context/` |
+| `blackheart-idx-web/` | yes | **Blackridge** (the IDX desk app, formerly Papan; not `blackridge-frontend`) — standalone operator app + Android shell for the IDX value desk (proxies `/idx/*` to ingest; desk accounts on the ingest worker's `/api/v1/users`); public `https://a8.tailbf9662.ts.net/blackridge` | Next.js 14 / TS | 3010 | ✅ map + `docs/agent-context/` (6 files) |
 | `superpowers/` | yes | Claude Code skills/plugins (external OSS, not platform code) | — | — | ✅ |
 
 Infra (local `docker-compose.yml`, 22 services): Postgres/TimescaleDB `5432` (+ standby `5434`),
