@@ -50,6 +50,11 @@ PARTICIPATION = (0.10, 0.20)
 IMPACT_Y = 0.7
 COMPOSITE = "COMPOSITE"
 SHOCK = -0.10
+SMALL_CAP = "IDXSMC-LIQ"
+# designed two-factor scenarios (Track A4, study #385): name return = b_COMPOSITE x F1 + b_smallcap_spread x F2, the spread being
+# IDXSMC-LIQ minus COMPOSITE; betas from the same window as everything else. The book's names are small caps, so a small-cap
+# unwind that IHSG barely shows (S2) is the scenario a COMPOSITE-only shock misses.
+SCENARIOS = (("S1 foreign exodus", -0.15, -0.10), ("S2 small-cap unwind", -0.05, -0.25), ("S3 2020 x 1.25", -0.47, -0.10))
 LOT = 100
 # IDX-IC sector letter (idx.listing.sector "E. Consumer Cyclicals") -> sector index code in idx.index_daily
 SECTOR_INDEX = {"A": "IDXENERGY", "B": "IDXBASIC", "C": "IDXINDUST", "D": "IDXNONCYC", "E": "IDXCYCLIC", "F": "IDXHEALTH",
@@ -246,6 +251,21 @@ def worst_move(comp: pd.Series, days: int = 5) -> dict[str, Any] | None:
     return {"start": s.date(), "end": t.date(), "composite": float(r[t])}
 
 
+def two_factor_betas(R: pd.DataFrame, mkt: pd.Series, spread: pd.Series) -> dict[str, tuple[float, float]]:
+    """Per name: OLS betas on COMPOSITE and on the small-cap spread (IDXSMC-LIQ - COMPOSITE). Few joint days -> (1, 1)."""
+    out = {}
+    for c in R.columns:
+        y = R[c]
+        ok = y.notna() & mkt.notna() & spread.notna() & (y != 0)
+        if ok.sum() < 60:
+            out[c] = (1.0, 1.0)
+            continue
+        X = np.column_stack([np.ones(int(ok.sum())), mkt[ok].to_numpy(), spread[ok].to_numpy()])
+        b = np.linalg.lstsq(X, y[ok].to_numpy(), rcond=None)[0]
+        out[c] = (float(b[1]), float(b[2]))
+    return out
+
+
 def replay(values: pd.Series, px: pd.DataFrame, win: dict[str, Any], betas: pd.Series) -> dict[str, Any]:
     """Book P&L (Rp) holding today's values through a historical window; names without a price at the window start
     move by beta x COMPOSITE (flagged)."""
@@ -358,6 +378,11 @@ def compute_report(inp: Inputs) -> dict[str, Any]:
                            "start": str(st["start"]), "end": str(st["end"])})
     shock = float(sum(values[c] * (0 if pd.isna(betas[c]) else betas[c]) * SHOCK for c in codes))
     stress.append({"name": f"COMPOSITE {SHOCK:+.0%} via beta", "composite": SHOCK, "pnl": shock, "pnl_pct": shock / nav, "proxied": []})
+    if SMALL_CAP in idx_px.columns:
+        b2 = two_factor_betas(R, mkt, idx_px[SMALL_CAP].pct_change().reindex(R.index) - mkt)
+        for name, f1, f2 in SCENARIOS:
+            pnl = float(sum(values[c] * max(-1.0, b2[c][0] * f1 + b2[c][1] * f2) for c in codes))
+            stress.append({"name": name, "composite": f1, "smallcap_spread": f2, "pnl": pnl, "pnl_pct": pnl / nav, "proxied": []})
 
     gross = float(pos["value"].sum())
     return {**base, "status": "ok", "nav": nav, "gross": gross, "gross_pct": gross / nav, "n_positions": len(rows),
@@ -434,6 +459,15 @@ def render(r: dict[str, Any]) -> str:
                  f"({_p(s['pnl_pct'], 1, True)}){px}")
     if r["flags"]:
         L += ["", "FLAGS"] + [f"  {f}" for f in r["flags"]]
+    m = r.get("market") or {}
+    if m:
+        a_, g = m.get("arb") or {}, m.get("regime") or {}
+        L += ["", "MARKET"]
+        if a_.get("worst_decline") is not None:
+            L.append(f"  price limit   {a_['state']:<8} worst daily decline {a_['worst_decline'] * 100:.1f} % over {a_['sessions']} sessions"
+                     + ("" if a_.get("gap_fade_possible", True) else "  -> the gap-fade cannot trigger"))
+        if g.get("p_high_vol") is not None:
+            L.append(f"  volatility    {g['state']:<8} P(high-vol) {g['p_high_vol']:.2f}  ({g.get('note', '')})")
     return "\n".join(L)
 
 
@@ -502,7 +536,7 @@ def load_inputs(conn: Any, book: str, as_of: date | None = None) -> Inputs:
         liq = pd.DataFrame(columns=["code", "adv20", "bid", "offer", "close"])
     index = _q(conn, """SELECT trade_date, index_code, close FROM idx.index_daily
                         WHERE (index_code = %s OR index_code = ANY(%s)) AND trade_date <= %s ORDER BY trade_date""",
-               (COMPOSITE, list(SECTOR_INDEX.values()), as_of))
+               (COMPOSITE, [*SECTOR_INDEX.values(), SMALL_CAP], as_of))
     return Inputs(book=book, as_of=as_of, cash=cash, positions=pos[["code", "shares", "close", "sector"]] if codes else pos,
                   bars=bars, index=index, liquidity=liq,
                   meta={"label": b["label"].iloc[0], "archived": b["archived_at"].iloc[0] is not None})
@@ -546,6 +580,8 @@ def report(conn: Any, book: str, as_of: date | None = None) -> dict[str, Any]:
     """One book's report as plain JSON-able data with its `breaches` (the API and the CLI call this)."""
     r = _jsonable(compute_report(load_inputs(conn, book, as_of)))
     r["breaches"] = breaches(r)
+    from . import regime_monitor  # context: price-limit regime + volatility regime (Track A4)
+    r["market"] = _jsonable(regime_monitor.snapshot(conn, as_of))
     return r
 
 

@@ -27,6 +27,9 @@ Schedule (WIB):
                                       same-day stop, the gap-fade closing exit; one job for every intraday rule
   16:30, 19:30    combo_nudge         lines still open on today's live tickets; 20:30 combo_expire = unexecuted lines marked missed + scorecard + kill rules (idx/killrules.py)
   18:00 Mon-Fri   alert if today's bar has still not landed (holiday, or IDX late)
+  Mon 06:40       exchange_calendar   the exchange's holiday calendar (idx/exchange_calendar.py); every job gates on it
+  22:30 daily     db_backup           idx schema backup (idx/backup.py); Sun 03:00 db_backup_full; 1st Sun 05:00 restore_test
+  every event     heartbeats          idx.job_heartbeat via a listener; checked by the separate `idx watchdog` Windows task
   20:30 Mon-Fri   announce_recent     all-emiten disclosures for the last 3 days -> idx.announcement / idx.event
   21:00 Mon-Fri   fundamentals        discover current fiscal year -> download pending workbooks (universe) -> parse
   09:00 Sat       fundamentals_full   same for the previous fiscal year too (late/restated filings)
@@ -63,6 +66,7 @@ from . import (
     trend_book,
 )
 from .client import BudgetExceeded, CircuitOpen, IdxClient, IdxFetchError
+from .exchange_calendar import is_trading_day
 from .jobs import announce as job_announce
 from .jobs import bar_open as job_bar_open
 from .jobs import crosscheck as job_crosscheck
@@ -101,7 +105,7 @@ def run_universe() -> None:
 def run_daily_chain(yahoo_dir: Path | None = None) -> None:
     """Called every 15 min in the publish window; no-op once today's bar is in."""
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         if job_daily.latest_bar_date(conn) == d:
@@ -236,7 +240,7 @@ def check_rebalance_due() -> None:
     that has none yet for this year's run. It used to watch only the book called 'live', which was archived in 2026-09."""
     from . import ticket
     d = today_wib()
-    if not (d.month == 5 and d.day <= 10) or d.weekday() >= 5:
+    if not (d.month == 5 and d.day <= 10) or not is_trading_day(d):
         return
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -273,7 +277,7 @@ def run_broker_snapshot() -> None:
 
     from . import broker
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         if not (_os.environ.get(broker.TOKEN_ENV) or broker.newest_refresh_token(conn=conn)):
@@ -338,7 +342,7 @@ def run_gapfade_entry() -> None:
     The opening auction has just matched and its prints are in the tick feed; a broken feed trades nothing (gapfade.scan)."""
     from . import gapfade
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         for bk_ in gapfade.gapfade_books(conn):
@@ -354,7 +358,7 @@ def run_gapfade_exit() -> None:
     """15:50 WIB: sell everything a gap-fade book holds into the closing auction. Nothing is held overnight by construction."""
     from . import gapfade
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         for bk_ in gapfade.gapfade_books(conn):
@@ -391,9 +395,9 @@ def run_token_guard() -> None:
     from .providers.base import PROVIDERS, NotSupported, ProviderError
     now = datetime.now(WIB)
     d = now.date()
-    trading = d.weekday() < 5 and now.time() <= SESSION_END
+    trading = is_trading_day(d) and now.time() <= SESSION_END
     need_until = session_end_wib(d) + timedelta(minutes=TOKEN_MARGIN_MIN) if trading else None
-    nagging = d.weekday() < 5 and NAG_FROM <= now.time() <= NAG_TO
+    nagging = is_trading_day(d) and NAG_FROM <= now.time() <= NAG_TO
     with get_connection() as conn:
         active_feed = registry.active(conn, "feed")
         for provider in PROVIDERS:                                          # every provider guards its OWN session (review #2)
@@ -440,7 +444,7 @@ def run_ara_watch() -> None:
     import subprocess
     import sys
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     cmd = [sys.executable, "-m", "blackheart_ingest.idx.cli", "ara", "watch"]
     try:
@@ -508,7 +512,7 @@ def run_ticket_nudge() -> None:
     the twice-a-day-forever it was before."""
     from . import notify, runlog, ticket
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         stale = ticket.stale_tickets(conn, d)
@@ -535,7 +539,7 @@ def run_ops_digest() -> None:
     (idx/alert_policy.deferred); one that did not is a system error a person has to fix."""
     from . import alert_policy, notify
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         rows = [a for a in runlog.open_alerts(conn, 200) if alert_policy.deferred(a)]
@@ -557,7 +561,7 @@ def run_track_report() -> None:
     from . import book as bk
     from . import track as tk
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         books = [b for b in bk.list_books(conn)
@@ -586,7 +590,7 @@ def run_feed_audit() -> None:
     a subscribed name under 95 % is a warning."""
     from .feed import store as fs
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         rows = fs.audit_day(conn, d)
@@ -630,7 +634,7 @@ def run_daily_fallback() -> None:
     today's prices; the chain keeps trying IDX until 20:00 and the watcher/backfill replaces the rows later."""
     from .metrics import universe_codes
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         if job_daily.latest_bar_date(conn) == d:
@@ -757,7 +761,7 @@ def run_bar_backfill(days: int = 10) -> None:
 def run_open_window_subscribe() -> None:
     """08:55 WIB: put today's ticket names on the tick feed, so the book is streaming when the auction matches."""
     from . import openwindow as ow
-    if today_wib().weekday() >= 5:
+    if not is_trading_day(today_wib()):
         return
     with get_connection() as conn:
         res = ow.subscribe(conn)
@@ -768,7 +772,7 @@ def run_open_window() -> None:
     """09:00-09:30 WIB: stream a placement read for every open ticket line (study #99's execution timing) onto the
     alert bus, then take the ticket names off the feed. One writer only - the loop holds an advisory lock."""
     from . import openwindow as ow
-    if today_wib().weekday() >= 5:
+    if not is_trading_day(today_wib()):
         return
     with get_connection() as conn:
         try:
@@ -781,6 +785,8 @@ def run_open_window() -> None:
 def run_regime_watch() -> None:
     """One alert on the day the index regime turns (overlay.regime_change_alert); silence in between."""
     from . import overlay as ov
+    if not is_trading_day(today_wib()):
+        return
     with get_connection() as conn:
         d = job_daily.latest_bar_date(conn)
         if d is None:
@@ -794,6 +800,8 @@ def run_signal_board() -> None:
     operator gets one alert per strategy instead of having to open five pages. Entries only; a book's own
     rows are written by that book's run and are not touched here."""
     from . import signalboard
+    if not is_trading_day(today_wib()):
+        return
     with get_connection() as conn:
         d = job_daily.latest_bar_date(conn)
         if d is None:
@@ -807,10 +815,20 @@ def run_risk_check() -> None:
     """Nightly risk report of every real (live) book that holds names; a book past risk.LIMITS gets one warning a day
     listing its breaches. Read-only on the books; runs after the daily chain has marked them."""
     from . import risk, ticket
+    if not is_trading_day(today_wib()):                             # an exchange holiday: nothing new to measure
+        return
     with get_connection() as conn:
         d = job_daily.latest_bar_date(conn)
         if d is None:
             return
+        try:                                                         # price-limit + volatility regime (Track A3/A4): warns on a narrow ARB
+            from . import regime_monitor
+            snap = regime_monitor.run(conn, d)
+            logger.info("idx regime %s: arb %s (worst %s), vol %s", d, snap.get("arb", {}).get("state"),
+                        snap.get("arb", {}).get("worst_decline"), snap.get("regime", {}).get("state"))
+        except Exception:
+            conn.rollback()
+            logger.exception("idx regime monitor failed")
         for book in risk.active_books(conn):
             if not ticket.is_live(book):
                 continue
@@ -898,7 +916,7 @@ def run_fin_backlog(limit: int = 60) -> None:
 
 def check_no_bar() -> None:
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         if job_daily.latest_bar_date(conn) != d:
@@ -926,7 +944,7 @@ def run_ml_daily() -> None:
     from .ml import common as mlc
     from .ml import loop as ml
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         try:
@@ -951,7 +969,7 @@ def run_ml_intraday_train() -> None:
     """16:30 WIB Mon-Fri: retrain the minute horizons on every feed day (the last day is the validation window)."""
     from .ml import loop as ml
     d = today_wib()
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return
     with get_connection() as conn:
         try:
@@ -1015,20 +1033,20 @@ def _combo_each(fn_name: str, **kw) -> None:
 
 def run_combo_plan() -> None:
     """21:10 WIB Mon-Fri, after the ML desk has scored the close: tomorrow's plan per combo book (sells, trend buys, ML watches) + push."""
-    if today_wib().weekday() >= 5:
+    if not is_trading_day(today_wib()):
         return
     _combo_each("plan")
 
 
 def run_combo_preopen() -> None:
     """08:30 WIB Mon-Fri: the day's plan and the ML levels on the phone before the open."""
-    if today_wib().weekday() >= 5:
+    if not is_trading_day(today_wib()):
         return
     _combo_each("preopen")
 
 
 def run_combo_gap_entry() -> None:
-    if today_wib().weekday() >= 5:
+    if not is_trading_day(today_wib()):
         return
     _combo_each("gap_entry")
 
@@ -1054,17 +1072,80 @@ def run_session_tick() -> None:
 
 
 def run_combo_nudge() -> None:
-    if today_wib().weekday() >= 5:
+    if not is_trading_day(today_wib()):
         return
     _combo_each("nudge")
 
 
 def run_combo_expire() -> None:
     """20:30 WIB: lines not executed on their day are marked missed; the scorecard is recomputed."""
-    if today_wib().weekday() >= 5:
+    if not is_trading_day(today_wib()):
         return
     _combo_each("expire")
     _combo_each("kill_check")                        # scorecard (stored) + the pre-registered kill rules; alert on a live breach
+
+
+def run_tca_weekly() -> None:
+    """Friday 20:50 WIB: the weekly execution (TCA) report of each live combo book, pushed (idx/tca.py, Track A5)."""
+    from . import combo_book, tca
+    with get_connection() as conn:
+        for bk in combo_book.combo_books(conn):
+            try:
+                tca.weekly(conn, bk)
+            except Exception:
+                conn.rollback()
+                logger.exception("tca weekly %s failed", bk)
+
+
+def run_exchange_calendar() -> None:
+    """Monday 06:40 WIB: re-read the exchange's holiday-calendar announcements (a new year's calendar appears around September,
+    amendments any time), then check the calendar against the traded history (idx/exchange_calendar.py)."""
+    from . import exchange_calendar as xc
+    from .client import IdxClient
+    with get_connection() as conn:
+        with IdxClient() as cl:
+            rep = xc.sync(conn, cl)
+        v = xc.validate(conn)
+        logger.info("idx exchange calendar: %s rows from %s announcement(s); years %s; validation %s", rep["rows"], len(rep["announcements"]),
+                    v["years"], "ok" if v["ok"] else v)
+        nxt = today_wib().year + 1
+        if not v["ok"] or (today_wib().month >= 11 and nxt not in v["years"]):
+            runlog.alert(conn, "warning", "watchdog", f"[calendar] exchange holiday calendar needs a look: {'' if v['ok'] else v} "
+                         + (f"no {nxt} calendar yet" if nxt not in v["years"] else ""), kind="ops", dedupe_key=f"calendar:{today_wib()}")
+
+
+# ---- backups (idx/backup.py, Track A2) -------------------------------------------------------------------------------
+def _backup_job(what: str, fn) -> None:
+    from . import runlog
+    with get_connection() as conn:
+        try:
+            rep = fn(conn)
+            logger.info("idx %s: %s", what, {k: v for k, v in rep.items() if k in ("file", "bytes", "ok", "mismatch", "rotated")})
+            if rep.get("ok") is False:
+                raise RuntimeError(f"restore test mismatch: {rep.get('mismatch')}")
+        except Exception as e:
+            conn.rollback()
+            runlog.alert(conn, "critical", "watchdog", f"[backup] {what} failed: {type(e).__name__}: {e}"[:400], kind="ops",
+                         dedupe_key=f"watchdog:{what}:{today_wib()}")
+            raise
+
+
+def run_db_backup() -> None:
+    """22:30 WIB daily: the idx schema without hypertable data + ml_prediction CSV (after the 21:10/21:40 combo plan)."""
+    from . import backup
+    _backup_job("db_backup", lambda c: backup.backup(c))
+
+
+def run_db_backup_full() -> None:
+    """Sunday 03:00 WIB: the whole database."""
+    from . import backup
+    _backup_job("db_backup_full", lambda c: backup.backup(c, full=True))
+
+
+def run_restore_test() -> None:
+    """First Sunday of the month 05:00 WIB: restore the latest nightly into a scratch database and compare row counts."""
+    from . import backup
+    _backup_job("restore_test", backup.restore_test)
 
 
 def run_logos() -> None:
@@ -1135,6 +1216,15 @@ def build() -> BlockingScheduler:  # noqa: F821
     from apscheduler.triggers.interval import IntervalTrigger
 
     s = BlockingScheduler(timezone=WIB, job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 3600})
+    from apscheduler.events import (
+        EVENT_JOB_ERROR,
+        EVENT_JOB_EXECUTED,
+        EVENT_JOB_MISSED,
+        EVENT_JOB_SUBMITTED,
+    )
+
+    from . import watchdog
+    s.add_listener(watchdog.listener, EVENT_JOB_SUBMITTED | EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED)   # heartbeats for idx watchdog
     s.add_job(run_universe, CronTrigger(day_of_week="mon-fri", hour=16, minute=15, timezone=WIB), id="universe")
     s.add_job(run_daily_chain, CronTrigger(day_of_week="mon-fri", hour="16-19", minute="30,45,0,15", timezone=WIB),
               id="daily_chain")
@@ -1195,6 +1285,11 @@ def build() -> BlockingScheduler:  # noqa: F821
     s.add_job(run_combo_nudge, CronTrigger(day_of_week="mon-fri", hour="16,19", minute=30, timezone=WIB), id="combo_nudge")
     s.add_job(run_combo_expire, CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=WIB), id="combo_expire")
     # the online learning agent (idx/agent.py): paper decisions at 5 minutes a day, settlement + refit after the intraday train
+    s.add_job(run_tca_weekly, CronTrigger(day_of_week="fri", hour=20, minute=50, timezone=WIB), id="tca_weekly")
+    s.add_job(run_exchange_calendar, CronTrigger(day_of_week="mon", hour=6, minute=40, timezone=WIB), id="exchange_calendar")
+    s.add_job(run_db_backup, CronTrigger(hour=22, minute=30, timezone=WIB), id="db_backup")
+    s.add_job(run_db_backup_full, CronTrigger(day_of_week="sun", hour=3, minute=0, timezone=WIB), id="db_backup_full")
+    s.add_job(run_restore_test, CronTrigger(day="1-7", day_of_week="sun", hour=5, minute=0, timezone=WIB), id="restore_test")
     s.add_job(run_logos, CronTrigger(day_of_week="sun", hour=10, minute=0, timezone=WIB), id="logos", misfire_grace_time=86400)
     s.add_job(run_agent_decide, IntervalTrigger(minutes=1), id="agent_decide", misfire_grace_time=30)
     s.add_job(run_agent_settle, CronTrigger(day_of_week="mon-fri", hour=16, minute=50, timezone=WIB), id="agent_settle",

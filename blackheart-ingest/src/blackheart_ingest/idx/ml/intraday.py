@@ -18,6 +18,7 @@ import pandas as pd
 import psycopg
 from psycopg.rows import tuple_row
 
+from ..exchange_calendar import is_trading_day
 from .common import UTC, WIB, tick
 from .spec import INTRADAY
 
@@ -34,8 +35,8 @@ MIN_MINUTES_FOR_ROW = 5             # skip the first minutes of a name's day: no
 
 
 def session_grid(d: date) -> pd.DatetimeIndex:
-    """Every grid minute of day ``d`` as aware WIB timestamps; empty on Sat/Sun."""
-    if d.weekday() >= 5:
+    """Every grid minute of day ``d`` as aware WIB timestamps; empty when the exchange is closed."""
+    if not is_trading_day(d):
         return pd.DatetimeIndex([], tz=WIB)
     if d.weekday() == 4:
         parts = [(time(9, 0), time(11, 29)), (time(14, 0), time(15, 59))]

@@ -200,3 +200,11 @@ def test_set_options_versions_and_refuses_a_stale_version(conn):
     finally:
         conn.rollback()
         _clean(conn)
+
+
+def test_every_page_has_a_robustness_grade() -> None:
+    from blackheart_ingest.idx.strategy_page_content import PAGES, ROBUSTNESS, ROBUSTNESS_GRADES
+    assert set(PAGES) == set(ROBUSTNESS), set(PAGES) ^ set(ROBUSTNESS)
+    for key, r in ROBUSTNESS.items():
+        assert r["grade"] in ROBUSTNESS_GRADES and r["why"], key
+    assert {k for k, r in ROBUSTNESS.items() if r["grade"] == "robust"} == {"value_strict", "ml_rank", "combo_live", "regime_damper"}

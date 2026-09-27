@@ -33,6 +33,7 @@ import psycopg
 from psycopg.rows import dict_row, tuple_row
 
 from . import ara_model, runlog
+from .exchange_calendar import is_trading_day
 
 logger = logging.getLogger(__name__)
 WIB = ZoneInfo("Asia/Jakarta")
@@ -286,7 +287,7 @@ def watched_codes(conn: psycopg.Connection) -> tuple[list[str], dict[str, list[s
 
 
 def in_session(now: datetime) -> bool:
-    return now.weekday() < 5 and SESSION_FROM <= now.time() <= SESSION_TO
+    return is_trading_day(now) and SESSION_FROM <= now.time() <= SESSION_TO
 
 
 def touch_check(conn: psycopg.Connection, now: datetime | None = None, force: bool = False) -> dict[str, Any]:

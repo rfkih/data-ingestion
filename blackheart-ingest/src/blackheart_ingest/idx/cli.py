@@ -47,6 +47,7 @@ from ..shared.logging_setup import configure
 from . import bronze, features, publish, runlog
 from . import migrate as mig
 from .client import BudgetExceeded, CircuitOpen, IdxClient
+from .exchange_calendar import is_trading_day
 from .jobs import announce as job_announce
 from .jobs import crosscheck as job_crosscheck
 from .jobs import daily as job_daily
@@ -128,7 +129,7 @@ def cmd_index(a: argparse.Namespace) -> int:
 def _weekdays(start: date, end: date):
     d = start
     while d <= end:
-        if d.weekday() < 5:
+        if is_trading_day(d):
             yield d
         d += timedelta(days=1)
 
@@ -710,6 +711,12 @@ def cmd_book(a: argparse.Namespace) -> int:
             rep = rc.reconcile(conn, a.book, rows, source=Path(a.file).name)
             print(rc.render(rep))
             return 0 if rep["ok"] else 1
+        elif a.sub == "reconcile-trades":                               # evidence item 6: every trade vs the broker's statement
+            from . import reconcile as rc
+            rows = rc.parse_trades_csv(Path(a.file).read_text(encoding="utf-8-sig"))
+            rep = rc.reconcile_trades(conn, a.book, rows, source=Path(a.file).name)
+            print(rc.render_trades(rep))
+            return 0 if rep["ok"] else 1
         elif a.sub == "paper-seed":
             fills = book.paper_seed(conn, a.book, _d(a.as_of), Decimal(a.amount), fill=a.fill)
             print(f"{a.book}: {len(fills)} names bought on {fills[0]['date'] if fills else '-'}")
@@ -1017,6 +1024,78 @@ def cmd_bar_opens(a: argparse.Namespace) -> int:
     print(f"  missing opens {r.rows_in:,}, filled {r.detail.get('filled', 0):,}, left missing {r.detail.get('left_missing', 0):,}; "
           f"dates not used {_json.dumps(rep.get('bad_dates', []))}" + (f" - {r.error}" if r.error else ""))
     return 0 if r.status == "ok" else 1
+
+
+def cmd_calendar(a: argparse.Namespace) -> int:
+    """Exchange calendar (idx/exchange_calendar.py): sync (from the exchange's announcements) | validate | show [--days N]."""
+    import json as _json
+
+    from . import exchange_calendar as xc
+    from .client import IdxClient
+    with get_connection() as conn:
+        if a.sub == "sync":
+            with IdxClient() as cl:
+                print(_json.dumps(xc.sync(conn, cl), indent=1, default=str))
+        if a.sub in ("sync", "validate"):
+            v = xc.validate(conn)
+            print(_json.dumps(v, indent=1, default=str))
+            return 0 if v["ok"] else 1
+        today = datetime.now(xc.WIB).date()
+        print(f"today {today}: {'OPEN' if xc.is_trading_day(today, conn) else 'CLOSED'}; next trading day {xc.next_trading_day(today, conn)}")
+        for r in conn.execute("SELECT day, name FROM idx.exchange_holiday WHERE day >= %s ORDER BY day LIMIT %s", (today, a.days)).fetchall():
+            d, n = (r["day"], r["name"]) if isinstance(r, dict) else r
+            print(f"  {d} {d:%a}  {n or 'exchange holiday'}")
+    return 0
+
+
+def cmd_ledger(a: argparse.Namespace) -> int:
+    """Signal ledger (idx/signal_ledger.py): verify the hash chain | show the last entries."""
+    from . import signal_ledger
+    with get_connection() as conn:
+        if a.sub == "verify":
+            bad = signal_ledger.verify(conn)
+            print("chain intact" if not bad else "\n".join(bad))
+            return 0 if not bad else 1
+        with conn.cursor() as cur:
+            cur.execute("SELECT seq, sealed_at, book, event, left(entry_sha, 16) AS h FROM idx.signal_ledger ORDER BY seq DESC LIMIT %s", (a.n,))
+            for r in cur.fetchall():
+                print(*(r.values() if isinstance(r, dict) else r))
+    return 0
+
+
+def cmd_tca(a: argparse.Namespace) -> int:
+    """Execution report of a combo book (idx/tca.py); --push sends it like the Friday job."""
+    from . import combo_book, tca
+    with get_connection() as conn:
+        for bk in [a.book] if a.book else combo_book.combo_books(conn):
+            print(tca.weekly(conn, bk) if a.push else tca.render(tca.report(conn, bk)))
+    return 0
+
+
+def cmd_backup(a: argparse.Namespace) -> int:
+    """Database backup (idx/backup.py): nightly idx schema | --full whole database | restore-test | offsite DEST."""
+    import json as _json
+
+    from . import backup
+    with get_connection() as conn:
+        if a.sub == "run":
+            print(_json.dumps(backup.backup(conn, full=a.full), indent=1, default=str))
+        elif a.sub == "restore-test":
+            r = backup.restore_test(conn)
+            print(_json.dumps(r, indent=1, default=str))
+            return 0 if r["ok"] else 1
+        elif a.sub == "offsite":
+            print(f"copied {backup.copy_offsite(a.dest)} file(s) to {a.dest}")
+    return 0
+
+
+def cmd_watchdog(a: argparse.Namespace) -> int:
+    """Dead-man switch (idx/watchdog.py): run by its own Windows task every 10 minutes; exit 1 when something is breached."""
+    from . import watchdog
+    with get_connection() as conn:
+        b = watchdog.run(conn, alert=not a.no_alert)
+    print("watchdog: OK" if not b else "watchdog: " + "; ".join(x["message"] for x in b))
+    return 1 if b else 0
 
 
 def cmd_deriv(a: argparse.Namespace) -> int:
@@ -1702,7 +1781,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("book", help="position book: live (your fills) and paper (the annual value book)")
     p.add_argument("sub", choices=["show", "fills", "fill", "cash", "set", "import", "mark", "check", "paper-seed", "halt", "resume", "journal",
-                                   "reconcile"])
+                                   "reconcile", "reconcile-trades"])
     p.add_argument("--book", default="live")
     p.add_argument("--reason", help="halt: why (recorded on the book and in the journal)")
     p.add_argument("--max-weight", help="set: one name after a ticket, %% of NAV")
@@ -1794,6 +1873,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--cache", help="directory for the Yahoo download (re-used by a second run)")
     p.set_defaults(fn=cmd_bar_opens)
+    p = sub.add_parser("calendar", help="exchange holiday calendar: sync | validate | show [--days N]")
+    p.add_argument("sub", choices=["sync", "validate", "show"])
+    p.add_argument("--days", type=int, default=15)
+    p.set_defaults(fn=cmd_calendar)
+    p = sub.add_parser("ledger", help="tamper-evident signal ledger: verify | show [--n N]")
+    p.add_argument("sub", choices=["verify", "show"])
+    p.add_argument("--n", type=int, default=10)
+    p.set_defaults(fn=cmd_ledger)
+    p = sub.add_parser("tca", help="weekly execution report of combo books [--book B] [--push]")
+    p.add_argument("--book")
+    p.add_argument("--push", action="store_true")
+    p.set_defaults(fn=cmd_tca)
+    p = sub.add_parser("backup", help="database backup: run [--full] | restore-test | offsite --dest DIR")
+    p.add_argument("sub", choices=["run", "restore-test", "offsite"])
+    p.add_argument("--full", action="store_true")
+    p.add_argument("--dest")
+    p.set_defaults(fn=cmd_backup)
+    p = sub.add_parser("watchdog", help="dead-man switch: check job heartbeats against their deadlines, alert on a breach [--no-alert]")
+    p.add_argument("--no-alert", action="store_true")
+    p.set_defaults(fn=cmd_watchdog)
     p = sub.add_parser("deriv", help="rights / warrants: universe | bars | all | status [--since D] [--refetch]")
     p.add_argument("sub", choices=["universe", "bars", "all", "status"])
     p.add_argument("--since")

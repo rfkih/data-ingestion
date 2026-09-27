@@ -35,6 +35,7 @@ import psycopg
 from . import book as bk
 from . import execwatch, runlog, ticket
 from .card import _rows
+from .exchange_calendar import is_trading_day
 from .feed import store as fs
 
 logger = logging.getLogger(__name__)
@@ -56,9 +57,9 @@ def _hhmm(now: datetime) -> tuple[int, int]:
 
 
 def in_window(now: datetime | None = None) -> bool:
-    """True inside 09:00-09:30 WIB on a weekday."""
+    """True inside 09:00-09:30 WIB on a trading day (idx/exchange_calendar.py)."""
     n = (now or datetime.now(WIB)).astimezone(WIB)
-    return n.weekday() < 5 and WINDOW_OPEN <= _hhmm(n) < WINDOW_CLOSE
+    return is_trading_day(n) and WINDOW_OPEN <= _hhmm(n) < WINDOW_CLOSE
 
 
 TICKET_LOOKBACK_DAYS = 7        # an issued ticket older than this with lines still open is stuck, not live

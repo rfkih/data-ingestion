@@ -55,6 +55,7 @@ import psycopg
 from . import book as bk
 from . import journal, runlog, ticket
 from .card import _rows
+from .exchange_calendar import is_trading_day
 from .providers import registry
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ WIB = ZoneInfo("Asia/Jakarta")
 def session_phase(now: datetime) -> str:
     """Where the trading day is, for the live screen: closed | pre-open | open | lunch | closing | after.
     Mon-Thu 09:00-12:00 / 13:30-15:49 continuous, Fri 09:00-11:30 / 14:00-15:49; pre-opening from 08:45."""
-    if now.weekday() >= 5:
+    if not is_trading_day(now):
         return "closed"
     t, fri = now.time(), now.weekday() == 4
     lunch_from, lunch_to = (time(11, 30), time(14, 0)) if fri else (time(12, 0), time(13, 30))

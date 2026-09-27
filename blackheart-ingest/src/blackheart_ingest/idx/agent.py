@@ -39,6 +39,7 @@ import pandas as pd
 import psycopg
 from psycopg.rows import tuple_row
 
+from .exchange_calendar import is_trading_day
 from .ml import intraday as I
 from .ml.common import WIB, tick
 
@@ -70,7 +71,7 @@ PRIOR, CLIP = 10.0, 0.05
 
 # ------------------------------------------------------------------------------------------------------------ pure
 def decision_minutes(d: date) -> list[datetime]:
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return []
     ts = DECISIONS["fri"] if d.weekday() == 4 else DECISIONS["mon-thu"]
     return [datetime.combine(d, t, tzinfo=WIB) for t in ts]

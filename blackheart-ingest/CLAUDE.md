@@ -46,6 +46,12 @@ Primary-source Indonesian equities (idx.co.id) → schema **`idx`** in the same 
 **independent of the trading JVM**. Spec: `C:/Project/docs/superpowers/specs/2026-09-12-idx-data-platform-design.md`;
 build plan: `docs/superpowers/plans/2026-09-12-idx-platform-build-plan.md`.
 
+**Before changing any live parameter or quoting a strategy number, read `docs/MODEL_INVENTORY.md`**: the live models, their
+reference study (#386), validation status, known limitations and the binding change-control rule (pre-registered study +
+independent spec-only replication + journal; combo books frozen to 2027-03-26). Ops safety net (2026-09-26): `idx watchdog`
+(own Windows task, `scripts/idx-watchdog-task.ps1`), `idx backup run|restore-test|offsite`, `idx tca`, `idx combo kill`,
+`python -m blackheart_ingest.idx.snapshot verify|drift <study>`.
+
 - **Layers:** bronze = every response archived (`INGEST_IDX_BRONZE_DIR/<endpoint>/<key>/<fetched_at>.json.gz` + `idx.bronze_index`)
   → silver = `idx.*` tables via pure ETL (`idx/etl.py`) → gold = `public.market_data` rows `<CODE>.JK / 1d` (IDX reference-price basis =
   splits + rights/bonus via `Previous` resets, never cash dividends; `idx/publish.py` re-bases the Yahoo pre-2020 segment onto it). Silver/gold are derived; `idx replay` rebuilds them from bronze with no network.

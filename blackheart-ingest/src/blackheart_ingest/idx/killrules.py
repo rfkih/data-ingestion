@@ -50,7 +50,36 @@ ACTION = {"edge": "switch the sleeve off", "fills": "fix execution (fill every l
           "dd": "review the whole book (pre-registered review trigger)"}
 
 
+# The SUCCESS side, pre-registered 2026-09-26 before any live trade (evidence plan item 1, study row 'evidence_prereg').
+# Target n = trades for t >= 2 if the live edge equals the #386 backtest (mean / sd per closed trade: gap 2.07 / 9.9 %, trend
+# 4.52 / 28.7 %, ML 6.53 / 30.1 %); CONFIRM_LONG x n = the same if the edge is half the backtest.
+#   collecting        n < target
+#   confirmed         n >= target and t = mean / (sd / sqrt n) >= 2 (net of fees, live fills)
+#   inconclusive      n >= target, t < 2 -> keep collecting to CONFIRM_LONG x target
+#   not demonstrated  n >= CONFIRM_LONG x target and t < 2 -> review the sleeve (the kill rules handle outright failure)
+CONFIRM_N = {"gap": 92, "trend": 161, "ml": 85}
+CONFIRM_LONG = 4
+
+
 # ---------------------------------------------------------------------------------------------------------------- pure
+def confirm_check(sleeve: str, live: list[float]) -> dict[str, Any]:
+    """Pure. The pre-registered confirmation status of one sleeve from its closed live trades."""
+    n, need = len(live), CONFIRM_N[sleeve]
+    c: dict[str, Any] = {"rule": f"confirm:{sleeve}", "n": n, "need": need, "need_long": need * CONFIRM_LONG,
+                         "mean": float(np.mean(live)) if live else None}
+    if n >= 2 and np.std(live, ddof=1) > 0:
+        c["t"] = float(np.mean(live) / (np.std(live, ddof=1) / np.sqrt(n)))
+    if n < need:
+        c["status"] = "collecting"
+    elif c.get("t", 0) >= 2:
+        c["status"] = "confirmed"
+    elif n >= need * CONFIRM_LONG:
+        c["status"] = "not demonstrated"
+    else:
+        c["status"] = "inconclusive"
+    return c
+
+
 def closed_trades(fills: list[dict[str, Any]], sleeve_of) -> list[dict[str, Any]]:
     """Pure. Filled lines in time order -> closed round trips per (sleeve, code), average cost with fees in, a partial sell
     closes its share of the cost. ret = proceeds after fees / cost with fees - 1."""
@@ -182,7 +211,8 @@ def evaluate(conn: psycopg.Connection, book: str, sc: dict[str, Any] | None = No
     checks.append(dd_check(navs))
     for c in checks:
         c["action"] = ACTION[c["rule"].split(":")[0]]
-    return {"book": book, "declared": DECLARED, "reference_study": REFERENCE_STUDY, "checks": checks,
+    confirm = [confirm_check(s, [t["ret"] for t in trades if t["sleeve"] == s]) for s in cb.SLEEVES]
+    return {"book": book, "declared": DECLARED, "reference_study": REFERENCE_STUDY, "checks": checks, "confirm": confirm,
             "breaches": [c for c in checks if c["status"] == "breach"], "warnings": [c for c in checks if c["status"] == "warning"]}
 
 
@@ -199,12 +229,16 @@ def describe(c: dict[str, Any]) -> str:
         body = f"{c['neg_share'] * 100:.0f} % weeks negative, mean IC {c['mean_ic']:+.3f} ({c['n']} wk)" if c["n"] else "no realised weeks"
     else:
         body = f"drawdown now {c['dd_now'] * 100:.1f} %, worst {c['mdd'] * 100:.1f} %" if c["n"] else "no NAV"
-    return f"{r:<13}{st:<13}{body}"
+    return f"{r:<15}{st:<17}{body}"
 
 
 def render(ev: dict[str, Any]) -> str:
     o = [f"# kill rules {ev['book']} (declared {ev['declared']}, reference #{ev['reference_study']})"]
     o += [describe(c) for c in ev["checks"]]
+    for c in ev.get("confirm") or []:
+        t = f", t {c['t']:.2f}" if c.get("t") is not None else ""
+        m = f", mean {c['mean'] * 100:+.2f} %" if c.get("mean") is not None else ""
+        o.append(f"{c['rule']:<15}{c['status']:<17}{c['n']}/{c['need']} closed trades{m}{t}")
     for c in ev["breaches"] + ev["warnings"]:
         o.append(f"-> {c['rule']}: {c['action']}")
     return "\n".join(o)

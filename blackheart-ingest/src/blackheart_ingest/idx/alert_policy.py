@@ -80,6 +80,8 @@ def actionable(row: dict[str, Any]) -> bool:
 def deferred(row: dict[str, Any]) -> bool:
     """A failed background job: shown now, pushed only if still open at the evening digest."""
     job, kind = _prefix(row.get("job")), (row.get("kind") or "").lower()
+    if job == "watchdog":                                          # the dead-man switch: a missed plan or a stalled session is pushed at once
+        return False
     return (actionable(row) and (row.get("severity") or "").lower() == "critical"
             and job not in STOCK_JOBS and kind not in STOCK_KINDS and job != "feed" and kind != "feed")
 

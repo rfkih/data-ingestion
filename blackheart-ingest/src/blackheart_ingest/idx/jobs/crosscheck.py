@@ -15,6 +15,7 @@ import psycopg
 
 from .. import bronze, etl, runlog
 from ..client import IdxClient
+from ..exchange_calendar import is_trading_day
 
 logger = logging.getLogger(__name__)
 JOB = "crosscheck"
@@ -64,7 +65,7 @@ def run(conn: psycopg.Connection, client: IdxClient, *, sample: int = 60, codes:
                 local = {(x[0] if isinstance(x, tuple) else x["trade_date"]): (x[1] if isinstance(x, tuple) else x["close"])
                          for x in cur.fetchall()}
             bad = [d for d, c in remote.items() if d in local and abs(local[d] / c - 1) > TOL]
-            missing = [d for d in remote if d not in local and d.weekday() < 5]
+            missing = [d for d in remote if d not in local and is_trading_day(d)]
             checked += 1
             if bad or missing:
                 mism.append(f"{code}: {len(bad)} closes differ, {len(missing)} days missing locally")

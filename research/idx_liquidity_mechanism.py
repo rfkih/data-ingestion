@@ -66,8 +66,9 @@ def main() -> int:
     store = "--no-store" not in sys.argv
     dsn = AF.dsn()
     with psycopg.connect(dsn) as conn:
-        # v60 computed here from daily_summary.value: idx.feature_daily.value_60d_median only starts ~2023 (found on the first run,
-        # which therefore had 4 event days in 2020-22 - a data gap, not a result; the definition is unchanged)
+        # v60 computed here from daily_summary.value (the same definition as idx.feature_daily.value_60d_median, which IS filled from
+        # 2020). The first run's 4 event days in 2020-22 were first blamed on that table - wrongly: the exchange's ~7 % lower price
+        # limit (2020-04 .. 2023-05) made a <= -7 % close almost impossible; see the report's price-limit section.
         bars = pd.read_sql("""SELECT b.code, b.trade_date, b.close, b.close * b.adj_factor AS ac, s.remarks, s.value
                                 FROM idx.bar b JOIN idx.daily_summary s USING (code, trade_date)
                                WHERE b.source = 'idx' AND b.trade_date >= '2019-06-01'""", conn)

@@ -32,7 +32,7 @@ from . import combo_book as cb
 from . import registry as reg
 from . import strategy_options as so
 from . import study_figures as sf
-from .strategy_page_content import PAGES
+from .strategy_page_content import PAGES, ROBUSTNESS, ROBUSTNESS_DATE
 from .ticket import is_live
 
 logger = logging.getLogger(__name__)
@@ -575,7 +575,8 @@ def catalog(conn: psycopg.Connection) -> dict[str, Any]:
                 break
         out.append({"key": key, "name": e["label"], "one": page["one"], "family": page["family"], "status": st,
                     "headline": headline(conn, key), "live": live, "overlay": page["family"] == "overlay",
-                    "portfolios": [{"book": r["book"], "label": r["label"], "live": r["live"]} for r in rs]})
+                    "portfolios": [{"book": r["book"], "label": r["label"], "live": r["live"]} for r in rs],
+                    "robustness": {**ROBUSTNESS.get(key, {"grade": "untested", "studies": [], "why": "not graded"}), "as_of": ROBUSTNESS_DATE}})
     return {"strategies": out, "families": FAMILY_LABEL}
 
 

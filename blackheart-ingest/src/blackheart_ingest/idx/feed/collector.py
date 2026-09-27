@@ -47,6 +47,7 @@ import psycopg
 import websockets
 
 from .. import notify
+from ..exchange_calendar import is_trading_day
 from . import proto, store
 from .parse import WIB, Side, book_key, book_row, parse_book_body, parse_ts, trade_row
 
@@ -74,7 +75,7 @@ QUEUE_MAX = 500_000
 
 def in_session(now: datetime | None = None) -> bool:
     d = (now or datetime.now(UTC)).astimezone(WIB)
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return False
     t = (d.hour, d.minute)
     return SESSION_OPEN <= t < SESSION_CLOSE
@@ -83,7 +84,7 @@ def in_session(now: datetime | None = None) -> bool:
 def data_expected(now: datetime | None = None) -> bool:
     """Continuous-trading phases, when a healthy 100-name subscription is never silent for long."""
     d = (now or datetime.now(UTC)).astimezone(WIB)
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         return False
     t = (d.hour, d.minute)
     if d.weekday() == 4:
@@ -96,7 +97,7 @@ def next_session_start(now: datetime | None = None) -> datetime:
     start = d.replace(hour=SESSION_OPEN[0], minute=SESSION_OPEN[1], second=0, microsecond=0)
     if d >= start:
         start += timedelta(days=1)
-    while start.weekday() >= 5:
+    while not is_trading_day(start):
         start += timedelta(days=1)
     return start
 

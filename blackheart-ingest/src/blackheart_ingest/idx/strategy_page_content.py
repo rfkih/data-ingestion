@@ -472,7 +472,7 @@ PAGES: dict[str, dict[str, Any]] = {
     },
     "combo_live": {
         "family": "ml",
-        "one": "The live portfolio: gap-fade, trend and the ML ranking on one Rp 20 M book with a cash floor.",
+        "one": "The live portfolio: gap-fade, trend and the ML ranking on one Rp 30 M book with a cash floor.",
         "what": "One cash pool runs three strategies at once. Each trade is sized as a share of the book's value, and a 30 % cash "
                 "floor keeps part of it in cash. As deployed it earns {cagr} %/yr with Sharpe {sharpe} and a max drawdown of {mdd} % "
                 "in a backtest over the same years its settings were chosen on; without 2025, {x25} %/yr. Read it as the best case.",
@@ -481,7 +481,7 @@ PAGES: dict[str, dict[str, Any]] = {
                   "ML: 10 % of NAV per name, a quarter for each of the four ens4 confirmation rules, same-day stop -5 %.",
                   "No buy that would take the invested share above 70 % (the cash floor)."],
         "how": [("Universe", "Each strategy's own: liquid main-board gaps, the small tier for trend, the model's liquid names for ML"),
-                ("Capital", "Rp 20 M"), ("Sleeves", "Gap 10 % · trend 5 % · ML 10 % of NAV per trade"), ("Cash floor", "30 %"),
+                ("Capital", "Rp 30 M live since 2026-09-26 (backtest at Rp 20 M)"), ("Sleeves", "Gap 10 % · trend 5 % · ML 10 % of NAV per trade"), ("Cash floor", "30 %"),
                 ("Plan", "Nightly 21:10"), ("Intraday", "Session tick every minute: ML confirmations, the ML stop from 15:40, the gap "
                                                         "exit from 15:50"), ("Orders", "Live: draft tickets you execute; paper: filled at once")],
         "detail": [("Why these three", "They draw on different things: an overreaction at the open, momentum over weeks, and the "
@@ -650,3 +650,37 @@ PAGES: dict[str, dict[str, Any]] = {
         "findings": {}, "headline": None, "closed": "2026-09-17",
     },
 }
+
+
+# ---------------------------------------------------------------------------------------------------------------- robustness
+# One grade per page (operator 2026-09-27: "only robust strategy yang di shows"), read by the list's Evidence filter. The rule,
+# the robustness scorecard's own (research/IDX_ROBUSTNESS_SCORECARD_2026-09-26.md): ROBUST = its stored studies pass neighbouring
+# parameters, a placebo / random baseline and both halves of the sample, with no open finding that it works in one regime only;
+# PARTIAL = one of those fails; FRAGILE = the placebo fails or two fail; UNTESTED = never put through that battery; CLOSED =
+# falsified in its own study. Graded 2026-09-27 from the studies named; change a grade only with a study behind it.
+ROBUSTNESS_DATE = "2026-09-27"
+ROBUSTNESS: dict[str, dict[str, Any]] = {
+    "value_strict": {"grade": "robust", "studies": [332], "why": "5 of 6 neighbours, beats 100 % of random books from its pool, both halves, costs x1.5"},
+    "ml_rank": {"grade": "robust", "studies": [175, 281, 386, 393],
+                "why": "positive in 5 of 5 years, Sharpe 1.33 / 2.20 by half, neighbours and placebo pass (#281), replicated 876/876, alpha t 3.6"},
+    "combo_live": {"grade": "robust", "studies": [380, 384, 386, 393],
+                   "why": "positive in 5 of 5 years, Sharpe 1.53 / 2.62 by half, all 144 construction variants beat IHSG (SPA), PBO 0.33, alpha t 4.6"},
+    "regime_damper": {"grade": "robust", "studies": [332], "why": "robust as a damper in 2008 and 2020: it cuts the drawdown and costs return"},
+    "trend_small": {"grade": "partial", "studies": [23, 386, 395],
+                    "why": "beats random entries and generalises to Thailand and Malaysia, but neighbours are fragile on the corrected data and without 2025 it earns +1.2 %/yr"},
+    "gapfade": {"grade": "partial", "studies": [77, 382, 386, 387],
+                "why": "placebo percentile 100, but almost all its money is 2025-26 and it can only trigger while the exchange's lower price limit is wide"},
+    "regime_gate": {"grade": "partial", "studies": [332, 62], "why": "the drawdown effect holds; the return gain does not"},
+    "combined_book": {"grade": "partial", "studies": [332, 93], "why": "passes in one half of the sample only"},
+    "trend_liq": {"grade": "fragile", "studies": [23], "why": "neighbours fail on the corrected data"},
+    "cash_floor": {"grade": "untested", "studies": [177], "why": "improved the drawdown by its own bar; no neighbour or placebo battery"},
+    "ara_sell": {"grade": "untested", "studies": [], "why": "no robustness battery run"},
+    "exec_timing": {"grade": "untested", "studies": [99], "why": "no robustness battery run; the execution bandit is judged at 20 sessions"},
+    "ml_agent": {"grade": "untested", "studies": [], "why": "paper learning agent; no stored backtest"},
+    "fund_forecast": {"grade": "untested", "studies": [], "why": "forecast passed a preliminary bar; not yet a strategy test"},
+    "breakout_filter": {"grade": "closed", "studies": [], "why": "closed by its own study"},
+    "close_vwap": {"grade": "closed", "studies": [], "why": "closed by its own study"},
+    "sideways": {"grade": "closed", "studies": [], "why": "closed by its own study"},
+    "bandarmologi": {"grade": "closed", "studies": [], "why": "closed by its own study"},
+}
+ROBUSTNESS_GRADES = ("robust", "partial", "fragile", "untested", "closed")

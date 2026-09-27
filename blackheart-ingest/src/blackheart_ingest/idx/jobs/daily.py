@@ -19,6 +19,7 @@ import psycopg
 
 from .. import bronze, etl, runlog
 from ..client import FetchResult, IdxClient
+from ..exchange_calendar import is_trading_day
 
 logger = logging.getLogger(__name__)
 JOB = "daily"
@@ -195,9 +196,9 @@ def process(conn: psycopg.Connection, d: date, rows: list[dict[str, Any]], fetch
 
 def run(conn: psycopg.Connection, client: IdxClient, d: date) -> runlog.RunResult:
     r = runlog.RunResult(JOB, d.isoformat())
-    if d.weekday() >= 5:
+    if not is_trading_day(d):
         r.status = "skipped"
-        r.detail["reason"] = "weekend"
+        r.detail["reason"] = "weekend" if d.weekday() >= 5 else "exchange holiday"
         return r
     run_id = runlog.start(conn, JOB, r.run_key)
     try:

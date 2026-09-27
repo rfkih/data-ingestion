@@ -37,6 +37,7 @@ import psycopg
 from . import book as bk
 from . import combo_book as cb
 from . import gapfade, ticket
+from .exchange_calendar import is_trading_day
 
 logger = logging.getLogger(__name__)
 WIB = cb.WIB
@@ -55,7 +56,7 @@ ML_KINDS = ("ml_stop", "ml_confirm")                # kinds that wait while the 
 
 def in_window(now: datetime) -> bool:
     t = now.astimezone(WIB)
-    return t.weekday() < 5 and ENGINE_FROM <= t.time() <= ENGINE_TO
+    return is_trading_day(t) and ENGINE_FROM <= t.time() <= ENGINE_TO
 
 
 # ---------------------------------------------------------------------------------------------------------------- pure core

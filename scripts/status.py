@@ -408,6 +408,14 @@ def block_risk(s: dict) -> list[str]:
         )
         for x in r.get("breaches") or []:
             out.append("      " + amber("BREACH " + x))
+    m = next((r.get("market") for r in s["risk"].values() if r and r.get("market")), None)
+    if m:                                                  # the desk-wide context (idx/regime_monitor.py), once
+        a, g = m.get("arb") or {}, m.get("regime") or {}
+        arb = f"price limit {a.get('state', '?')} (worst {pc(a.get('worst_decline'))} / {a.get('sessions', '?')} sessions)"
+        if a.get("state") == "narrow":
+            arb = amber(arb + " - gap-fade cannot trigger")
+        vol = f"volatility {g.get('state', '?')} P(high) {float(g['p_high_vol']):.2f}" if g.get("p_high_vol") is not None else "volatility ?"
+        out.append(f"  {'MARKET':<14} {arb}  {vol}")
     return out
 
 

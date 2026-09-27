@@ -170,3 +170,133 @@ def render(rep: dict[str, Any]) -> str:
     for m in rep["avg_mismatch"]:
         o.append(f"  avg  {m['code']}: book {m['book_avg']} vs broker {m['broker_avg']} ({m['gap_pct']} %)")
     return "\n".join(o)
+
+
+# ---------------------------------------------------------------------------------------------------------------- trades
+# Evidence plan item 6 (operator 2026-09-26): the POSITION reconcile above says the book holds what the broker holds; an auditable
+# track record also needs every TRADE to match the broker's statement - price, lots and fee - so the live return is the broker's,
+# not the desk's own entry. Transaction-history export (Stockbit "Riwayat transaksi" and the like), header names recognised:
+TRADE_HEADERS = {
+    "date": ("date", "tanggal", "tgl", "tradedate", "transactiondate", "tanggaltransaksi", "waktu", "datetime", "time"),
+    "code": HEADERS["code"],
+    "side": ("side", "type", "action", "buysell", "bs", "jenis", "transaksi", "tipe", "order", "ordertype"),
+    "lots": HEADERS["lots"],
+    "shares": ("shares", "qty", "quantity", "lembar", "volume", "jumlahsaham", "filledqty", "donevolume"),
+    "price": ("price", "harga", "doneprice", "hargadone", "tradeprice", "hargatransaksi", "filledprice", "avgprice"),
+    "fee": ("fee", "fees", "commission", "komisi", "biaya", "brokerfee", "totalfee"),
+}
+_SIDE = {"b": "buy", "buy": "buy", "beli": "buy", "s": "sell", "sell": "sell", "jual": "sell"}
+_DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%d %B %Y")
+
+
+def _parse_date(s: str) -> str | None:
+    from datetime import datetime
+    t = (s or "").strip().replace("T", " ")
+    head = t.split(" ")[0] if t[:4].isdigit() or "/" in t[:10] or "-" in t[:10] else t
+    for fmt in _DATE_FORMATS:
+        for cand in (head, t[:11], t):
+            try:
+                return datetime.strptime(cand.strip(), fmt).date().isoformat()
+            except ValueError:
+                continue
+    return None
+
+
+def parse_trades_csv(text: str) -> list[dict[str, Any]]:
+    """Transaction export -> rows {date, code, side, lots, price, fee}; rows missing date/code/side/quantity/price are dropped."""
+    text = text.lstrip(chr(0xFEFF))
+    try:
+        delim = csv.Sniffer().sniff(text[:2048], delimiters=";,\t").delimiter
+    except csv.Error:
+        delim = ";" if text[:2048].count(";") > text[:2048].count(",") else ","
+    rows = [r for r in csv.reader(io.StringIO(text), delimiter=delim) if any(c.strip() for c in r)]
+    cols, hi = None, None
+    for i, r in enumerate(rows[:10]):
+        norm = [_norm(h) for h in r]
+        c: dict[str, int] = {}
+        for role, names in TRADE_HEADERS.items():
+            for j, h in enumerate(norm):
+                if h in names:
+                    c[role] = j
+                    break
+        if all(k in c for k in ("date", "code", "side", "price")) and ("lots" in c or "shares" in c):
+            cols, hi = c, i
+            break
+    if cols is None or hi is None:
+        raise ValueError(f"no transaction header (date, code, side, lots/shares, price) in the first rows: {rows[:1]}")
+    out = []
+    for r in rows[hi + 1:]:
+        def g(k: str, r: list[str] = r) -> str | None:
+            return r[cols[k]] if k in cols and len(r) > cols[k] else None
+        code = re.sub(r"[^A-Z0-9]", "", (g("code") or "").upper().split(".")[0])
+        side = _SIDE.get(re.sub(r"[^a-z]", "", (g("side") or "").lower()))
+        d = _parse_date(g("date") or "")
+        lots = parse_number(g("lots")) if "lots" in cols else None
+        if lots is None and "shares" in cols:
+            sh = parse_number(g("shares"))
+            lots = sh / LOT if sh is not None else None
+        price = parse_number(g("price"))
+        if not (code and side and d and lots and price):
+            continue
+        out.append({"date": d, "code": code, "side": side, "lots": lots, "price": price,
+                    "fee": parse_number(g("fee")) if "fee" in cols else None})
+    return out
+
+
+def diff_trades(book_fills: list[dict[str, Any]], broker: list[dict[str, Any]], price_tol: Decimal = Decimal("0.5")) -> dict[str, Any]:
+    """Pure. Match broker trades to book fills by (date, code, side), aggregating partial fills (lots summed, price lot-weighted).
+    -> matched count, the matches that differ in lots / price / fee, and what only one side has."""
+    def agg(rows: list[dict[str, Any]]) -> dict[tuple, dict[str, Any]]:
+        out: dict[tuple, dict[str, Any]] = {}
+        for x in rows:
+            k = (str(x["date"]), str(x["code"]).upper(), x["side"])
+            a = out.setdefault(k, {"lots": Decimal(0), "value": Decimal(0), "fee": Decimal(0), "fee_known": True})
+            lots = Decimal(str(x["lots"]))
+            a["lots"] += lots
+            a["value"] += lots * Decimal(str(x["price"]))
+            if x.get("fee") is None:
+                a["fee_known"] = False
+            else:
+                a["fee"] += Decimal(str(x["fee"]))
+        return out
+    b, s = agg(book_fills), agg(broker)
+    matched = []
+    for k in sorted(set(b) & set(s)):
+        x, y = b[k], s[k]
+        pb, ps = x["value"] / x["lots"], y["value"] / y["lots"]
+        m: dict[str, Any] = {"date": k[0], "code": k[1], "side": k[2], "lots_book": _s(x["lots"]), "lots_broker": _s(y["lots"]),
+                             "price_book": _s(round(pb, 2)), "price_broker": _s(round(ps, 2)), "lots_ok": x["lots"] == y["lots"],
+                             "price_ok": abs(pb - ps) <= price_tol}
+        if y["fee_known"]:
+            m.update({"fee_book": _s(x["fee"]), "fee_broker": _s(y["fee"]), "fee_ok": abs(x["fee"] - y["fee"]) <= Decimal(1)})
+        matched.append(m)
+    bad = [m for m in matched if not (m["lots_ok"] and m["price_ok"] and m.get("fee_ok", True))]
+    only_book, only_broker = sorted(set(b) - set(s)), sorted(set(s) - set(b))
+    return {"matched": len(matched), "differences": bad, "only_book": [list(k) for k in only_book], "only_broker": [list(k) for k in only_broker],
+            "ok": not bad and not only_book and not only_broker}
+
+
+def reconcile_trades(conn: psycopg.Connection, book: str, rows: list[dict[str, Any]], *, actor: str = "operator",
+                     source: str | None = None) -> dict[str, Any]:
+    """Diff the broker's trades (the statement's date range) against idx.fill and journal the outcome; never changes the book."""
+    if not rows:
+        raise ValueError("no trades parsed from the statement")
+    lo, hi = min(r["date"] for r in rows), max(r["date"] for r in rows)
+    fills = _rows(conn, "SELECT trade_date AS date, code, side, lots, price, fee FROM idx.fill WHERE book = %s AND side IN ('buy', 'sell') "
+                        "AND trade_date BETWEEN %s AND %s", (book, lo, hi), ["date", "code", "side", "lots", "price", "fee"])
+    rep = {"book": book, "from": lo, "to": hi, "source": source, **diff_trades(fills, rows)}
+    journal.record(conn, book, actor, "note", rationale=f"trade reconcile {lo}..{hi}: {rep['matched']} matched, {len(rep['differences'])} differ, "
+                                                         f"{len(rep['only_book'])} only in book, {len(rep['only_broker'])} only at broker",
+                   refs={k: rep[k] for k in ("source", "differences", "only_book", "only_broker")})
+    return rep
+
+
+def render_trades(rep: dict[str, Any]) -> str:
+    o = [f"# trade reconcile {rep['book']} {rep['from']}..{rep['to']} ({rep.get('source') or 'statement'}): "
+         + ("ALL MATCH" if rep["ok"] else "DIFFERENCES"), f"matched {rep['matched']}"]
+    for m in rep["differences"]:
+        o.append(f"  DIFF {m['date']} {m['code']} {m['side']}: lots {m['lots_book']} vs {m['lots_broker']}, "
+                 f"price {m['price_book']} vs {m['price_broker']}" + (f", fee {m['fee_book']} vs {m['fee_broker']}" if "fee_book" in m else ""))
+    o += [f"  only in book:   {' '.join(k)}" for k in rep["only_book"]]
+    o += [f"  only at broker: {' '.join(k)}" for k in rep["only_broker"]]
+    return "\n".join(o)

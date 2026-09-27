@@ -41,6 +41,7 @@ import psycopg
 from . import book as bk
 from . import gapfade, journal, overlay, runlog, ticket, trend_book
 from .card import _rows
+from .exchange_calendar import add_trading_days, is_trading_day
 
 logger = logging.getLogger(__name__)
 WIB = ZoneInfo("Asia/Jakarta")
@@ -464,7 +465,7 @@ def compose(b: dict[str, Any], S: dict[str, Any], nav: Decimal, cash: Decimal, p
         ref = Decimal(str(r.close))
         for (thr, days), rname in zip(m["rules"], m["rule_names"], strict=True):
             level = ticket.snap(ref * (1 + Decimal(str(thr))), "buy")
-            watches.append({"code": c, "signal_date": d, "ref_price": ref, "level_price": level, "until_date": d + timedelta(days=days * 7 // 5 + 2),
+            watches.append({"code": c, "signal_date": d, "ref_price": ref, "level_price": level, "until_date": add_trading_days(d, days),
                             "e_bps": float(r.e) * 1e4, "cost_bps": float(r.rt) * 1e4, "rule": rname, "size_frac": m["size_frac"]})
         free -= 1
     targets = [ln["code"] for ln in lines if ln["side"] == "buy"] + sorted(held - exiting)
@@ -585,6 +586,20 @@ def _notify(conn: psycopg.Connection, book: str, text: str, data: dict[str, Any]
         logger.exception("combo notify failed")
 
 
+def _seal(conn: psycopg.Connection, book: str, event: str, payload: dict[str, Any]) -> None:
+    """Seal the signals into the tamper-evident ledger (idx/signal_ledger.py) before the market acts on them. Never raises."""
+    try:
+        from . import signal_ledger
+        signal_ledger.seal(conn, book, event, payload)
+    except Exception:
+        logger.exception("combo: signal seal failed for %s %s", book, event)
+
+
+def _line_view(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"code": x.get("code"), "side": x.get("side"), "lots": x.get("lots"), "limit": x.get("limit_price"), "ref": x.get("ref_close"),
+             "flags": x.get("flags")} for x in lines]
+
+
 def plan(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date | None = None) -> dict[str, Any]:
     """Tonight's plan: the ticket for tomorrow (sells + trend buys) and the ML watches. Idempotent per (book, day): a second run
     the same night replaces the draft only if it has not been issued. Live: draft + push. Paper: issued (fills at the next open)."""
@@ -632,13 +647,16 @@ def plan(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: date 
         # action yet - its KONFIRMASI push comes when the price confirms; a paper book needs nobody
         if res["lines"] and ticket.is_live(book):
             _notify(conn, book, text)
+        _seal(conn, book, "plan", {"for_date": str(d), "ticket": out["ticket"], "lines": _line_view(res["lines"]),
+                                   "watches": [{"code": w.get("code"), "rule": w.get("rule"), "level": w.get("level_price"), "until": w.get("until_date")}
+                                               for w in watches]})
     return out
 
 
 # ---------------------------------------------------------------------------------------------------------------- ML confirmation (intraday)
 def in_session(now: datetime) -> bool:
     t = now.astimezone(WIB)
-    return t.weekday() < 5 and SESSION_FROM <= t.time() <= SESSION_TO
+    return is_trading_day(t) and SESSION_FROM <= t.time() <= SESSION_TO
 
 
 def confirm(conn: psycopg.Connection, book: str, actor: str = "scheduler", now: datetime | None = None) -> dict[str, Any]:
@@ -693,6 +711,8 @@ def gap_entry(conn: psycopg.Connection, book: str, actor: str = "scheduler", d: 
         res["strategy"] = "combo"
         tid = ticket.store(conn, res, notes=f"combo gap-fade: {len(lines)} gap(s)", actor=actor)
         out["ticket"] = tid
+        _seal(conn, book, "gap_entry", {"date": str(d), "ticket": tid, "lines": _line_view(lines),
+                                        "opens": {c["code"]: c.get("open") for c in s["candidates"] if c["code"] in {ln["code"] for ln in lines}}})
         checks = ticket.validate(conn, tid)
         if not checks["ok"]:
             out["status"] = "draft"

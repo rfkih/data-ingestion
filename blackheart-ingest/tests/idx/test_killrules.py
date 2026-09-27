@@ -86,3 +86,13 @@ def test_freeze_blocks_config_allows_off_and_admin() -> None:
     assert cb.freeze_violations(was_off, {"params": _params(off=[])}, d) == ["params.off (a sleeve back on)"]
     assert cb.freeze_violations(FROZEN, {"params": _params(cash_floor=0.1)}, date(2027, 4, 1)) == []  # expired
     assert cb.freeze_violations({**FROZEN, "rule": "annual"}, {"regime_filter": False}, d) == []      # combo books only
+
+
+def test_confirm_check_states() -> None:
+    assert kr.confirm_check("ml", [0.1] * 10)["status"] == "collecting"
+    rng = np.random.default_rng(3)
+    good = list(rng.normal(0.08, 0.2, 85))
+    assert kr.confirm_check("ml", good)["status"] == "confirmed"
+    flat = list(rng.normal(0.0, 0.3, 85))
+    assert kr.confirm_check("ml", flat)["status"] in ("inconclusive", "confirmed") and kr.confirm_check("ml", [0.3, -0.3] * 43)["status"] == "inconclusive"
+    assert kr.confirm_check("ml", [0.3, -0.3] * 170)["status"] == "not demonstrated"
