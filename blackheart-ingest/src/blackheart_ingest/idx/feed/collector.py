@@ -73,6 +73,33 @@ RAW_ENV, RAW_KEEP_ENV = "IDX_FEED_RAW", "IDX_FEED_RAW_KEEP_DAYS"
 QUEUE_MAX = 500_000
 
 
+def probe_session(access_token: str, get: Any = None) -> tuple[str, str]:
+    """Does Stockbit still accept this session? The same key request the collector makes before it authenticates the
+    websocket, made synchronously so the scheduler can ask BEFORE the open (2026-09-28: the session was killed overnight,
+    the collector found out at 08:40 and the desk saw no opening auction). -> ('ok' | 'rejected' | 'error', detail).
+    ``get`` is an httpx-style ``get(url, headers=...)`` for the tests."""
+    headers = {"Authorization": f"Bearer {access_token}", "Origin": ORIGIN, "Referer": ORIGIN + "/orderbook",
+               "User-Agent": UA, "Accept": "application/json", "X-Platform": "web"}
+    try:
+        if get is None:
+            with httpx.Client(timeout=15) as client:
+                r = client.get(KEY_URL, headers=headers)
+        else:
+            r = get(KEY_URL, headers=headers)
+    except httpx.HTTPError as e:
+        return "error", f"{type(e).__name__}: {e}"[:200]
+    if r.status_code == 401:
+        return "rejected", "HTTP 401 (token rejected)"
+    if r.status_code >= 400:
+        return "error", f"HTTP {r.status_code}"
+    try:
+        body = r.json()
+    except ValueError:
+        return "error", "answer is not JSON"
+    key = (body.get("data") or {}).get("key") if isinstance(body, dict) else None
+    return ("ok", "websocket key issued") if key else ("error", "no key in the answer")
+
+
 def in_session(now: datetime | None = None) -> bool:
     d = (now or datetime.now(UTC)).astimezone(WIB)
     if not is_trading_day(d):

@@ -11,6 +11,8 @@ Schedule (WIB):
   09:00, 09:05    gapfade_entry       intraday gap-fade books: the opening auction printed at ~08:58 -> scan, sweep, entry ticket
   15:50 Mon-Fri   gapfade_exit        intraday gap-fade books: sell everything into the closing auction
   every 10 min    token_guard         the Stockbit session must outlive today's close; renews, else nags the phone every run
+                                      + 07:00-08:40 on trading days a LIVE check (the collector's key request): a session
+                                      Stockbit killed is renewed from the refresh token, else a critical 'paste now' push every run
   20:05 Mon-Fri   ara_watch           next session's likely ARA locks: study #146 model (bar + closing book, LightGBM + GRU, calibrated P)
                                       + every held name's ARA price; runs `idx ara watch` in a subprocess. First settles the
                                      earlier runs: what today's session did to each stored score (idx.ara_watch next_*,
@@ -50,6 +52,7 @@ import logging
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..shared.db import get_connection
@@ -331,13 +334,14 @@ def run_feed_watch() -> None:
         try:
             h = registry.feed_of(pinned).health(conn)
         except ProviderError as e:                                          # the toggle names a provider with no feed adapter
-            runlog.alert_once(conn, "critical", "feed", f"feed toggle is broken: {e} - fix it in Blackridge > More > Brokers")
+            runlog.alert_once(conn, "critical", "feed", f"feed toggle is broken: {e} - fix it in Blackridge > Alerts > Brokers (ops account)")
             return
         if h.ok:
             runlog.resolve(conn, "feed", like="%: DOWN -%")                 # back up: close the incident, do not wait for a human
+            runlog.resolve(conn, "feed", like=SESSION_ALERTS)               # ... and the pre-open 'REJECTED' one (and its web popup)
         else:
             # one row per outage (dedupe_key): the summary's "last frame Ns ago" changes every check and pushed 12 times in an hour
-            runlog.alert_once(conn, "warning", "feed", f"{h.summary} - check the 'Blackheart IDX feed' task or Blackridge > More > Brokers",
+            runlog.alert_once(conn, "warning", "feed", f"{h.summary} - check the 'Blackheart IDX feed' task or Blackridge > Alerts > Data feed",
                               dedupe_key="feed:down")
         problem = registry.provenance_problem(registry.streaming_provider(conn), pinned)
         if problem:                                                         # the tables are being filled by the OTHER provider
@@ -382,10 +386,87 @@ SESSION_END = dtime(16, 15)              # post-closing ends 16:15 WIB - the ses
 NAG_FROM, NAG_TO = dtime(7, 0), dtime(16, 30)   # the window in which a dead session is nagged about, every run
 TOKEN_MARGIN_MIN = 30                    # the token must outlive the close by this much
 REFRESH_WARN_DAYS = 2.0                  # warn this many days before the refresh token itself runs out
+# Pre-open LIVE check (2026-09-28: Stockbit killed the session overnight - a login elsewhere kills the desk's pair - while its
+# expiry still read 8 h; the collector found out at 08:40, 92 x 401, and the desk saw no opening auction, so gap-fade refused
+# on every book). The expiry rule above cannot see that: from 07:00 the guard ASKS Stockbit, and stops at 08:40 when the
+# collector takes over the session (a key request then could disturb its socket).
+PROBE_FROM, PROBE_TO = dtime(7, 0), dtime(8, 40)
+NAG_UNTIL = dtime(9, 10)                 # a paste before the gap-fade entries (09:00/09:05) still saves the morning: keep pushing
+PASTE_HINT = ("Log in to stockbit.com, copy the whole credentialStorage cookie and paste it in the Blackridge popup or in "
+              "Alerts > Data feed > Paste a fresh cookie (ops account), or at http://127.0.0.1:8001/idx/feed/relay on the desk PC")
+PROBE_ALERT = ("Stockbit session REJECTED before the open (a login elsewhere kills the desk's session; the refresh token "
+               f"could not revive it). {PASTE_HINT} NOW - otherwise the feed is blind at the 08:45 pre-opening and gap-fade "
+               "cannot trade at 09:00.")
+PROBE_UNCHECKED = "Stockbit session token could not be checked before the open (network / Stockbit error) - retried every 10 min"
+SESSION_ALERTS = "Stockbit session %"    # runlog.resolve LIKE pattern: the probe's two alerts, nothing else on the feed job
+NAG_DATA = {"route": "/m/alerts#feed", "kind": "alert"}   # 'alert' chimes in the app; the route is where the paste lives
 
 
 def session_end_wib(d: date) -> datetime:
     return datetime.combine(d, SESSION_END, tzinfo=WIB)
+
+
+def in_probe_window(t: dtime) -> bool:
+    return PROBE_FROM <= t < PROBE_TO
+
+
+def preopen_probe(conn: Any, may_refresh: bool = True, clock: Any = None) -> str:
+    """Ask Stockbit whether the stored session still works (the collector's own key request). Rejected -> if someone stored a
+    new token meanwhile, ask again with it; else renew once from the refresh token (unless this run's guard already tried and
+    failed - a second POST of a spent refresh token is a reuse) and ask again; still rejected -> a critical alert, then a
+    push on every run (every 10 min) until someone pastes a fresh cookie; accepted -> close the probe's alerts. Every call
+    to Stockbit re-checks the clock, so a slow run never touches the session after 08:40, when the collector owns it.
+    -> 'ok' | 'rejected' | 'error' | 'no-token' | 'late'."""
+    from . import broker, notify
+    from .feed import collector as fc
+    from .feed import store as fs
+    open_now = clock or (lambda: in_probe_window(datetime.now(WIB).time()))
+    tok = fs.load_token(conn)
+    if not tok or not tok.get("access_token"):
+        return "no-token"                                                   # the expiry rule already nags about a missing session
+    if not open_now():
+        return "late"
+    verdict, detail = fc.probe_session(tok["access_token"])
+    renewed = False
+    if verdict == "rejected":
+        try:
+            fresh = fs.load_token(conn) or {}
+            if fresh.get("access_token") and fresh["access_token"] != tok["access_token"]:
+                if not open_now():                                          # a paste or renewal landed meanwhile: judge THAT one
+                    return "late"
+                verdict, detail = fc.probe_session(fresh["access_token"])
+            elif may_refresh and broker.newest_refresh_token(conn=conn):
+                if not open_now():
+                    return "late"
+                broker.refresh_and_persist(conn=conn)
+                conn.commit()
+                tok = fs.load_token(conn) or {}
+                if not open_now():
+                    return "late"
+                verdict, detail = fc.probe_session(tok.get("access_token") or "")
+                renewed = True
+        except Exception as e:                                              # a dead refresh token is the case this exists for
+            conn.rollback()                                                 # a failed statement must not silence the alert below
+            detail = f"{detail}; refresh failed: {type(e).__name__}: {e}"[:300]
+    if verdict == "ok":
+        n = runlog.resolve(conn, "feed", like=SESSION_ALERTS)
+        logger.info("idx token probe: session accepted%s%s", " after renewing from the refresh token" if renewed else "",
+                    f"; closed {n} alert(s)" if n else "")
+        return "ok"
+    if verdict == "rejected":
+        if not runlog.alert_once(conn, "critical", "feed", PROBE_ALERT, kind="feed"):   # the first run raises it (and pushes) ...
+            notify.send(PROBE_ALERT, title="IDX token - paste now", data=NAG_DATA)       # ... then every run
+        logger.warning("idx token probe: REJECTED (%s)", detail)
+        return "rejected"
+    runlog.alert_once(conn, "warning", "feed", PROBE_UNCHECKED, kind="feed")
+    logger.warning("idx token probe: could not check (%s)", detail)
+    return "error"
+
+
+def probe_alert_open(conn: Any) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM idx.alert WHERE job = 'feed' AND message = %s AND acknowledged_at IS NULL", (PROBE_ALERT,))
+        return cur.fetchone() is not None
 
 
 def run_token_guard() -> None:
@@ -406,6 +487,7 @@ def run_token_guard() -> None:
     trading = is_trading_day(d) and now.time() <= SESSION_END
     need_until = session_end_wib(d) + timedelta(minutes=TOKEN_MARGIN_MIN) if trading else None
     nagging = is_trading_day(d) and NAG_FROM <= now.time() <= NAG_TO
+    renew_failed: dict[str, bool] = {}
     with get_connection() as conn:
         active_feed = registry.active(conn, "feed")
         for provider in PROVIDERS:                                          # every provider guards its OWN session (review #2)
@@ -421,11 +503,11 @@ def run_token_guard() -> None:
                 failed = str(e)
             except ProviderError as e:
                 failed = str(e)
+            renew_failed[provider] = failed is not None
             st = tokens.token_state(conn)
             left = st.minutes_left
             covers = bool(st.valid and (need_until is None or (left is not None and left >= (need_until - now).total_seconds() / 60)))
-            hint = ("Log in to stockbit.com and paste the credentialStorage cookie in Blackridge > More (or /idx/feed/relay)"
-                    if provider == "stockbit" else "paste a fresh session in Blackridge > More > Brokers")
+            hint = (PASTE_HINT if provider == "stockbit" else "paste a fresh session in Blackridge > Alerts > Brokers (ops account)")
             if not covers and nagging and critical:                         # the loud path: repeated, not deduped
                 when = st.expires_at or "never (no token)"
                 msg = (f"{provider} session will NOT last today's close: expires {when}"
@@ -433,7 +515,7 @@ def run_token_guard() -> None:
                        + (f"; renewal failed: {failed}" if failed else "")
                        + f". {hint} - without it the tick feed stops and the gap-fade jobs are blind.")
                 if not runlog.alert_once(conn, "critical", "feed", msg):   # the first one raises the alert (and pushes);
-                    notify.send(msg, title="IDX token", data={"route": "/m/more", "kind": "token"})   # after that, a push every 10 min
+                    notify.send(msg, title="IDX token", data=NAG_DATA)     # after that, a push every 10 min
                 logger.warning("idx token guard: %s", msg)
             elif not covers and nagging:                                    # a standby's dead session: one warning, no nagging
                 runlog.alert_once(conn, "warning", "feed", f"{provider} (standby) session is not valid - {hint}")
@@ -442,6 +524,22 @@ def run_token_guard() -> None:
             if st.refresh_present and st.refresh_days_left is not None and st.refresh_days_left < REFRESH_WARN_DAYS:
                 runlog.alert_once(conn, "warning", "feed", f"{provider} REFRESH token expires {st.refresh_expires_at:%Y-%m-%d %H:%M} UTC "
                                                       f"({st.refresh_days_left:.1f} days): {hint} before then")
+        if active_feed == "stockbit" and is_trading_day(d) and in_probe_window(now.time()):
+            try:                                                            # expiry says nothing about a killed session: ask
+                preopen_probe(conn, may_refresh=not renew_failed.get("stockbit", False))
+            except Exception:                                               # the guard's own nagging must survive a probe bug
+                conn.rollback()
+                logger.exception("idx token probe failed")
+        elif active_feed == "stockbit" and is_trading_day(d) and PROBE_TO <= now.time() < NAG_UNTIL:
+            # 08:40-09:10: no more key requests (the collector owns the session), but a paste still saves the opening
+            # auction and the 09:00/09:05 gap-fade entries - keep pushing while the incident is open and the feed is not live
+            try:
+                from .feed import store as fs
+                if probe_alert_open(conn) and ((fs.status(conn) or {}).get("collector") or {}).get("state") != "live":
+                    notify.send(PROBE_ALERT, title="IDX token - paste now", data=NAG_DATA)
+            except Exception:
+                conn.rollback()
+                logger.exception("idx token probe failed")
 
 
 def run_ara_watch() -> None:
@@ -461,7 +559,7 @@ def run_ara_watch() -> None:
         with get_connection() as conn:
             done = [r for r in ara.settle(conn) if not r.get("pending")]
         logger.info("idx ara settle: %s", ", ".join(f"{r['run_date']}->{r['next_date']} top10 {r['top10_locks']}" for r in done) or "nothing due")
-    except Exception as e:                                                  # noqa: BLE001
+    except Exception as e:
         logger.exception("ara settle failed")
         with get_connection() as conn:
             runlog.alert(conn, "warning", "ara", f"ARA settle (prediksi vs aktual) gagal: {str(e)[:200]}")

@@ -60,6 +60,24 @@ def _alert_book(a: dict[str, Any]) -> str | None:
     return rest or None if kind in ("book", "ticket") else None
 
 
+def _close_session_incident(conn: Any) -> None:
+    """A fresh Stockbit session closes the pre-open 'REJECTED' incident (and the web popup that follows it) once Stockbit
+    accepts it. Asked only outside the collector's session window: inside it the collector reconnects with the new token
+    and feed_watch closes the incident when the feed is live, and a key request here could disturb its socket. Never
+    raises: storing the token is what the caller came for."""
+    try:
+        from .feed import collector as fc
+        from .feed import store as fs
+        if fc.in_session():
+            return
+        tok = fs.load_token(conn)
+        if tok and tok.get("access_token") and fc.probe_session(tok["access_token"])[0] == "ok":
+            runlog.resolve(conn, "feed", like="Stockbit session %")
+    except Exception:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+
+
 def make_router(require_token) -> APIRouter:
     router = APIRouter(prefix="/idx", tags=["idx"])
 
@@ -1260,6 +1278,7 @@ def make_router(require_token) -> APIRouter:
             raise HTTPException(status_code=422, detail=f"no usable token: {e}") from None
         with get_connection() as conn:                                           # idx.feed_token is the one place the tokens live
             row = fs.save_token(conn, fields, source=source, provider="stockbit")
+            _close_session_incident(conn)
         response.headers["Access-Control-Allow-Origin"] = "*"
         return {"ok": True, "user_id": row["user_id"], "source": source, "refresh_token": bool(fields.get("refresh_token")),
                 "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None}
@@ -1281,6 +1300,8 @@ def make_router(require_token) -> APIRouter:
                 raise HTTPException(status_code=422, detail=str(e)) from None
             except ProviderError as e:
                 raise HTTPException(status_code=502, detail=str(e)) from None
+            if provider == "stockbit":
+                _close_session_incident(conn)
         return {"renewed": True, "provider": provider, "token": _plain(asdict(st))}
 
     # ---- brokers behind the provider seam (migration 0031; providers/registry.py) --------------------------------
